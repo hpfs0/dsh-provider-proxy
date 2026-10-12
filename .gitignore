@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Build output.
+#
+# `lib/` is generated, and the package carries a `prepare` script so npm
+# rebuilds it automatically — both before `npm publish` and on `npm install`
+# from a git URL. Committing build output would put two copies of the same
+# bundle in history and let them drift apart.
+lib/
+
+# Personal profile backups. This file is a copy of one machine's
+# cordis.patch.yml and must never reach a public repository: it carries that
+# user's provider settings and environment variable names.
+*.backup.yml
+desktop-patch*.yml
+cordis.patch.local.yml
+
+# Packed tarballs from `npm pack`
+*.tgz
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Logs and caches
+*.log
+npm-debug.log*
+.eslintcache
+.tsbuildinfo

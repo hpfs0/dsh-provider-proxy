@@ -1,0 +1,14 @@
+# dsh-provider-proxy bundle layer.
+#
+# Installed automatically when the package is present (package.json declares
+# dsh.bundle.patch). Mounts the Host-side entry that routes the LLM calls of
+# providers the user enabled through their own forward proxy; every other
+# provider — and all other DSH traffic — keeps using the normal network path.
+- insert:
+    - id: provider-proxy
+      name: 'dsh-provider-proxy'
+      # Named explicitly so the settings form has a stable address. An empty
+      # `providers` keeps the plugin dormant: nothing is proxied until the user
+      # turns a provider on in Settings → Provider 代理.
+      config:
+        providers: {}

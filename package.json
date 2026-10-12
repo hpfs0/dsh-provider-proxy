@@ -1,0 +1,72 @@
+{
+  "name": "dsh-provider-proxy",
+  "version": "0.2.0",
+  "description": "DSH 插件：在设置里为每个已启用的 provider 单独配置正向代理（类型 + IP + 端口），未配置的 provider 与其它流量保持直连。",
+  "keywords": ["dsh", "dsh-plugin", "llm", "proxy", "settings", "deepseek"],
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "lib/index.js",
+    "lib/index.js.map",
+    "lib/client.js",
+    "lib/client.js.map",
+    "cordis.patch.yml",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "verify": "npm run typecheck && npm run build && npm test",
+    "prepare": "node scripts/build.mjs"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0",
+    "dsh": ">=0.2.0-rc.1 <0.3.0"
+  },
+  "dsh": {
+    "engines": {
+      "dsh": ">=0.2.0-rc.1 <0.3.0"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {
+    "undici": "^8.11.2"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.0.4"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/schemastery": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@deepseek-ai/schemastery": "~3.18.4",
+    "@types/node": "^22.13.3",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.3"
+  }
+}

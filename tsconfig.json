@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023", "DOM"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "strict": true,
+    "noImplicitOverride": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "types": ["node"]
+  },
+  "//": "Type checking covers the SHIPPED source only. The tests drive the built",
+  "//tests": "bundle through a deliberately loose mock context and import lib/*.js,",
+  "//tests2": "which has no declarations; holding them to strict mode produces only",
+  "//tests3": "noise about the harness, not about the plugin.",
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "lib", "tests"]
+}

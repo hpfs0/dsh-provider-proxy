@@ -1,0 +1,194 @@
+/* dsh-provider-proxy — provider proxy settings page.
+   Tokens only: no literal colours, matching the shared --dsw-* system. */
+
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 640px;
+}
+
+.lead {
+  margin: 0 0 4px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.empty {
+  margin: 0;
+  padding: 16px;
+  border: 1px dashed var(--dsw-alias-border-l1);
+  border-radius: 8px;
+  font-size: 12px;
+  text-align: center;
+  color: var(--dsw-alias-state-idle-primary);
+}
+
+/* ---- provider card ---- */
+
+.card,
+.cardActive {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+.cardActive {
+  border-color: var(--dsw-alias-state-success-primary);
+  background: var(--dsw-alias-bg-layer-2);
+}
+
+.cardHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.cardTitles {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.name {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--dsw-alias-label-primary);
+}
+
+.id {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--dsw-alias-bg-layer-2);
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* ---- status pill ---- */
+
+.pillOn,
+.pillLive,
+.pillOff {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.pillOn {
+  background: var(--dsw-alias-state-success-primary);
+  color: var(--dsw-alias-bg-base);
+}
+
+.pillLive {
+  border: 1px solid var(--dsw-alias-border-l2);
+  color: var(--dsw-alias-label-secondary);
+}
+
+.pillOff {
+  color: var(--dsw-alias-state-idle-primary);
+}
+
+/* ---- toggle ---- */
+
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 2px;
+  font-size: 12px;
+  color: var(--dsw-alias-label-primary);
+  cursor: pointer;
+}
+
+.toggle input {
+  accent-color: var(--dsw-alias-brand-primary);
+  cursor: pointer;
+}
+
+/* ---- fields ---- */
+
+.field {
+  display: grid;
+  grid-template-columns: 96px 1fr;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+}
+
+.label {
+  color: var(--dsw-alias-label-secondary);
+}
+
+.hint {
+  grid-column: 2;
+  margin-top: -2px;
+  font-size: 11px;
+  color: var(--dsw-alias-state-warn-primary);
+}
+
+.input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 6px;
+  outline: none;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 12px;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.input:hover:not(:disabled) {
+  border-color: var(--dsw-alias-border-l2);
+}
+
+.input:focus {
+  border-color: var(--dsw-alias-brand-primary);
+}
+
+.input:disabled {
+  color: var(--dsw-alias-state-idle-primary);
+  background: var(--dsw-alias-bg-layer-2);
+  cursor: not-allowed;
+}
+
+/* ---- diagnostics ---- */
+
+.diag {
+  margin-top: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px;
+  font-size: 11px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.diagSummary {
+  cursor: pointer;
+  color: var(--dsw-alias-state-warn-primary);
+}
+
+.diagList {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  font-family: ui-monospace, monospace;
+  word-break: break-all;
+}
