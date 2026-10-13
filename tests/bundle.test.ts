@@ -15,6 +15,26 @@ test('the bundle exports the plugin contract', () => {
   assert.deepEqual([...PROTOCOLS], ['http', 'https', 'socks5'])
 })
 
+test('the bundle is NOT stale relative to src/', async () => {
+  // These tests import lib/, so editing src/ without rebuilding silently tests
+  // the OLD code. That already happened once: a socks5 source change went
+  // unbuilt, and the suite still "passed" 78/78 while the e2e tests ran against
+  // a table that still rejected socks5 outright. The symptom was a misleading
+  // `fetch failed` rather than an obvious failure.
+  const { readFileSync } = await import('node:fs')
+  const built = readFileSync(new URL('../lib/index.js', import.meta.url), 'utf8')
+  const source = readFileSync(new URL('../src/proxy-table.ts', import.meta.url), 'utf8')
+
+  // A marker that moves whenever the SOCKS5 wiring is added or removed.
+  const inSource = source.includes('Socks5ProxyAgent')
+  const inBundle = built.includes('Socks5ProxyAgent')
+  assert.equal(
+    inBundle,
+    inSource,
+    'lib/index.js is out of date with src/proxy-table.ts — run `npm run build`',
+  )
+})
+
 test('accepts a complete enabled route', () => {
   const route = normalizeRoute('openrouter', base)
   assert.equal(route.enabled, true)
@@ -59,5 +79,5 @@ test('applying the schema produces defaults for omitted fields', () => {
   assert.equal(snapshot.p.enabled, true)
   assert.equal(snapshot.p.protocol, 'http', 'protocol defaults')
   assert.equal(snapshot.p.username, '')
-  assert.equal(snapshot.p.passwordRef, '')
+  assert.equal(snapshot.p.password, '')
 })

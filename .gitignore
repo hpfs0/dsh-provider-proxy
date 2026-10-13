@@ -31,3 +31,8 @@ Thumbs.db
 npm-debug.log*
 .eslintcache
 .tsbuildinfo
+
+# Local-only inspection helper. It opens a hardcoded absolute path to the
+# installed app.asar on this machine, so it can never run for anyone else and
+# is not part of the build, the tests, or the published package.
+asar.mjs

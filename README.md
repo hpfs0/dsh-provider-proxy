@@ -16,13 +16,13 @@ npm run build
 桌面版（**必须先完整打开一次桌面版以初始化 profile，然后完全退出**，否则安装命令会拒绝执行）：
 
 ```sh
-dsh plugin --profile desktop add D:\gitwork\dsh-provider-proxy
+dsh plugin --profile desktop add dsh-provider-proxy
 ```
 
 Web：
 
 ```sh
-dsh plugin --profile web add /absolute/path/to/dsh-provider-proxy
+dsh plugin --profile web add dsh-provider-proxy
 ```
 
 安装后重启对应应用。设置项写在 `$DSH_HOME/profiles/<profile>/cordis.patch.yml`。
@@ -35,10 +35,11 @@ dsh plugin --profile web add /absolute/path/to/dsh-provider-proxy
 | 字段 | 说明 |
 | --- | --- |
 | 开关 | 该 provider 是否走代理 |
-| 类型 | `HTTP` / `HTTPS`（`SOCKS5` 目前未实现，选它会给出提示） |
+| 类型 | `HTTP` / `HTTPS` / `SOCKS5` |
 | IP / 主机 | 只填主机名或 IP，不要带 `http://` 或路径 |
 | 端口 | 1–65535 的整数 |
-| 用户名 | 可选 |
+| 用户名 | 可选（SOCKS5 用，需与密码同时填写） |
+| 密码 | 可选（SOCKS5 用）。作为 SOCKS5 认证口令发给代理 |
 
 列表只包含**已激活**的 provider（`llm.listProviders()` 能列出的那些）。仅在配置里声明、
 但没有实际注册的可配置 provider 不显示——它的请求根本不会被发出去。
@@ -74,13 +75,15 @@ dsh plugin --profile web add /absolute/path/to/dsh-provider-proxy
 
 ## 已知限制
 
-- **SOCKS5 未实现。** `undici` 的 `ProxyAgent` 只会用 HTTP CONNECT 连 HTTP 代理，对 SOCKS5 需要另写连接器。界面里会明确提示，而不是悄悄按 HTTP 路由。
+- **SOCKS5 由 `undici` 内置的 `Socks5ProxyAgent` 实现**（RFC 1928 / RFC 1929），API 稳定性标记为 *Experimental*；`undici` 若在未来移除，需要同步调整。
+- **SOCKS5 的用户名必须与密码同时填写。** 只填用户名会被拒绝并给出提示，而不是静默降级为无认证——否则在强制认证的代理端，报错会指向代理而真正原因是设置缺项。
+- **SOCKS5 不支持 `socks://` 别名与 SOCKS5 over TLS**（`proxyTls`）。
 - **上游若绕过 `globalThis.fetch` 自行建连，则不受影响。** `llm-deepseek` 确认是调用时解析全局 `fetch`；`llm-pi-ai` 走外部 SDK，抓取 `fetch` 的时机未能在源码层面确证。
 - **不支持 PAC**，也不读取系统代理设置。
 - **不改写 `baseURL`** —— 反向代理/中转请直接在 provider 上配置。
 - **代理不可达时**请求照常失败，DSH 既有的重试与错误码语义不变。
-- 代理密码不进 `cordis.patch.yml`：配置里只存凭据引用名，密码本身走 credentials 服务。
-- **代理用户名可用，密码尚未接入。** `passwordRef` 字段已预留并默认留空，UI 上只提供用户名输入框。
+- **SOCKS5 代理密码以明文随设置写入 `cordis.patch.yml`。** 它只会作为选项传给 `Socks5ProxyAgent`，不会出现在日志或诊断报告里的代理 URL 中。
+- **HTTP/HTTPS 代理仍只支持用户名**，密码只对 SOCKS5 生效。
 
 ## 如何验证代理确实生效
 
@@ -95,7 +98,7 @@ dsh plugin --profile web add /absolute/path/to/dsh-provider-proxy
 
 ```sh
 npm run build      # 构建 lib/index.js 与 lib/client.js
-npm test           # 69 个用例，跑的是构建产物
+npm test           # 82 个用例，跑的是构建产物
 npm run typecheck  # 类型检查（仅覆盖 src/）
 npm run verify     # 上面三件事，按顺序
 ```
