@@ -11,11 +11,10 @@
  *   into the running fiber WITHOUT remounting the plugin; the Host then
  *   rebuilds its proxy table. Ordinary (non-volatile) fields would restart the
  *   plugin instead, which is not what a settings page wants.
- * - The proxy password never lives in this Config. `passwordRef` is only the
- *   NAME of a credential held by the credentials service; the secret itself is
- *   written through `ctx.remote.credentials.set`, the same way the Models page
- *   stores provider API keys. A `role('secret')` field would keep the value out
- *   of settings responses but would still write it into cordis.patch.yml.
+ * - The SOCKS5 proxy password lives directly on the route as `password`, so the
+ *   settings page writes it into cordis.patch.yml in the clear. It is only ever
+ *   handed to `Socks5ProxyAgent` as an option, never embedded in the proxy URL
+ *   that is logged or shown in the diagnostics.
  */
 
 import { createRequire } from 'node:module'
@@ -102,8 +101,8 @@ export const ProviderProxyRoute = z.object({
   port: z.number().default(0),
   /** Optional proxy username. */
   username: z.string().default(''),
-  /** NAME of the credentials-service record holding the proxy password. Never the password. */
-  passwordRef: z.string().default(''),
+  /** SOCKS5 proxy password. Only used when `protocol` is `socks5`. */
+  password: z.string().default(''),
 })
 
 export const Config = z.object({
@@ -117,7 +116,7 @@ export interface ProviderProxyRouteValue {
   host: string
   port: number
   username: string
-  passwordRef: string
+  password: string
 }
 
 export interface ConfigShape {

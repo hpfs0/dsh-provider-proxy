@@ -30,7 +30,7 @@ type RouteValue = {
   host: string
   port: number
   username: string
-  passwordRef: string
+  password: string
 }
 
 /** The provider rows we know about, and which of them are actually live. */
@@ -252,7 +252,7 @@ function view(route: Partial<RouteValue> | undefined): RouteValue {
     host: route?.host ?? '',
     port: route?.port ?? 0,
     username: route?.username ?? '',
-    passwordRef: route?.passwordRef ?? '',
+    password: route?.password ?? '',
   }
 }
 
@@ -559,7 +559,7 @@ function renderPage(ctx: any): unknown {
                 h('option', { key: protocol, value: protocol }, protocol.toUpperCase()),
               ),
             ),
-            route.protocol === 'socks5' ? t.socks5Unsupported : undefined,
+            route.protocol === 'socks5' ? t.socks5Hint : undefined,
           ),
           field(
             t.host,
@@ -601,6 +601,27 @@ function renderPage(ctx: any): unknown {
               onChange: (event: any) => bind(row.id, 'username')(event.target.value),
             }),
           ),
+          // Only SOCKS5 authenticates in-band, so only SOCKS5 shows this field.
+          //
+          // The password is stored on the route and therefore written into the
+          // settings file with the rest of the config. It is handed to
+          // Socks5ProxyAgent as an option, never embedded in the proxy URL that
+          // the diagnostics surface.
+          route.protocol === 'socks5'
+            ? field(
+                t.password,
+                h('input', {
+                  className: styles.input,
+                  style: S.input,
+                  disabled,
+                  type: 'password',
+                  autocomplete: 'off',
+                  value: route.password,
+                  onChange: (event: any) => bind(row.id, 'password')(event.target.value),
+                }),
+                t.passwordHint,
+              )
+            : undefined,
         )
       })
 
@@ -643,8 +664,10 @@ const EN = {
   host: 'IP / host',
   port: 'Port',
   username: 'Username',
+  password: 'Password',
   hostHint: 'Host or IP only, without scheme or path.',
-  socks5Unsupported: 'SOCKS5 is not implemented yet; use HTTP or HTTPS.',
+  passwordHint: 'Sent to the SOCKS5 proxy for authentication; stored with this setting.',
+  socks5Hint: 'SOCKS5 tunnels the connection; the proxy resolves the target host name.',
   on: 'proxied',
   live: 'active',
   off: 'direct',
@@ -660,8 +683,10 @@ const ZH = {
   host: 'IP / 主机',
   port: '端口',
   username: '用户名',
+  password: '密码',
   hostHint: '只填主机名或 IP，不要带协议前缀或路径。',
-  socks5Unsupported: 'SOCKS5 尚未实现，请改用 HTTP 或 HTTPS。',
+  passwordHint: '仅作为 SOCKS5 认证口令发送给代理；随该设置一起保存。',
+  socks5Hint: 'SOCKS5 会建立隧道，目标域名由代理端解析。',
   on: '走代理',
   live: '启用中',
   off: '直连',

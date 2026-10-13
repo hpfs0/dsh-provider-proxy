@@ -121,8 +121,8 @@ function makeCtx(snapshotOverrides = {}) {
   const snapshot = {
     value: {
       providers: {
-        sensenova: { enabled: true, protocol: 'http', host: '10.0.0.1', port: 7890, username: '', passwordRef: '' },
-        openai: { enabled: false, protocol: 'http', host: '', port: 0, username: '', passwordRef: '' },
+        sensenova: { enabled: true, protocol: 'http', host: '10.0.0.1', port: 7890, username: '', password: '' },
+        openai: { enabled: false, protocol: 'http', host: '', port: 0, username: '', password: '' },
       },
     },
     revision: 7,
@@ -343,9 +343,74 @@ test('a configured provider is listed even when the catalogue omits it', () => {
   const { mod, restore } = loadBundle()
   try {
     // sensenova lives only in `providers`; the Host published no catalogue row.
-    const { registrations } = mountPlugin(mod, { value: { providers: { sensenova: { enabled: true, protocol: 'http', host: '', port: 0, username: '', passwordRef: '' } }, catalog: {} } })
+    const { registrations } = mountPlugin(mod, { value: { providers: { sensenova: { enabled: true, protocol: 'http', host: '', port: 0, username: '', password: '' } }, catalog: {} } })
     const texts = textsOf(registrations[0].Component())
     assert.ok(texts.includes('sensenova'), 'a configured provider is always listed')
+  } finally {
+    restore()
+  }
+})
+
+test('the password field appears for socks5 and stays hidden otherwise', () => {
+  // The field is CONDITIONAL on the protocol, and every other fixture here uses
+  // `http` — so without this the rendering branch would never be exercised.
+  const socks = () => {
+    const { mod, restore } = loadBundle()
+    const { registrations } = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: {
+            enabled: true,
+            protocol: 'socks5',
+            host: '127.0.0.1',
+            port: 1080,
+            username: 'alice',
+            password: 'hunter2',
+          },
+        },
+      },
+      catalog: {},
+    })
+    const texts = textsOf(registrations[0].Component())
+    restore()
+    return texts
+  }
+  const plain = () => {
+    const { mod, restore } = loadBundle()
+    const { registrations } = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: { enabled: true, protocol: 'http', host: '127.0.0.1', port: 7890, username: '', password: '' },
+        },
+      },
+      catalog: {},
+    })
+    const texts = textsOf(registrations[0].Component())
+    restore()
+    return texts
+  }
+
+  assert.ok(socks().includes('密码'), 'socks5 must offer the password field')
+  assert.ok(!plain().includes('密码'), 'http must not show a SOCKS5-only field')
+})
+
+test('the stored socks5 password renders into the field', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const { registrations } = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: { enabled: true, protocol: 'socks5', host: '127.0.0.1', port: 1080, username: '', password: 'hunter2' },
+        },
+      },
+      catalog: {},
+    })
+    const out = registrations[0].Component()
+
+    // The stored value must reach the input, otherwise a save would overwrite a
+    // configured password with an empty one.
+    const inputs = JSON.stringify(out)
+    assert.ok(inputs.includes('hunter2'), 'the stored password renders into the field')
   } finally {
     restore()
   }
@@ -394,6 +459,7 @@ test('the page lists the providers the Host publishes, automatically', async () 
     for (const control of ['为该 provider 启用代理', '类型', 'HTTP', 'HTTPS', 'SOCKS5', '端口', '用户名']) {
       assert.ok(texts.includes(control), `missing control: ${control}`)
     }
+    assert.ok(!texts.includes('尚未实现'), 'SOCKS5 is implemented; no stale warning may remain')
     assert.ok(!texts.includes('Add'), 'the user must not type a provider id')
     assert.ok(
       requested.includes('/dsh-provider-proxy/providers'),

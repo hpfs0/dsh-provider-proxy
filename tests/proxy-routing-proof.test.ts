@@ -68,7 +68,7 @@ async function mount(port, enabled) {
       get: () => ({
         opencode2dsh: {
           enabled, protocol: 'http', host: '127.0.0.1', port,
-          username: '', passwordRef: '',
+          username: '', password: '',
         },
       }),
     },

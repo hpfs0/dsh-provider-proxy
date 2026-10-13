@@ -27,10 +27,11 @@ dsh plugin --profile web add dsh-provider-proxy
 | 字段 | 说明 |
 | --- | --- |
 | 开关 | 该 provider 是否走代理 |
-| 类型 | `HTTP` / `HTTPS`（`SOCKS5` 目前未实现，选它会给出提示） |
+| 类型 | `HTTP` / `HTTPS` / `SOCKS5` |
 | IP / 主机 | 只填主机名或 IP，不要带 `http://` 或路径 |
 | 端口 | 1–65535 的整数 |
-| 用户名 | 可选 |
+| 用户名 | 可选（SOCKS5 用，需与密码同时填写） |
+| 密码 | 可选（SOCKS5 用）。作为 SOCKS5 认证口令发给代理 |
 
 列表只显示**已激活**的 provider（`llm.listProviders()` 能列出的那些）。已经在 `providers` 里配过代理的条目即使暂时不激活也仍然保留，避免已保存的设置悄悄消失。
 
@@ -58,8 +59,10 @@ dsh plugin --profile web add dsh-provider-proxy
 
 ### 已知限制
 
-- **SOCKS5 未实现。** `undici` 的 `ProxyAgent` 只会用 HTTP CONNECT 连 HTTP 代理，对 SOCKS5 需要另写连接器。界面里会明确提示，而不是悄悄按 HTTP 路由。
-- **代理密码尚未接入。** 用户名可用，密码需手动写入 `passwordRef` 指向的凭据记录。
+- **SOCKS5 由 `undici` 内置的 `Socks5ProxyAgent` 实现**（RFC 1928 / RFC 1929），API 稳定性标记为 *Experimental*。
+- **SOCKS5 的用户名必须与密码同时填写**，否则该路由被拒绝并给出提示，不会静默降级为无认证。
+- **SOCKS5 不支持 `socks://` 别名与 SOCKS5 over TLS。**
+- **SOCKS5 代理密码以明文随设置写入 `cordis.patch.yml`。** 它只会作为选项传给 `Socks5ProxyAgent`，不会出现在日志或诊断报告里的代理 URL 中。
 - **上游若绕过 `globalThis.fetch` 自行建连，则不受影响。** `llm-deepseek` 确认是调用时解析全局 `fetch`；`llm-pi-ai` 走外部 SDK，抓取 `fetch` 的时机未能在源码层面确证。
 - **不支持 PAC**，也不读取系统代理设置。
 - **不改写 `baseURL`** —— 反向代理/中转请直接在 provider 上配置。

@@ -52,7 +52,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
   }
 
   const rebuild = async (): Promise<void> => {
-    const next = await createProxyTable(plainProviders(config))
+    const next = createProxyTable(plainProviders(config))
     const previous = current
     current = next.entries
     problems = next.problems
