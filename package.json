@@ -32,6 +32,15 @@
     "prepare": "node scripts/build.mjs"
   },
   "license": "MIT",
+  "author": "hpfs0 <ydw84312430@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hpfs0/dsh-provider-proxy.git"
+  },
+  "homepage": "https://github.com/hpfs0/dsh-provider-proxy#readme",
+  "bugs": {
+    "url": "https://github.com/hpfs0/dsh-provider-proxy/issues"
+  },
   "engines": {
     "node": "^22.19.0 || >=24.0.0",
     "dsh": ">=0.2.0-rc.1 <0.3.0"

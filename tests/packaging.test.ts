@@ -114,3 +114,19 @@ test('the package description matches what it actually does', () => {
   assert.ok(!pkg.description.includes('Models'), 'the description must not name the abandoned slot')
   assert.match(pkg.description, /provider/i)
 })
+
+test('the package declares where its source lives', () => {
+  // Without a `repository`, a plugin marketplace has nothing to link to and
+  // falls back to guessing a GitHub URL from the package NAME. That guess found
+  // someone else's long-standing `dsh-provider-proxy` repository, so the
+  // installed plugin opened a page that was not this code.
+  const REPO = 'github.com/hpfs0/dsh-provider-proxy'
+  assert.ok(pkg.repository, 'package.json must declare a repository')
+  assert.ok(
+    pkg.repository.url.includes(REPO),
+    `repository.url must point at ${REPO}, got ${pkg.repository.url}`,
+  )
+  assert.ok(pkg.homepage?.includes(REPO), 'homepage must point at the same repository')
+  assert.ok(pkg.bugs?.url?.includes(REPO), 'bugs.url must point at the same repository')
+  assert.ok(pkg.author, 'package.json must declare an author')
+})
