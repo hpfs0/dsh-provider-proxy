@@ -360,11 +360,19 @@ export function apply(ctx: any, config?: ProxyConfig): void {
       )
     }
     web.search = patched
-    // Restore on dispose, undoing only OUR wrapper: another plugin may have
-    // wrapped the method after we did, and its wrapper must survive.
+    // Restore on dispose: `ctx.web` is a Cordis traceable proxy, so READING
+    // `web.search` returns a fresh wrapper every time and `web.search === patched`
+    // can never be true — a guard written that way never fires. The own property
+    // is the only place the installed function is actually observable, and
+    // deleting it is the real restore: it drops our property and lets the
+    // prototype method show through, where reassigning would leave an own
+    // property shadowing the prototype forever.
+    //
+    // A plugin that wrapped the method AFTER us installed its own property, so
+    // this guard deliberately leaves that wrapper in place.
     const registerEffect = typeof wctx?.effect === 'function' ? wctx.effect.bind(wctx) : ctx.effect?.bind(ctx)
     registerEffect?.(() => () => {
-      if (web.search === patched) web.search = original
+      if (Object.getOwnPropertyDescriptor(web, 'search')?.value === patched) delete web.search
     })
   })
 
