@@ -327,6 +327,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
             dispatcher: route.dispatcher,
             provider,
             onHit: () => bump(provider),
+            decide: route.decide,
           },
           next as () => AsyncIterable<unknown>,
         )

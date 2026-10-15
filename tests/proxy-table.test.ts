@@ -231,3 +231,34 @@ test('the reported origin carries no credentials', async () => {
   assert.ok(!entries.get('p').proxyOrigin.includes('hunter2'))
   await closeTable(entries)
 })
+
+test('target-host rules decide proxy vs direct and fail closed', async () => {
+  const { entries } = await createProxyTable({
+    p: {
+      enabled: true,
+      protocol: 'http',
+      host: 'proxy.test',
+      port: 8080,
+      onlyHosts: 'Api.Example.COM, .internal.test',
+      bypassHosts: 'localhost, *.skip.test',
+    },
+  })
+  const decide = entries.get('p').decide
+  assert.equal(decide('api.example.com'), 'proxy', 'an onlyHosts match is proxied, case-insensitively')
+  assert.equal(decide('sub.api.example.com'), 'proxy', 'a subdomain is covered by the rule')
+  assert.equal(decide('internal.test'), 'proxy', 'a leading dot is accepted as a suffix rule')
+  assert.equal(decide('other.test'), 'direct', 'onlyHosts set and not matched goes direct')
+  assert.equal(decide('localhost'), 'direct', 'bypass beats onlyHosts')
+  assert.equal(decide('x.skip.test'), 'direct', 'a *. bypass rule is a suffix match')
+  assert.equal(decide(undefined), 'proxy', 'an unparsable target stays proxied (fail-closed)')
+  await closeTable(entries)
+})
+
+test('without rules every target is proxied', async () => {
+  const { entries } = await createProxyTable({
+    p: { enabled: true, protocol: 'http', host: 'proxy.test', port: 8080 },
+  })
+  assert.equal(entries.get('p').decide('anything.invalid'), 'proxy')
+  assert.equal(entries.get('p').decide(undefined), 'proxy')
+  await closeTable(entries)
+})

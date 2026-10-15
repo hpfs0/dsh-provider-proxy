@@ -31,6 +31,8 @@ type RouteValue = {
   port: number
   username: string
   password: string
+  onlyHosts: string
+  bypassHosts: string
 }
 
 /** The provider rows we know about, and which of them are actually live. */
@@ -270,6 +272,8 @@ function view(route: Partial<RouteValue> | undefined): RouteValue {
     port: route?.port ?? 0,
     username: route?.username ?? '',
     password: route?.password ?? '',
+    onlyHosts: route?.onlyHosts ?? '',
+    bypassHosts: route?.bypassHosts ?? '',
   }
 }
 
@@ -378,6 +382,15 @@ const S = {
     fontSize: '11px',
     color: 'var(--dsw-alias-label-secondary)',
     wordBreak: 'break-all',
+  },
+  advanced: {
+    marginTop: '4px',
+    fontSize: '12px',
+  },
+  advancedSummary: {
+    cursor: 'pointer',
+    fontSize: '11px',
+    color: 'var(--dsw-alias-label-secondary)',
   },
   pill: {
     flex: 'none',
@@ -744,6 +757,36 @@ function renderPage(ctx: any): unknown {
                   : null,
               )
             : null,
+          // Target-host rules, collapsed so the common case stays one short card.
+          h(
+            'details',
+            { className: styles.advanced, style: S.advanced, key: `${row.id}:rules` },
+            h('summary', { className: styles.advancedSummary, style: S.advancedSummary }, t.advanced),
+            field(
+              t.onlyHosts,
+              h('input', {
+                className: styles.input,
+                style: S.input,
+                disabled,
+                placeholder: 'api.example.com',
+                value: route.onlyHosts,
+                onChange: (event: any) => bind(row.id, 'onlyHosts')(event.target.value),
+              }),
+              t.onlyHostsHint,
+            ),
+            field(
+              t.bypassHosts,
+              h('input', {
+                className: styles.input,
+                style: S.input,
+                disabled,
+                placeholder: 'localhost',
+                value: route.bypassHosts,
+                onChange: (event: any) => bind(row.id, 'bypassHosts')(event.target.value),
+              }),
+              t.bypassHostsHint,
+            ),
+          ),
         )
       })
 
@@ -796,6 +839,11 @@ const EN = {
   testRunning: 'Testing…',
   testFailed: 'Test failed',
   exitIpLabel: 'exit IP ',
+  advanced: 'Advanced: target host rules',
+  onlyHosts: 'Proxy only',
+  onlyHostsHint: 'Comma/space separated; when set, only requests to these hosts are proxied (suffix match, * for all).',
+  bypassHosts: 'Bypass',
+  bypassHostsHint: 'Comma/space separated; requests to these hosts go direct, taking priority.',
   socks5Hint: 'SOCKS5 tunnels the connection; the proxy resolves the target host name.',
   on: 'proxied',
   live: 'active',
@@ -822,6 +870,11 @@ const ZH = {
   testRunning: '测试中…',
   testFailed: '测试失败',
   exitIpLabel: '出口 IP ',
+  advanced: '高级：目标域名规则',
+  onlyHosts: '仅走代理',
+  onlyHostsHint: '逗号或空格分隔；非空时只有匹配这些主机的请求走代理（后缀匹配，* 表示全部）。',
+  bypassHosts: '直连',
+  bypassHostsHint: '逗号或空格分隔；匹配这些主机的请求直连，优先于上一项。',
   socks5Hint: 'SOCKS5 会建立隧道，目标域名由代理端解析。',
   on: '走代理',
   live: '启用中',

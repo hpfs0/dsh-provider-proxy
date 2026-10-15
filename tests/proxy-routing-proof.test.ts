@@ -54,7 +54,7 @@ function startRecordingProxy() {
 const settle = () => new Promise(r => setTimeout(r, 150))
 
 /** Mount the Host half with `opencode2dsh` routed at `port`. */
-async function mount(port, enabled) {
+async function mount(port, enabled, extra = {}) {
   const listeners = []
   const ctx = {
     on: (event, fn) => { listeners.push({ event, fn }); return () => {} },
@@ -69,6 +69,7 @@ async function mount(port, enabled) {
         opencode2dsh: {
           enabled, protocol: 'http', host: '127.0.0.1', port,
           username: '', password: '',
+          ...extra,
         },
       }),
     },
@@ -161,4 +162,40 @@ test('the router itself carries a request into the proxy', async () => {
     // createProxyTable is not exported; the waterfall tests cover the path.
   }
   await proxy.close()
+})
+
+// TARGET is https://api.example.com/v1/models, so the rule is written against
+// `example.com` and a target OUTSIDE it proves the rule really fires end to end.
+
+test('onlyHosts that does not cover the target sends the request direct', async () => {
+  const proxy = await startRecordingProxy()
+  try {
+    const stream = await mount(proxy.port, true, { onlyHosts: 'other.example.net' })
+    await drive(stream, 'opencode2dsh')
+    assert.equal(proxy.seen.length, 0, 'a target outside onlyHosts must not touch the proxy')
+  } finally {
+    await proxy.close()
+  }
+})
+
+test('onlyHosts that covers the target still traverses the proxy', async () => {
+  const proxy = await startRecordingProxy()
+  try {
+    const stream = await mount(proxy.port, true, { onlyHosts: 'example.com' })
+    await drive(stream, 'opencode2dsh')
+    assert.equal(proxy.seen.length, 1, 'a covered target must traverse the proxy')
+  } finally {
+    await proxy.close()
+  }
+})
+
+test('a bypassHosts match sends the request direct', async () => {
+  const proxy = await startRecordingProxy()
+  try {
+    const stream = await mount(proxy.port, true, { bypassHosts: 'example.com' })
+    await drive(stream, 'opencode2dsh')
+    assert.equal(proxy.seen.length, 0, 'a bypassed target must not touch the proxy')
+  } finally {
+    await proxy.close()
+  }
 })

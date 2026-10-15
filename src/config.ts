@@ -103,6 +103,13 @@ export const ProviderProxyRoute = z.object({
   username: z.string().default(''),
   /** SOCKS5 proxy password. Only used when `protocol` is `socks5`. */
   password: z.string().default(''),
+  /**
+   * Comma/space-separated TARGET hosts that must go through the proxy. Empty
+   * means "no restriction" (every target is proxied). Suffix match.
+   */
+  onlyHosts: z.string().default(''),
+  /** Comma/space-separated TARGET hosts that bypass the proxy; takes priority over `onlyHosts`. */
+  bypassHosts: z.string().default(''),
 })
 
 export const Config = z.object({
@@ -123,6 +130,8 @@ export interface ProviderProxyRouteValue {
   port: number
   username: string
   password: string
+  onlyHosts: string
+  bypassHosts: string
 }
 
 export interface ConfigShape {
@@ -145,7 +154,13 @@ export function normalizeRoute(
     ? (route as unknown as { get: () => ProviderProxyRouteValue }).get()
     : (route as ProviderProxyRouteValue)
 
-  if (!value.enabled) return { ...value, port: value.port || 0 }
+  // Host rules are stored normalized (trimmed, lower-cased) so the matcher built
+  // from them never re-parses on the hot path. WHATWG URL already lower-cases a
+  // hostname, so both sides of the comparison agree.
+  const onlyHosts = value.onlyHosts.trim().toLowerCase()
+  const bypassHosts = value.bypassHosts.trim().toLowerCase()
+
+  if (!value.enabled) return { ...value, port: value.port || 0, onlyHosts, bypassHosts }
 
   const host = value.host.trim()
   if (host.length === 0) {
@@ -159,5 +174,5 @@ export function normalizeRoute(
       `dsh-provider-proxy: provider "${provider}" 的代理端口无效（需为 1-65535 的整数）`,
     )
   }
-  return { ...value, host, username: value.username.trim() }
+  return { ...value, host, username: value.username.trim(), onlyHosts, bypassHosts }
 }

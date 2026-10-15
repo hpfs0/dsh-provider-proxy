@@ -49,6 +49,15 @@ dsh plugin --profile web add dsh-provider-proxy
 
 每张卡片在**该 provider 已启用代理**时还有一个 **测试** 按钮：点它会让 Host 通过**该 provider 自己的代理**发一次请求，回报延迟与（探测目标返回时）出口 IP。探测目标默认是 `https://api.ipify.org?format=json`，可用顶层设置 `testUrl` 换成自建的回显服务。代理不可达时它会明确失败，而不是假通过。
 
+卡片里还有一个折叠的 **高级：目标域名规则**，按**目标主机**决定是否走代理：
+
+| 字段 | 说明 |
+| --- | --- |
+| `仅走代理`（`onlyHosts`） | 逗号或空格分隔。非空时，只有匹配这些主机的请求走代理，其余直连。 |
+| `直连`（`bypassHosts`） | 逗号或空格分隔。匹配这些主机的请求直连，优先于 `onlyHosts`。 |
+
+两者都按后缀匹配（`example.com` 覆盖 `api.example.com`），`*` 表示全部，大小写不敏感。**默认是 fail-closed**：启用了代理的路由默认走代理，只有「`bypassHosts` 命中」与「`onlyHosts` 非空且未命中」两种显式例外才直连；解析不出目标主机时**仍走代理**，避免畸形 URL 把带凭据的请求悄悄直连出去。
+
 > **为什么是独立设置页，而不是内嵌在 Models 的 provider 卡片里？**
 > 本插件最早按卡片内嵌（`settings.models.provider-card`）实现，但那个槽位是 keyed 的、
 > 按 provider 命名空间派发，第三方注册在 0.2.0-rc.1 上始终匹配不上——不报错、不发请求、
@@ -80,6 +89,7 @@ dsh plugin --profile web add dsh-provider-proxy
 - **SOCKS5 由 `undici` 内置的 `Socks5ProxyAgent` 实现**（RFC 1928 / RFC 1929），API 稳定性标记为 *Experimental*；`undici` 若在未来移除，需要同步调整。
 - **代理认证字段的成对规则。** SOCKS5 下填了用户名就必须填密码（`Socks5ProxyAgent` 只在两者齐备时才发起认证；只填用户名会被拒绝并给出提示，而不是静默降级为无认证）；HTTP/HTTPS 下填了密码就必须填用户名（基本认证无法只发密码）。不合规则的配置会被拒绝并在「连接诊断」里说明，而不是被静默忽略——否则在强制认证的代理端，报错会指向代理而真正原因是设置缺项。HTTP/HTTPS 下只填用户名仍照常工作。
 - **SOCKS5 不支持 `socks://` 别名与 SOCKS5 over TLS**（`proxyTls`）。
+- **`bypassHosts` 命中时由本机解析并连接目标**（DNS 不经过代理）。SOCKS5 下这一点后果最明显：命中的域名不再由代理端解析，本机 DNS 会暴露该次查询。
 - **上游若绕过 `globalThis.fetch` 自行建连，则不受影响。** `llm-deepseek` 确认是调用时解析全局 `fetch`；`llm-pi-ai` 走外部 SDK，抓取 `fetch` 的时机未能在源码层面确证。
 - **不支持 PAC**，也不读取系统代理设置。
 - **不改写 `baseURL`** —— 反向代理/中转请直接在 provider 上配置。

@@ -24,6 +24,8 @@ export interface RouteEntry {
   /** Normalized proxy origin, for diagnostics only. Never logged with credentials. */
   proxyOrigin: string
   dispatcher: DispatcherLike
+  /** Whether one request's target host goes through the proxy or stays direct. */
+  decide: (host: string | undefined) => 'proxy' | 'direct'
 }
 
 function proxyUrl(route: ProviderProxyRouteValue): string {
@@ -91,6 +93,54 @@ function createDispatcher(
 }
 
 /**
+ * Split a host-rule string into matchable entries.
+ *
+ * Entries are separated by commas or whitespace. A leading `.` or `*.` is
+ * dropped — both spellings mean the same suffix match as a bare host — and the
+ * whole string was already lower-cased by `normalizeRoute`, so matching is
+ * case-insensitive on both sides.
+ */
+function parseHostList(raw: string): string[] {
+  return raw
+    .split(/[,\s]+/)
+    .map(entry => entry.trim().replace(/^\*?\./, ''))
+    .filter(entry => entry.length > 0)
+}
+
+/**
+ * Whether a host is covered by one rule list.
+ *
+ * `*` matches everything; otherwise a rule matches the host itself or any
+ * subdomain of it (`example.com` covers `api.example.com`).
+ */
+function hostMatches(host: string, rules: readonly string[]): boolean {
+  for (const rule of rules) {
+    if (rule === '*') return true
+    if (host === rule || host.endsWith(`.${rule}`)) return true
+  }
+  return false
+}
+
+/**
+ * Build the proxy/direct decision for one route.
+ *
+ * FAIL-CLOSED: an enabled route proxies by default, and only two things send a
+ * request direct — a `bypassHosts` match, and an `onlyHosts` list that does not
+ * cover the target. A target whose host cannot be parsed (`undefined`) stays on
+ * the proxy, so a malformed URL cannot quietly leak a credentialed request.
+ */
+function buildDecide(route: ProviderProxyRouteValue): (host: string | undefined) => 'proxy' | 'direct' {
+  const only = parseHostList(route.onlyHosts)
+  const bypass = parseHostList(route.bypassHosts)
+  return host => {
+    if (host === undefined) return 'proxy'
+    if (hostMatches(host, bypass)) return 'direct'
+    if (only.length > 0 && !hostMatches(host, only)) return 'direct'
+    return 'proxy'
+  }
+}
+
+/**
  * Build the dispatchers for every enabled, valid route.
  *
  * Invalid routes are skipped rather than thrown: one mistyped provider must not
@@ -149,7 +199,12 @@ export function createProxyTable(
       problems.set(provider, error instanceof Error ? error.message : String(error))
       continue
     }
-    entries.set(provider, { provider, proxyOrigin: displayOrigin(route, url), dispatcher })
+    entries.set(provider, {
+      provider,
+      proxyOrigin: displayOrigin(route, url),
+      dispatcher,
+      decide: buildDecide(route),
+    })
   }
 
   return { entries, problems }

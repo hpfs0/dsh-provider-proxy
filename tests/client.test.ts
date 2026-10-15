@@ -490,6 +490,20 @@ test('an enabled provider offers the connection self-check', async () => {
   }
 })
 
+test('the cards expose the advanced target-host rules', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const texts = textsOf(render())
+    assert.ok(texts.includes('高级：目标域名规则'), 'the advanced rules section must be rendered')
+    assert.ok(texts.includes('仅走代理'), 'the onlyHosts field must be rendered')
+  } finally {
+    restore()
+  }
+})
+
 test('a Host that reports no providers degrades to the empty message', async () => {
   const { mod, restore } = loadBundle(async () => ({
     ok: true,
