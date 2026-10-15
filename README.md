@@ -38,8 +38,8 @@ dsh plugin --profile web add dsh-provider-proxy
 | 类型 | `HTTP` / `HTTPS` / `SOCKS5` |
 | IP / 主机 | 只填主机名或 IP，不要带 `http://` 或路径 |
 | 端口 | 1–65535 的整数 |
-| 用户名 | 可选（SOCKS5 用，需与密码同时填写） |
-| 密码 | 可选（SOCKS5 用）。作为 SOCKS5 认证口令发给代理 |
+| 用户名 | 可选 |
+| 密码 | 可选。作为代理认证口令发给代理（`HTTP` / `HTTPS` / `SOCKS5` 均支持） |
 
 列表只包含**已激活**的 provider（`llm.listProviders()` 能列出的那些）。仅在配置里声明、
 但没有实际注册的可配置 provider 不显示——它的请求根本不会被发出去。
@@ -76,14 +76,13 @@ dsh plugin --profile web add dsh-provider-proxy
 ## 已知限制
 
 - **SOCKS5 由 `undici` 内置的 `Socks5ProxyAgent` 实现**（RFC 1928 / RFC 1929），API 稳定性标记为 *Experimental*；`undici` 若在未来移除，需要同步调整。
-- **SOCKS5 的用户名必须与密码同时填写。** 只填用户名会被拒绝并给出提示，而不是静默降级为无认证——否则在强制认证的代理端，报错会指向代理而真正原因是设置缺项。
+- **代理认证字段的成对规则。** SOCKS5 下填了用户名就必须填密码（`Socks5ProxyAgent` 只在两者齐备时才发起认证；只填用户名会被拒绝并给出提示，而不是静默降级为无认证）；HTTP/HTTPS 下填了密码就必须填用户名（基本认证无法只发密码）。不合规则的配置会被拒绝并在「连接诊断」里说明，而不是被静默忽略——否则在强制认证的代理端，报错会指向代理而真正原因是设置缺项。HTTP/HTTPS 下只填用户名仍照常工作。
 - **SOCKS5 不支持 `socks://` 别名与 SOCKS5 over TLS**（`proxyTls`）。
 - **上游若绕过 `globalThis.fetch` 自行建连，则不受影响。** `llm-deepseek` 确认是调用时解析全局 `fetch`；`llm-pi-ai` 走外部 SDK，抓取 `fetch` 的时机未能在源码层面确证。
 - **不支持 PAC**，也不读取系统代理设置。
 - **不改写 `baseURL`** —— 反向代理/中转请直接在 provider 上配置。
 - **代理不可达时**请求照常失败，DSH 既有的重试与错误码语义不变。
-- **SOCKS5 代理密码以明文随设置写入 `cordis.patch.yml`。** 它只会作为选项传给 `Socks5ProxyAgent`，不会出现在日志或诊断报告里的代理 URL 中。
-- **HTTP/HTTPS 代理仍只支持用户名**，密码只对 SOCKS5 生效。
+- **代理密码以明文随设置写入 `cordis.patch.yml`。** HTTP/HTTPS 的密码会拼进交给 `undici` 的代理 URL（`ProxyAgent` 由此生成 `Proxy-Authorization`），SOCKS5 的密码只作为选项传给 `Socks5ProxyAgent`；两者都不会出现在日志或诊断里的代理 URL——那里只显示不含凭据的 origin。
 
 ## 如何验证代理确实生效
 

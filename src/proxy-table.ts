@@ -27,13 +27,26 @@ export interface RouteEntry {
 }
 
 function proxyUrl(route: ProviderProxyRouteValue): string {
-  const auth =
+  // A colon in the username stays percent-encoded (%3A), never rewritten to a
+  // literal ':'. A WHATWG URL splits userinfo at the FIRST literal colon, so a
+  // literal one coming from a name like `a:b` would be misread as the password
+  // separator (`a` + password `b`); keeping it encoded is exactly what lets
+  // undici's decodeURIComponent restore the real name. Earlier code rewrote %3A
+  // back to ':' — that was subtly wrong.
+  //
+  // HTTP/HTTPS carry credentials in the userinfo, which undici turns into a
+  // Proxy-Authorization header. SOCKS5 embeds the USERNAME only: its password is
+  // handed to Socks5ProxyAgent as an option, so it never enters this string (nor
+  // the credential-free origin derived from it).
+  const credentials =
     route.username.length === 0
       ? ''
-      : `${encodeURIComponent(route.username).replace(/%3A/gi, ':')}@`
+      : route.password.length > 0 && route.protocol !== 'socks5'
+        ? `${encodeURIComponent(route.username)}:${encodeURIComponent(route.password)}@`
+        : `${encodeURIComponent(route.username)}@`
   // IPv6 literals need brackets in a URL authority.
   const host = route.host.includes(':') && !route.host.startsWith('[') ? `[${route.host}]` : route.host
-  return `${route.protocol}://${auth}${host}:${route.port}`
+  return `${route.protocol}://${credentials}${host}:${route.port}`
 }
 
 /**
@@ -111,6 +124,19 @@ export function createProxyTable(
       problems.set(
         provider,
         'dsh-provider-proxy: SOCKS5 配置了用户名但没有密码；请补全密码或清空用户名',
+      )
+      continue
+    }
+
+    // An HTTP/HTTPS password WITHOUT a username is refused outright: basic auth
+    // cannot send a password alone, and silently dropping it would leave the user
+    // believing a credential is in use when it is not. This is the symmetric
+    // counterpart of the SOCKS5 guard above and lives on the same `problems`
+    // path, so both mistakes are reported the same way.
+    if (route.protocol !== 'socks5' && route.password.length > 0 && route.username.length === 0) {
+      problems.set(
+        provider,
+        'dsh-provider-proxy: 配置了代理密码但没有用户名；请补全用户名或清空密码',
       )
       continue
     }

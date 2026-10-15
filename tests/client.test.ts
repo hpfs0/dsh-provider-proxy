@@ -351,19 +351,19 @@ test('a configured provider is listed even when the catalogue omits it', () => {
   }
 })
 
-test('the password field appears for socks5 and stays hidden otherwise', () => {
-  // The field is CONDITIONAL on the protocol, and every other fixture here uses
-  // `http` — so without this the rendering branch would never be exercised.
-  const socks = () => {
+test('the password field appears for every protocol', () => {
+  // The field used to be SOCKS5-only; it is now shown for HTTP/HTTPS as well,
+  // because those send the password as Proxy-Authorization.
+  const render = (protocol: string, port: number) => {
     const { mod, restore } = loadBundle()
     const { registrations } = mountPlugin(mod, {
       value: {
         providers: {
           sensenova: {
             enabled: true,
-            protocol: 'socks5',
+            protocol,
             host: '127.0.0.1',
-            port: 1080,
+            port,
             username: 'alice',
             password: 'hunter2',
           },
@@ -375,23 +375,10 @@ test('the password field appears for socks5 and stays hidden otherwise', () => {
     restore()
     return texts
   }
-  const plain = () => {
-    const { mod, restore } = loadBundle()
-    const { registrations } = mountPlugin(mod, {
-      value: {
-        providers: {
-          sensenova: { enabled: true, protocol: 'http', host: '127.0.0.1', port: 7890, username: '', password: '' },
-        },
-      },
-      catalog: {},
-    })
-    const texts = textsOf(registrations[0].Component())
-    restore()
-    return texts
-  }
 
-  assert.ok(socks().includes('密码'), 'socks5 must offer the password field')
-  assert.ok(!plain().includes('密码'), 'http must not show a SOCKS5-only field')
+  assert.ok(render('socks5', 1080).includes('密码'), 'socks5 must offer the password field')
+  assert.ok(render('http', 7890).includes('密码'), 'http must offer the password field')
+  assert.ok(render('https', 8443).includes('密码'), 'https must offer the password field')
 })
 
 test('the stored socks5 password renders into the field', async () => {

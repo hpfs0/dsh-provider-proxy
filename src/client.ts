@@ -601,27 +601,24 @@ function renderPage(ctx: any): unknown {
               onChange: (event: any) => bind(row.id, 'username')(event.target.value),
             }),
           ),
-          // Only SOCKS5 authenticates in-band, so only SOCKS5 shows this field.
-          //
-          // The password is stored on the route and therefore written into the
-          // settings file with the rest of the config. It is handed to
-          // Socks5ProxyAgent as an option, never embedded in the proxy URL that
-          // the diagnostics surface.
-          route.protocol === 'socks5'
-            ? field(
-                t.password,
-                h('input', {
-                  className: styles.input,
-                  style: S.input,
-                  disabled,
-                  type: 'password',
-                  autocomplete: 'off',
-                  value: route.password,
-                  onChange: (event: any) => bind(row.id, 'password')(event.target.value),
-                }),
-                t.passwordHint,
-              )
-            : undefined,
+          // Every transport accepts a password now: SOCKS5 hands it to
+          // Socks5ProxyAgent as an option, HTTP/HTTPS embed it in the proxy URL
+          // userinfo (undici turns that into Proxy-Authorization). It is stored on
+          // the route, so it lands in the settings file with the rest of the
+          // config; the diagnostics only ever surface a credential-free origin.
+          field(
+            t.password,
+            h('input', {
+              className: styles.input,
+              style: S.input,
+              disabled,
+              type: 'password',
+              autocomplete: 'off',
+              value: route.password,
+              onChange: (event: any) => bind(row.id, 'password')(event.target.value),
+            }),
+            route.protocol === 'socks5' ? t.passwordHint : t.passwordHintProxy,
+          ),
         )
       })
 
@@ -667,6 +664,7 @@ const EN = {
   password: 'Password',
   hostHint: 'Host or IP only, without scheme or path.',
   passwordHint: 'Sent to the SOCKS5 proxy for authentication; stored with this setting.',
+  passwordHintProxy: 'Sent to the proxy as an authentication password; stored with this setting.',
   socks5Hint: 'SOCKS5 tunnels the connection; the proxy resolves the target host name.',
   on: 'proxied',
   live: 'active',
@@ -686,6 +684,7 @@ const ZH = {
   password: '密码',
   hostHint: '只填主机名或 IP，不要带协议前缀或路径。',
   passwordHint: '仅作为 SOCKS5 认证口令发送给代理；随该设置一起保存。',
+  passwordHintProxy: '作为代理认证口令发送给代理；随该设置一起保存。',
   socks5Hint: 'SOCKS5 会建立隧道，目标域名由代理端解析。',
   on: '走代理',
   live: '启用中',
