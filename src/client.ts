@@ -545,9 +545,8 @@ function renderPage(ctx: any): unknown {
   /**
    * Run the Host's self-check for one provider.
    *
-   * A SUCCESSFUL check also refreshes the catalogue: the request the check just
-   * proved also bumped that provider's hit counter, and the count is otherwise
-   * only read once, at mount.
+   * The check is not routed traffic, so it never changes the hit count; the count
+   * on the card is read at mount and stays put until the page reloads.
    */
   const runTest = (id: string): void => {
     setTests((current: any) => ({ ...current, [id]: { pending: true } }))
@@ -560,11 +559,6 @@ function renderPage(ctx: any): unknown {
         })
         const body = await response.json()
         setTests((current: any) => ({ ...current, [id]: testResultFrom(body, t) }))
-        if (body?.ok === true) {
-          void fetchCatalog()
-            .then(catalog => catalogueSetter?.(catalog))
-            .catch(() => {})
-        }
       } catch (error: any) {
         setTests((current: any) => ({
           ...current,

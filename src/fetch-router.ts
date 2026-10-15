@@ -44,8 +44,6 @@ export interface DispatcherLike {
 
 export interface RouterStore {
   dispatcher: DispatcherLike
-  /** The provider this scope belongs to; carried so the store is self-describing. */
-  provider: string
   /** Called once per request that actually leaves through the proxy. */
   onHit?: () => void
   /**

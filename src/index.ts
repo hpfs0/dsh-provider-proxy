@@ -362,7 +362,6 @@ export function apply(ctx: any, config?: ProxyConfig): void {
       return router.run(
         {
           dispatcher: route.dispatcher,
-          provider: WEB_SEARCH_KEY,
           onHit: () => bump(WEB_SEARCH_KEY),
           decide: route.decide,
         },
@@ -399,7 +398,6 @@ export function apply(ctx: any, config?: ProxyConfig): void {
         return router.wrap(
           {
             dispatcher: route.dispatcher,
-            provider,
             onHit: () => bump(provider),
             decide: route.decide,
           },
