@@ -658,7 +658,7 @@ function renderPage(ctx: any): unknown {
               route.enabled || (hits[row.id] ?? 0) > 0
                 ? h(
                     'span',
-                    { className: styles.hits, style: S.hits },
+                    { style: S.hits },
                     `${t.hitCountPrefix}${hits[row.id] ?? 0}${t.hitCountSuffix}`,
                   )
                 : null,
@@ -765,11 +765,10 @@ function renderPage(ctx: any): unknown {
           route.enabled
             ? h(
                 'div',
-                { className: styles.testRow, style: S.testRow, key: `${row.id}:test` },
+                { style: S.testRow, key: `${row.id}:test` },
                 h(
                   'button',
                   {
-                    className: styles.testButton,
                     style: S.testButton,
                     type: 'button',
                     disabled: result?.pending === true,
@@ -780,7 +779,7 @@ function renderPage(ctx: any): unknown {
                 result?.pending === false
                   ? h(
                       'span',
-                      { className: styles.testResult, style: S.testResult },
+                      { style: S.testResult },
                       result.ok === true
                         ? [
                             // Only the latency carries the band colour; the exit IP
@@ -800,8 +799,8 @@ function renderPage(ctx: any): unknown {
           // Target-host rules, collapsed so the common case stays one short card.
           h(
             'details',
-            { className: styles.advanced, style: S.advanced, key: `${row.id}:rules` },
-            h('summary', { className: styles.advancedSummary, style: S.advancedSummary }, t.advanced),
+            { style: S.advanced, key: `${row.id}:rules` },
+            h('summary', { style: S.advancedSummary }, t.advanced),
             field(
               t.onlyHosts,
               h('input', {
