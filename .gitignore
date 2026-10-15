@@ -26,6 +26,10 @@ Thumbs.db
 .vscode/
 *.swp
 
+# Agent planning scratch: plan/spec files written by the IDE agent for the
+# current task. Local-only working context, not part of the plugin or its docs.
+.trae/
+
 # Logs and caches
 *.log
 npm-debug.log*
