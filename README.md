@@ -38,8 +38,8 @@ dsh plugin --profile web add dsh-provider-proxy
 | 类型 | `HTTP` / `HTTPS` / `SOCKS5` |
 | IP / 主机 | 只填主机名或 IP，不要带 `http://` 或路径 |
 | 端口 | 1–65535 的整数 |
-| 用户名 | 可选 |
-| 密码 | 可选。作为代理认证口令发给代理（`HTTP` / `HTTPS` / `SOCKS5` 均支持） |
+| 用户名 | 可选（与密码成对填写） |
+| 密码 | 可选（与用户名成对填写）。作为代理认证口令发给代理（`HTTP` / `HTTPS` / `SOCKS5` 均支持） |
 
 列表只包含**已激活**的 provider（`llm.listProviders()` 能列出的那些）。仅在配置里声明、
 但没有实际注册的可配置 provider 不显示——它的请求根本不会被发出去。
@@ -89,7 +89,7 @@ dsh plugin --profile web add dsh-provider-proxy
 ## 已知限制
 
 - **SOCKS5 由 `undici` 内置的 `Socks5ProxyAgent` 实现**（RFC 1928 / RFC 1929），API 稳定性标记为 *Experimental*；`undici` 若在未来移除，需要同步调整。
-- **代理认证字段的成对规则。** SOCKS5 下填了用户名就必须填密码（`Socks5ProxyAgent` 只在两者齐备时才发起认证；只填用户名会被拒绝并给出提示，而不是静默降级为无认证）；HTTP/HTTPS 下填了密码就必须填用户名（基本认证无法只发密码）。不合规则的配置会被拒绝并在「连接诊断」里说明，而不是被静默忽略——否则在强制认证的代理端，报错会指向代理而真正原因是设置缺项。HTTP/HTTPS 下只填用户名仍照常工作。
+- **代理认证字段成对填写：用户名与密码要么都填，要么都不填。** 只填任一项都会被拒绝并给出提示。SOCKS5 侧的依据是 `Socks5ProxyAgent` 仅在两者齐备时才发起认证——只填用户名会静默广告无认证，只填密码则密码根本不会被发送（对开放代理能用，对要求认证的代理必然失败，且失败原因看起来像密码错误）；HTTP/HTTPS 侧基本认证本可只发用户名（`alice:`，空密码），这里仍按成对拒绝：半填的凭据几乎总是漏填，三种传输共用一条规则比「哪种传输能承载哪种组合」更好记。代价如实写明——凭据真的使用空密码的代理无法在这里配置。不合规则的配置会被拒绝，并在该卡片点「测试」时给出原因，而不是被静默忽略——否则在强制认证的代理端，报错会指向代理而真正原因是设置缺项。
 - **SOCKS5 不支持 `socks://` 别名与 SOCKS5 over TLS**（`proxyTls`）。
 - **`bypassHosts` 命中时由本机解析并连接目标**（DNS 不经过代理）。SOCKS5 下这一点后果最明显：命中的域名不再由代理端解析，本机 DNS 会暴露该次查询。
 - **`web_search` 可以走代理，`web_fetch` 不行。** 搜索 provider（`dsh-web-search-deepseek`）用全局 `fetch`，插件通过包裹 `ctx.web.search` 把它送进代理作用域；这条成立的前提是：工具每次调用都重新取 `ctx.web.search`，且 provider 的 `search()` 是 await-to-completion（不是惰性消费的流）。`web_fetch` 则用 `undici` 自带的 `dispatcher`（来自官方的进程级 env 策略），没有 per-provider 注入点，本插件覆盖不到——需要覆盖它请改用 `HTTP_PROXY` 之类的环境变量。

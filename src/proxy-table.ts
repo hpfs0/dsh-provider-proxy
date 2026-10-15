@@ -178,6 +178,19 @@ export function createProxyTable(
       continue
     }
 
+    // The mirror of the rule above, for the same reason: undici only offers
+    // USERNAME_PASSWORD when BOTH parts are present, so a lone password is worse
+    // than useless — the client advertises NO_AUTH. The tunnel would succeed
+    // against an open proxy and fail against the one the credential was entered
+    // for, which reads as "the password is wrong" when it was never sent.
+    if (route.protocol === 'socks5' && route.password.length > 0 && route.username.length === 0) {
+      problems.set(
+        provider,
+        'dsh-provider-proxy: SOCKS5 配置了密码但没有用户名；请补全用户名或清空密码',
+      )
+      continue
+    }
+
     // An HTTP/HTTPS password WITHOUT a username is refused outright: basic auth
     // cannot send a password alone, and silently dropping it would leave the user
     // believing a credential is in use when it is not. This is the symmetric
@@ -187,6 +200,22 @@ export function createProxyTable(
       problems.set(
         provider,
         'dsh-provider-proxy: 配置了代理密码但没有用户名；请补全用户名或清空密码',
+      )
+      continue
+    }
+
+    // The mirror for HTTP/HTTPS, where the asymmetry is worth spelling out:
+    // undici WOULD send `Basic base64("alice:")` — a username with an EMPTY
+    // password — so nothing is dropped and a lenient proxy accepts it. It is
+    // refused anyway, because a half-filled credential is nearly always a
+    // half-typed one, and "both or neither" is one rule to hold across all three
+    // transports instead of "the pairing each transport happens to carry". The
+    // cost is real and documented in the README: a proxy whose credential truly
+    // has an empty password cannot be configured here.
+    if (route.protocol !== 'socks5' && route.username.length > 0 && route.password.length === 0) {
+      problems.set(
+        provider,
+        'dsh-provider-proxy: 配置了代理用户名但没有密码；请补全密码或清空用户名',
       )
       continue
     }

@@ -164,6 +164,21 @@ test('a socks5 username without a password is refused, never downgraded to NO_AU
   assert.match(problems.get('s'), /密码/)
 })
 
+test('a socks5 password without a username is refused, never silently dropped', async () => {
+  // The mirror of the rule above, and for the same reason: undici only offers
+  // USERNAME_PASSWORD when BOTH parts are present
+  // (`if (options.username && options.password)` in socks5-client.js), so a lone
+  // password is not just ignored at the proxy — the client advertises NO_AUTH.
+  // The tunnel would work against an open proxy and fail against the one the
+  // credential was entered for.
+  const { entries, problems } = await createProxyTable({
+    s: { enabled: true, protocol: 'socks5', host: '127.0.0.1', port: 1080, password: 'hunter2' },
+  })
+  assert.equal(entries.size, 0)
+  assert.match(problems.get('s'), /密码/)
+  assert.match(problems.get('s'), /用户名/)
+})
+
 test('an http password without a username is refused', async () => {
   // Basic auth cannot send a password alone; dropping it silently would leave the
   // user believing a credential is in use when it is not.
@@ -173,6 +188,19 @@ test('an http password without a username is refused', async () => {
   assert.equal(entries.size, 0)
   assert.match(problems.get('p'), /密码/)
   assert.match(problems.get('p'), /用户名/)
+})
+
+test('an http username without a password is refused', async () => {
+  // Basic auth CAN carry a username with an empty password (`alice:`), so nothing
+  // would be dropped here. The half-filled credential is still refused: paired
+  // credentials are one rule for every transport, and `alice:` is virtually never
+  // what someone who typed a username meant.
+  const { entries, problems } = await createProxyTable({
+    p: { enabled: true, protocol: 'http', host: 'proxy.test', port: 8080, username: 'alice' },
+  })
+  assert.equal(entries.size, 0)
+  assert.match(problems.get('p'), /用户名/)
+  assert.match(problems.get('p'), /密码/)
 })
 
 test('an http username with a password builds a dispatcher', async () => {
