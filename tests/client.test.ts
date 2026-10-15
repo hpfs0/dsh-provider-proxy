@@ -7,6 +7,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
 const clientSource = readFileSync(new URL('../src/client.ts', import.meta.url), 'utf8')
+const clientCss = readFileSync(new URL('../src/client.css', import.meta.url), 'utf8')
 const bundle = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
 
 const React = {
@@ -940,6 +941,74 @@ test('rendered elements actually carry hashed CSS-Modules classes', () => {
   } finally {
     restore()
   }
+})
+
+test('the self-check button carries the class its hover rule is written for', () => {
+  // The failure this guards is silent in both directions: an element reading
+  // `styles.testButton` while the sheet has no such rule renders unstyled (the
+  // class map answers `undefined`), and a rule without the element is dead CSS.
+  // A hover state cannot be written inline, so this pair is the only way it
+  // ships at all.
+  const { mod, restore } = loadBundle()
+  try {
+    const { registrations } = mountPlugin(mod)
+    registrations[0].Component()
+    const names = []
+    const walk = node => {
+      if (node === null || typeof node !== 'object') return
+      if (Array.isArray(node)) return node.forEach(walk)
+      if (typeof node.props?.className === 'string') names.push(node.props.className)
+      if (node.children) walk(node.children)
+    }
+    walk(registrations[0].Component())
+
+    assert.ok(
+      names.some(name => name.endsWith('_testButton')),
+      'the self-check button must carry a hashed class',
+    )
+    assert.match(
+      clientCss,
+      /\.testButton:hover/,
+      'the sheet must carry the hover rule that class is for',
+    )
+    // The declarations must be IMPORTANT. The button's base border and background
+    // are inline, and the cascade sorts a style attribute after every author rule,
+    // so a plain declaration here matches, ships, and still loses — which is
+    // exactly how the first version of this rule shipped dead.
+    const hoverRule = clientCss.match(/\.testButton:hover:not\(:disabled\)\s*\{([^}]*)\}/)?.[1] ?? ''
+    assert.match(hoverRule, /border-color:[^;]*!important/, 'the hover border must outrank the inline base')
+    assert.match(hoverRule, /background:[^;]*!important/, 'the hover background must outrank the inline base')
+    // And the tokens must be visible ones: in the light theme every `bg-layer`
+    // token resolves to the SAME colour, so a layer swap renders as nothing.
+    assert.match(
+      hoverRule,
+      /background:[^;]*var\(--dsw-alias-interactive-bg-hover\)/,
+      'the hover fill must be the app hover token, not a background layer',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('the input state rules win over the inline base they are written against', () => {
+  // Same trap as the self-check button: `border`, `background` and `color` are
+  // inline on every field, and the cascade sorts the style attribute after every
+  // author rule. Without `!important` these rules matched, shipped, and did
+  // nothing — hover, focus and the disabled look were all dead until now.
+  const ruleFor = re => clientCss.match(re)?.[1] ?? ''
+  const hover = ruleFor(/\.input:hover:not\(:disabled\)\s*\{([^}]*)\}/)
+  const focus = ruleFor(/\.input:focus\s*\{([^}]*)\}/)
+  const disabled = ruleFor(/\.input:disabled\s*\{([^}]*)\}/)
+
+  assert.ok(hover !== '', 'the hover rule must exist')
+  assert.match(hover, /border-color:[^;]*!important/, 'the hover border must outrank the inline base')
+  assert.ok(
+    !/border-color:[^;]*(border-l1|border-l2)\b/.test(hover),
+    'l1→l2 is a 4%→10% black step on a 1px line: invisible. Hover needs a stronger token.',
+  )
+  assert.match(focus, /border-color:[^;]*!important/, 'the focus border must outrank the inline base')
+  assert.match(disabled, /background:[^;]*!important/, 'the disabled background must outrank it too')
+  assert.match(disabled, /color:[^;]*!important/, 'so must the disabled colour')
 })
 
 test('the stylesheet is injected at materialization, not at script load', () => {

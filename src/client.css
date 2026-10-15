@@ -156,18 +156,46 @@
   transition: border-color 120ms ease, background 120ms ease;
 }
 
+/* The base look of every input is INLINE too, so these three state rules only
+   ever take effect as author-important declarations — same reason as the
+   self-check button above. `cursor` has no inline base and needs none, and the
+   hover border uses `l3` because `l1`→`l2` is a 4%→10% black step nobody can
+   see. */
+
 .input:hover:not(:disabled) {
-  border-color: var(--dsw-alias-border-l2);
+  border-color: var(--dsw-alias-border-l3) !important;
 }
 
 .input:focus {
-  border-color: var(--dsw-alias-brand-primary);
+  border-color: var(--dsw-alias-brand-primary) !important;
 }
 
 .input:disabled {
-  color: var(--dsw-alias-state-idle-primary);
-  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-state-idle-primary) !important;
+  background: var(--dsw-alias-bg-layer-2) !important;
   cursor: not-allowed;
+}
+
+/* ---- self-check ---- */
+
+/* The hover state is the one thing an inline style cannot express, which is why
+   this element carries a class at all. Layout stays inline.
+
+   Two traps, both hit before this comment existed:
+   - `!important` is load-bearing: the base border and background are INLINE, and
+     the cascade sorts a style attribute after every author rule, so a plain
+     declaration here would ship, match, and still lose.
+   - the TOKENS must be visible ones. `bg-layer-1/2/3` all resolve to
+     `neutral-bluish-00` in the light theme, so a layer swap is a no-op there, and
+     `border-l1`→`l2` is 4%→10% black on a 1px line. The app's own hovers use
+     `interactive-bg-hover`; using it here is what makes the feedback exist. */
+.testButton {
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.testButton:hover:not(:disabled) {
+  border-color: var(--dsw-alias-border-l3) !important;
+  background: var(--dsw-alias-interactive-bg-hover) !important;
 }
 
 /* ---- diagnostics ---- */

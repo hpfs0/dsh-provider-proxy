@@ -801,6 +801,7 @@ function renderPage(ctx: any): unknown {
                 h(
                   'button',
                   {
+                    className: styles.testButton,
                     style: S.testButton,
                     type: 'button',
                     disabled: result?.pending === true,
