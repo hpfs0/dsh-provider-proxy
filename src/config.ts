@@ -108,6 +108,12 @@ export const ProviderProxyRoute = z.object({
 export const Config = z.object({
   /** Per-provider proxy routes, keyed by provider route id (e.g. `sensenova`). */
   providers: vol(z.dict(ProviderProxyRoute).default({})),
+  /**
+   * URL the per-provider connection self-check requests THROUGH the proxy.
+   * Volatile, so a settings write does not remount the plugin; the default is an
+   * IP echo service, which lets the check report the exit address.
+   */
+  testUrl: vol(z.string().default('https://api.ipify.org?format=json')),
 })
 
 export interface ProviderProxyRouteValue {
@@ -121,6 +127,7 @@ export interface ProviderProxyRouteValue {
 
 export interface ConfigShape {
   providers: { readonly [provider: string]: ProviderProxyRouteValue }
+  testUrl: string
 }
 
 /**

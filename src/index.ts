@@ -6,6 +6,8 @@
  * traffic, keeps using the normal network path.
  */
 
+import { fetch as undiciFetch } from 'undici'
+
 import { acquireFetchRouter } from './fetch-router.js'
 import { closeTable, createProxyTable, type RouteEntry } from './proxy-table.js'
 import type { ProviderProxyRouteValue } from './config.js'
@@ -23,6 +25,8 @@ export const inject = ['llm']
 interface ProxyConfig {
   /** The provider dictionary, or the Volatile wrapper around it. */
   readonly providers?: unknown
+  /** The self-check URL, or the Volatile wrapper around it. */
+  readonly testUrl?: unknown
 }
 
 function plainProviders(
@@ -49,6 +53,112 @@ export function apply(ctx: any, config?: ProxyConfig): void {
   const hits = new Map<string, number>()
   const bump = (provider: string): void => {
     hits.set(provider, (hits.get(provider) ?? 0) + 1)
+  }
+
+  /** Where the self-check sends its request; overridable so a blocked echo host can be replaced. */
+  const DEFAULT_TEST_URL = 'https://api.ipify.org?format=json'
+  const TEST_TIMEOUT_MS = 10_000
+  /** One in-flight check per provider, so a repeated click cannot multiply outbound requests. */
+  const selfChecks = new Map<string, Promise<Record<string, unknown>>>()
+
+  /** Read `testUrl`, which is Volatile under the Loader and therefore needs `.get()`. */
+  const plainTestUrl = (): string => {
+    const raw = (config as { testUrl?: unknown } | undefined)?.testUrl
+    const snapshot = (raw as { get?: () => unknown } | undefined)?.get
+    const value = typeof snapshot === 'function' ? snapshot.call(raw) : raw
+    return typeof value === 'string' && value.trim().length > 0 ? value.trim() : DEFAULT_TEST_URL
+  }
+
+  /**
+   * Every error reachable from one throw: the value itself, its `cause` chain,
+   * and any `AggregateError.errors` on the way.
+   *
+   * `fetch` wraps a connection failure as `TypeError: fetch failed` and hides
+   * the real `ECONNREFUSED` in `cause`, so a classifier that only reads the top
+   * value cannot tell "the proxy is down" from "the target refused".
+   */
+  const causesOf = (error: unknown): unknown[] => {
+    const out: unknown[] = []
+    const seen = new Set<unknown>()
+    const queue: unknown[] = [error]
+    while (queue.length > 0) {
+      const node = queue.shift()
+      if (node === null || typeof node !== 'object' || seen.has(node)) continue
+      seen.add(node)
+      out.push(node)
+      const cause = (node as { cause?: unknown }).cause
+      if (cause !== undefined && cause !== null) queue.push(cause)
+      const errors = (node as { errors?: unknown }).errors
+      if (Array.isArray(errors)) queue.push(...errors)
+    }
+    return out
+  }
+
+  /** Classify a self-check failure so the report points at the hop that actually failed. */
+  const classifyTestError = (error: unknown): { kind: string; error: string } => {
+    const chain = causesOf(error)
+    const names = chain
+      .map(node => (node as { name?: unknown }).name)
+      .filter((name): name is string => typeof name === 'string')
+    const codes = chain
+      .map(node => (node as { code?: unknown }).code)
+      .filter((code): code is string => typeof code === 'string')
+    const message = error instanceof Error ? error.message : String(error)
+    if (names.includes('TimeoutError') || names.includes('AbortError')) {
+      return { kind: 'timeout', error: `超时（${TEST_TIMEOUT_MS / 1000}s）：代理或目标无响应` }
+    }
+    const connectivity = ['ECONNREFUSED', 'ENOTFOUND', 'EHOSTUNREACH', 'ENETUNREACH', 'ECONNRESET', 'EAI_AGAIN']
+    const code = connectivity.find(candidate => codes.includes(candidate))
+    if (code !== undefined) {
+      return { kind: 'proxy-unreachable', error: `代理不可达（${code}）：${message}` }
+    }
+    if (names.includes('ProxyAuthentication') || message.includes('407')) {
+      return { kind: 'proxy-auth', error: `代理要求认证（HTTP 407）：${message}` }
+    }
+    return { kind: 'target', error: `请求失败：${message}` }
+  }
+
+  /**
+   * Send one request through a provider's OWN dispatcher and report the outcome.
+   *
+   * The dispatcher is passed EXPLICITLY rather than by entering the router's
+   * AsyncLocalStorage scope: that scope intercepts `globalThis.fetch`, so a plain
+   * `undici.fetch` call would go straight out and report a broken proxy as a
+   * success — the one failure this whole feature exists to eliminate.
+   */
+  const runSelfCheck = async (provider: string): Promise<Record<string, unknown>> => {
+    const route = current.get(provider)
+    if (route === undefined) {
+      return { ok: false, kind: 'no-route', error: `provider "${provider}" 未启用代理` }
+    }
+    const started = performance.now()
+    try {
+      const response = await undiciFetch(plainTestUrl(), {
+        dispatcher: route.dispatcher,
+        signal: AbortSignal.timeout(TEST_TIMEOUT_MS),
+      } as never)
+      const ms = Math.round(performance.now() - started)
+      // 407 is the proxy demanding credentials: a RESULT, not a throw.
+      if (response.status === 407) {
+        return { ok: false, ms, status: 407, kind: 'proxy-auth', error: '代理要求认证（HTTP 407）' }
+      }
+      let exitIp: string | undefined
+      try {
+        const body = (await response.json()) as { ip?: unknown } | null
+        if (typeof body?.ip === 'string' && body.ip.length > 0) exitIp = body.ip
+      } catch {
+        // A non-JSON echo still proves the request crossed the proxy.
+      }
+      return {
+        ok: response.ok === true,
+        ms,
+        status: response.status,
+        ...(exitIp === undefined ? {} : { exitIp }),
+        kind: response.ok === true ? 'ok' : 'target',
+      }
+    } catch (error) {
+      return { ok: false, ms: Math.round(performance.now() - started), ...classifyTestError(error) }
+    }
   }
 
   // One line on activation so a user can tell "mounted" from "not mounted" in
@@ -137,6 +247,63 @@ export function apply(ctx: any, config?: ProxyConfig): void {
             res.writeHead(500, { 'content-type': 'application/json' })
             res.end(JSON.stringify({ providers: [], error: String(error) }))
           }
+        },
+      })
+
+      // Connection self-check: one request through the provider's own dispatcher.
+      // POST-only, the provider must be in the LIVE table, and at most one check
+      // per provider is in flight — so this cannot become an outbound amplifier.
+      wctx?.webServer?.register?.({
+        kind: 'exact',
+        path: '/dsh-provider-proxy/test',
+        handler: (req: any, res: any) => {
+          const send = (status: number, payload: unknown): void => {
+            const text = JSON.stringify(payload)
+            res.writeHead(status, {
+              'content-type': 'application/json; charset=utf-8',
+              'cache-control': 'no-store',
+              'content-length': Buffer.byteLength(text),
+            })
+            res.end(text)
+          }
+          if (req?.method !== 'POST') {
+            send(405, { ok: false, kind: 'method', error: '自检端点只接受 POST' })
+            return
+          }
+          if (typeof req.on !== 'function') {
+            send(400, { ok: false, kind: 'body', error: '无法读取请求体' })
+            return
+          }
+          const chunks: Buffer[] = []
+          req.on('data', (chunk: Buffer) => chunks.push(chunk))
+          req.on('error', () => send(400, { ok: false, kind: 'body', error: '读取请求体失败' }))
+          req.on('end', () => {
+            void (async () => {
+              let provider: unknown
+              try {
+                const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')
+                provider = (parsed as { provider?: unknown })?.provider
+              } catch {
+                send(400, { ok: false, kind: 'body', error: '请求体不是合法 JSON' })
+                return
+              }
+              if (typeof provider !== 'string' || provider.length === 0) {
+                send(400, { ok: false, kind: 'body', error: '缺少 provider' })
+                return
+              }
+              let pending = selfChecks.get(provider)
+              if (pending === undefined) {
+                pending = runSelfCheck(provider)
+                selfChecks.set(provider, pending)
+                void pending.finally(() => {
+                  if (selfChecks.get(provider) === pending) selfChecks.delete(provider)
+                })
+              }
+              send(200, await pending)
+            })().catch((error: unknown) => {
+              send(500, { ok: false, kind: 'internal', error: String(error) })
+            })
+          })
         },
       })
     } catch (error) {

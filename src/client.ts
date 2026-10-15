@@ -220,6 +220,9 @@ function knownProviders(configured: Record<string, RouteValue>, published: Provi
  */
 const CATALOG_PATH = '/dsh-provider-proxy/providers'
 
+/** Where the Host runs a per-provider connection self-check. */
+const TEST_PATH = '/dsh-provider-proxy/test'
+
 /**
  * The setter the lazy catalogue initializer resolves through.
  *
@@ -355,6 +358,27 @@ const S = {
     color: 'var(--dsw-alias-label-secondary)',
     whiteSpace: 'nowrap',
   },
+  testRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    flexWrap: 'wrap',
+  },
+  testButton: {
+    padding: '5px 12px',
+    border: '1px solid var(--dsw-alias-border-l1)',
+    borderRadius: '6px',
+    background: 'var(--dsw-alias-bg-layer-1)',
+    color: 'var(--dsw-alias-label-primary)',
+    font: 'inherit',
+    fontSize: '12px',
+    cursor: 'pointer',
+  },
+  testResult: {
+    fontSize: '11px',
+    color: 'var(--dsw-alias-label-secondary)',
+    wordBreak: 'break-all',
+  },
   pill: {
     flex: 'none',
     padding: '2px 10px',
@@ -457,6 +481,55 @@ function renderPage(ctx: any): unknown {
   const [draft, setDraft] = (React.useState ?? ((v: any) => [v, () => {}]))({})
   const edit = (id: string, field: string, value: unknown) =>
     setDraft((current: any) => ({ ...current, [id]: { ...current[id], [field]: value } }))
+
+  // Self-check outcomes keyed by provider id: `{ pending: true }` while the Host
+  // is testing, then `{ pending: false, text }` with the rendered result.
+  const [tests, setTests] = (React.useState ?? ((v: any) => [v, () => {}]))({})
+
+  /** Turn the Host's self-check payload into one line. */
+  const describeTest = (body: any): string => {
+    if (body?.ok === true) {
+      const ip =
+        typeof body.exitIp === 'string' && body.exitIp.length > 0
+          ? ` · ${t.exitIpLabel}${body.exitIp}`
+          : ''
+      return `✓ ${body.ms} ms${ip}`
+    }
+    const detail = typeof body?.error === 'string' && body.error.length > 0 ? body.error : t.testFailed
+    return `✗ ${detail}`
+  }
+
+  /**
+   * Run the Host's self-check for one provider.
+   *
+   * A SUCCESSFUL check also refreshes the catalogue: the same request the check
+   * just proved also bumped that provider's hit counter, and the count is
+   * otherwise only read once, at mount.
+   */
+  const runTest = (id: string): void => {
+    setTests((current: any) => ({ ...current, [id]: { pending: true } }))
+    void (async () => {
+      try {
+        const response = await globalThis.fetch(TEST_PATH, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', accept: 'application/json' },
+          body: JSON.stringify({ provider: id }),
+        })
+        const body = await response.json()
+        setTests((current: any) => ({ ...current, [id]: { pending: false, text: describeTest(body) } }))
+        if (body?.ok === true) {
+          void fetchCatalog()
+            .then(catalog => catalogueSetter?.(catalog))
+            .catch(() => {})
+        }
+      } catch (error: any) {
+        setTests((current: any) => ({
+          ...current,
+          [id]: { pending: false, text: `✗ ${error?.message ?? error}` },
+        }))
+      }
+    })()
+  }
 
   const rows = knownProviders({ ...configured, ...draft }, published)
 
@@ -649,6 +722,28 @@ function renderPage(ctx: any): unknown {
             }),
             route.protocol === 'socks5' ? t.passwordHint : t.passwordHintProxy,
           ),
+          // The self-check only makes sense for a route that is ON; a disabled
+          // route is not in the Host's table, so there is nothing to test.
+          route.enabled
+            ? h(
+                'div',
+                { className: styles.testRow, style: S.testRow, key: `${row.id}:test` },
+                h(
+                  'button',
+                  {
+                    className: styles.testButton,
+                    style: S.testButton,
+                    type: 'button',
+                    disabled: tests[row.id]?.pending === true,
+                    onClick: () => runTest(row.id),
+                  },
+                  tests[row.id]?.pending === true ? t.testRunning : t.testButton,
+                ),
+                typeof tests[row.id]?.text === 'string'
+                  ? h('span', { className: styles.testResult, style: S.testResult }, tests[row.id].text)
+                  : null,
+              )
+            : null,
         )
       })
 
@@ -697,6 +792,10 @@ const EN = {
   passwordHintProxy: 'Sent to the proxy as an authentication password; stored with this setting.',
   hitCountPrefix: '',
   hitCountSuffix: ' proxied',
+  testButton: 'Test',
+  testRunning: 'Testing…',
+  testFailed: 'Test failed',
+  exitIpLabel: 'exit IP ',
   socks5Hint: 'SOCKS5 tunnels the connection; the proxy resolves the target host name.',
   on: 'proxied',
   live: 'active',
@@ -719,6 +818,10 @@ const ZH = {
   passwordHintProxy: '作为代理认证口令发送给代理；随该设置一起保存。',
   hitCountPrefix: '已代理 ',
   hitCountSuffix: ' 次',
+  testButton: '测试',
+  testRunning: '测试中…',
+  testFailed: '测试失败',
+  exitIpLabel: '出口 IP ',
   socks5Hint: 'SOCKS5 会建立隧道，目标域名由代理端解析。',
   on: '走代理',
   live: '启用中',

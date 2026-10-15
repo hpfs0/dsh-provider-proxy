@@ -477,6 +477,19 @@ test('the page shows how many requests crossed the proxy', async () => {
   }
 })
 
+test('an enabled provider offers the connection self-check', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const texts = textsOf(render())
+    assert.ok(texts.includes('测试'), 'an enabled provider must offer the self-check button')
+  } finally {
+    restore()
+  }
+})
+
 test('a Host that reports no providers degrades to the empty message', async () => {
   const { mod, restore } = loadBundle(async () => ({
     ok: true,

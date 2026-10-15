@@ -47,6 +47,8 @@ dsh plugin --profile web add dsh-provider-proxy
 
 保存立即对新请求生效，不需要重启；正在进行中的流会继续用它启动时的那条连接。
 
+每张卡片在**该 provider 已启用代理**时还有一个 **测试** 按钮：点它会让 Host 通过**该 provider 自己的代理**发一次请求，回报延迟与（探测目标返回时）出口 IP。探测目标默认是 `https://api.ipify.org?format=json`，可用顶层设置 `testUrl` 换成自建的回显服务。代理不可达时它会明确失败，而不是假通过。
+
 > **为什么是独立设置页，而不是内嵌在 Models 的 provider 卡片里？**
 > 本插件最早按卡片内嵌（`settings.models.provider-card`）实现，但那个槽位是 keyed 的、
 > 按 provider 命名空间派发，第三方注册在 0.2.0-rc.1 上始终匹配不上——不报错、不发请求、
@@ -82,6 +84,7 @@ dsh plugin --profile web add dsh-provider-proxy
 - **不支持 PAC**，也不读取系统代理设置。
 - **不改写 `baseURL`** —— 反向代理/中转请直接在 provider 上配置。
 - **代理不可达时**请求照常失败，DSH 既有的重试与错误码语义不变。
+- **连接自检依赖 `testUrl` 可达。** 默认的回显主机在部分网络下可能不可达，会让自检误报失败；请通过 `testUrl` 换成自建回显服务。自检只接受 `POST`，同一 provider 的多次点击会共享同一次在飞请求，不会被当成外呼放大器。
 - **代理密码以明文随设置写入 `cordis.patch.yml`。** HTTP/HTTPS 的密码会拼进交给 `undici` 的代理 URL（`ProxyAgent` 由此生成 `Proxy-Authorization`），SOCKS5 的密码只作为选项传给 `Socks5ProxyAgent`；两者都不会出现在日志或诊断里的代理 URL——那里只显示不含凭据的 origin。
 
 ## 如何验证代理确实生效
