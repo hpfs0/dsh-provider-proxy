@@ -518,6 +518,38 @@ test('a fast self-check latency is rendered in the success colour', async () => 
   }
 })
 
+test('a failed self-check is rendered in the error colour, without the Host-log prefix', async () => {
+  const { mod, restore } = loadBundle(async url => ({
+    ok: true,
+    status: 200,
+    json: async () =>
+      String(url).includes('/test')
+        ? { ok: false, kind: 'proxy-unreachable', error: '代理不可达（ECONNREFUSED）：connect failed' }
+        : { providers: [{ id: 'sensenova', name: 'SenseNova', live: true }] },
+  }))
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const button = findButton(render())
+    assert.ok(button, 'the self-check button must be rendered')
+    button.props.onClick()
+    await settle()
+    const tree = JSON.stringify(render())
+    const texts = textsOf(render())
+    assert.ok(
+      texts.includes('✗ 代理不可达（ECONNREFUSED）：connect failed'),
+      'the failure text is rendered verbatim — no prefix, no generic fallback',
+    )
+    assert.ok(
+      tree.includes('dsw-alias-state-error-primary'),
+      'a failure is the answer, so it takes the error colour rather than the secondary one',
+    )
+  } finally {
+    restore()
+  }
+})
+
 test('the cards expose the advanced target-host rules', async () => {
   const { mod, restore } = loadBundle()
   try {

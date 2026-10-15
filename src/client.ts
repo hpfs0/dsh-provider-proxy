@@ -417,6 +417,15 @@ const S = {
     color: 'var(--dsw-alias-label-secondary)',
     wordBreak: 'break-all',
   },
+  /**
+   * A failed check is the answer, not decoration: it takes the error colour and
+   * a heavier weight, unlike the latency band colour which only tints a number
+   * that is printed anyway.
+   */
+  testFailure: {
+    color: 'var(--dsw-alias-state-error-primary, #f85149)',
+    fontWeight: '500',
+  },
   advanced: {
     marginTop: '4px',
     fontSize: '12px',
@@ -789,7 +798,7 @@ function renderPage(ctx: any): unknown {
                             ),
                             result.ip === undefined ? null : ` · ${t.exitIpLabel}${result.ip}`,
                           ]
-                        : `✗ ${result.error}`,
+                        : h('span', { key: 'err', style: S.testFailure }, `✗ ${result.error}`),
                     )
                   : null,
               )
