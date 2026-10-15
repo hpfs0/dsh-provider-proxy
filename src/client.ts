@@ -226,21 +226,35 @@ const CATALOG_PATH = '/dsh-provider-proxy/providers'
  * It is republished after every render, so the newest one always wins, and a
  * promise that settles after an unmount writes to a harmless no-op.
  */
-let catalogueSetter: ((rows: ProviderRow[]) => void) | undefined = () => {}
+let catalogueSetter: ((catalog: Catalog) => void) | undefined = () => {}
+
+/** What the Host endpoint publishes: the provider rows plus per-provider hit counts. */
+type Catalog = { rows: ProviderRow[]; hits: Record<string, number> }
 
 /** Read the Host's provider catalogue. Same-origin, so no token is needed. */
-async function fetchProviders(): Promise<ProviderRow[]> {
+async function fetchCatalog(): Promise<Catalog> {
   const response = await globalThis.fetch(CATALOG_PATH, { headers: { accept: 'application/json' } })
   if (!response.ok) throw new Error(`Host answered ${response.status}`)
   const body = await response.json()
   const list = Array.isArray(body?.providers) ? body.providers : []
-  return list
+  const rows = list
     .filter((row: any) => typeof row?.id === 'string' && row.id.length > 0)
     .map((row: any) => ({
       id: row.id,
       name: typeof row.name === 'string' && row.name.length > 0 ? row.name : row.id,
       live: row.live === true,
     }))
+  // The Host counts requests it routed through each provider's proxy. Anything
+  // malformed is dropped rather than rendered, so a bad payload cannot put a
+  // non-numeric string on the page.
+  const hits: Record<string, number> = {}
+  const published = body?.hits
+  if (published !== null && typeof published === 'object') {
+    for (const [id, count] of Object.entries(published)) {
+      if (typeof count === 'number' && Number.isFinite(count)) hits[id] = count
+    }
+  }
+  return { rows, hits }
 }
 
 const byName = (a: ProviderRow, b: ProviderRow): number => a.name.localeCompare(b.name)
@@ -335,6 +349,12 @@ const S = {
     fontSize: '11px',
     color: 'var(--dsw-alias-label-secondary)',
   },
+  hits: {
+    flex: 'none',
+    fontSize: '11px',
+    color: 'var(--dsw-alias-label-secondary)',
+    whiteSpace: 'nowrap',
+  },
   pill: {
     flex: 'none',
     padding: '2px 10px',
@@ -411,19 +431,20 @@ function renderPage(ctx: any): unknown {
   // render: a render must have no side effects, and doing so also shifted the
   // hook order between passes.
   const [state, setState] = (React.useState ?? ((fn: any) => [fn(), () => {}]))(() => {
-    void fetchProviders()
-      .then(rows => catalogueSetter?.(rows))
+    void fetchCatalog()
+      .then(catalog => catalogueSetter?.(catalog))
       .catch((error: any) => {
         note(`provider 列表获取失败：${error?.message ?? error}`)
-        catalogueSetter?.([])
+        catalogueSetter?.({ rows: [], hits: {} })
       })
-    return { rows: undefined as ProviderRow[] | undefined, pending: true }
+    return { rows: undefined as ProviderRow[] | undefined, hits: {} as Record<string, number>, pending: true }
   })
   // The setter is published right after the hook so the initializer's promise
   // can reach it. It is re-published on every render, so the latest wins.
-  catalogueSetter = rows => setState({ rows, pending: false })
+  catalogueSetter = catalog => setState({ rows: catalog.rows, hits: catalog.hits, pending: false })
 
   const published = state.rows ?? []
+  const hits = state.hits ?? {}
   note(
     `provider 列表：来自 Host 共 ${published.length} 个（${published.map((r: ProviderRow) => r.id).join('、') || '无'}）`,
   )
@@ -521,6 +542,15 @@ function renderPage(ctx: any): unknown {
               { className: styles.cardTitles, style: S.titles },
               h('span', { className: styles.name, style: S.name }, row.name),
               h('span', { className: styles.id, style: S.id }, row.id),
+              // A disabled route can never have hits, so "0" there would only add
+              // noise; the count shows once the route is on (or has counted).
+              route.enabled || (hits[row.id] ?? 0) > 0
+                ? h(
+                    'span',
+                    { className: styles.hits, style: S.hits },
+                    `${t.hitCountPrefix}${hits[row.id] ?? 0}${t.hitCountSuffix}`,
+                  )
+                : null,
             ),
             h(
               'span',
@@ -665,6 +695,8 @@ const EN = {
   hostHint: 'Host or IP only, without scheme or path.',
   passwordHint: 'Sent to the SOCKS5 proxy for authentication; stored with this setting.',
   passwordHintProxy: 'Sent to the proxy as an authentication password; stored with this setting.',
+  hitCountPrefix: '',
+  hitCountSuffix: ' proxied',
   socks5Hint: 'SOCKS5 tunnels the connection; the proxy resolves the target host name.',
   on: 'proxied',
   live: 'active',
@@ -685,6 +717,8 @@ const ZH = {
   hostHint: '只填主机名或 IP，不要带协议前缀或路径。',
   passwordHint: '仅作为 SOCKS5 认证口令发送给代理；随该设置一起保存。',
   passwordHintProxy: '作为代理认证口令发送给代理；随该设置一起保存。',
+  hitCountPrefix: '已代理 ',
+  hitCountSuffix: ' 次',
   socks5Hint: 'SOCKS5 会建立隧道，目标域名由代理端解析。',
   on: '走代理',
   live: '启用中',

@@ -44,6 +44,16 @@ export interface DispatcherLike {
 
 export interface RouterStore {
   dispatcher: DispatcherLike
+  /** The provider this scope belongs to; carried so the store is self-describing. */
+  provider: string
+  /** Called once per request that actually leaves through the proxy. */
+  onHit?: () => void
+  /**
+   * Decide whether one request is proxied or sent directly, given its target
+   * host (`undefined` when the input carries no parsable URL). Absent means
+   * "always proxy within this scope".
+   */
+  decide?: (host: string | undefined) => 'proxy' | 'direct'
 }
 
 /** Shared across every plugin instance in one process, keyed so copies cooperate. */
@@ -55,6 +65,26 @@ interface RouterState {
   originalFetch: typeof globalThis.fetch
   routedFetch: typeof globalThis.fetch
   descriptor?: PropertyDescriptor
+}
+
+/**
+ * The host a fetch input targets, or `undefined` when it carries none.
+ *
+ * `new URL` THROWS on a relative or malformed input instead of returning
+ * `undefined`, so every branch is guarded; an unparsable input falls through to
+ * `undefined`, and the scope's `decide` decides what that means (the plugin's
+ * route treats it as "keep proxying", i.e. fail-closed).
+ */
+function requestHost(input: unknown): string | undefined {
+  try {
+    if (typeof input === 'string') return new URL(input).hostname
+    if (input instanceof URL) return input.hostname
+    const url = (input as { url?: unknown } | null | undefined)?.url
+    if (typeof url === 'string') return new URL(url).hostname
+  } catch {
+    return undefined
+  }
+  return undefined
 }
 
 function installSharedRouter(): RouterState {
@@ -83,6 +113,14 @@ function installSharedRouter(): RouterState {
     if (init !== undefined && init !== null && (init as { dispatcher?: unknown }).dispatcher !== undefined) {
       return originalFetch.call(globalThis, input, init)
     }
+    // A `direct` verdict from the route's target-host rules keeps the native
+    // path, exactly as if there were no scope at all.
+    if (active.decide !== undefined && active.decide(requestHost(input)) === 'direct') {
+      return originalFetch.call(globalThis, input, init)
+    }
+    // Counted at INITIATION: the request is about to cross the proxy. A stream
+    // abandoned later still counts, which is the documented semantics.
+    active.onHit?.()
     // Same undici realm as the dispatcher — Node's own fetch would reject it.
     // The init is passed through structurally: the DOM `RequestInit` and the
     // undici one disagree on `body`/`duplex`, so both are erased here.
@@ -159,10 +197,10 @@ function contextualIterable(
 }
 
 export interface FetchRouter {
-  /** Run one synchronous callback inside the provider's scope. */
-  run(dispatcher: DispatcherLike, callback: () => unknown): unknown
+  /** Run one synchronous callback inside the scope. */
+  run(store: RouterStore, callback: () => unknown): unknown
   /** Wrap a lazy stream so every consumption step keeps the scope. */
-  wrap(dispatcher: DispatcherLike, factory: () => AsyncIterable<unknown>): AsyncIterable<unknown>
+  wrap(store: RouterStore, factory: () => AsyncIterable<unknown>): AsyncIterable<unknown>
   /** Release this holder; the shim is removed once the last holder releases. */
   release(): void
 }
@@ -173,11 +211,11 @@ export function acquireFetchRouter(): FetchRouter {
   let released = false
 
   return {
-    run(dispatcher, callback) {
-      return state.storage.run({ dispatcher }, callback)
+    run(store, callback) {
+      return state.storage.run(store, callback)
     },
-    wrap(dispatcher, factory) {
-      return contextualIterable(state.storage, { dispatcher }, factory)
+    wrap(store, factory) {
+      return contextualIterable(state.storage, store, factory)
     },
     release() {
       if (released) return

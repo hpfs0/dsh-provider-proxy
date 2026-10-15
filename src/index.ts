@@ -43,6 +43,14 @@ export function apply(ctx: any, config?: ProxyConfig): void {
   let problems = new Map<string, string>()
   let closed = false
 
+  // Request counts, keyed by provider id. Held OUTSIDE the proxy table so a
+  // rebuild (a settings write) never resets them; only a plugin reload does.
+  // Counted at request initiation — see fetch-router.ts.
+  const hits = new Map<string, number>()
+  const bump = (provider: string): void => {
+    hits.set(provider, (hits.get(provider) ?? 0) + 1)
+  }
+
   // One line on activation so a user can tell "mounted" from "not mounted" in
   // the Host log without guessing. Never prints a credential.
   try {
@@ -114,7 +122,11 @@ export function apply(ctx: any, config?: ProxyConfig): void {
         path: '/dsh-provider-proxy/providers',
         handler: (_req: unknown, res: any) => {
           try {
-            const text = JSON.stringify({ ...catalog(), problems: Object.fromEntries(problems) })
+            const text = JSON.stringify({
+              ...catalog(),
+              problems: Object.fromEntries(problems),
+              hits: Object.fromEntries(hits),
+            })
             res.writeHead(200, {
               'content-type': 'application/json; charset=utf-8',
               'cache-control': 'no-store',
@@ -141,8 +153,16 @@ export function apply(ctx: any, config?: ProxyConfig): void {
         if (typeof provider !== 'string') return next()
         const route = current.get(provider)
         if (route === undefined) return next()
-        // The stream is consumed lazily; wrap it so the scope survives.
-        return router.wrap(route.dispatcher, next as () => AsyncIterable<unknown>)
+        // The stream is consumed lazily; wrap it so the scope survives. The hit
+        // counter rides inside the scope, so an abandoned stream still counts.
+        return router.wrap(
+          {
+            dispatcher: route.dispatcher,
+            provider,
+            onHit: () => bump(provider),
+          },
+          next as () => AsyncIterable<unknown>,
+        )
       },
       { global: true },
     )
@@ -173,6 +193,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
         proxyOrigin: entry.proxyOrigin,
       })),
       problems: Object.fromEntries(problems),
+      hits: Object.fromEntries(hits),
     }),
   })
 }

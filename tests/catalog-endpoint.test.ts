@@ -62,6 +62,7 @@ test('the endpoint lists live and configurable providers', () => {
       { id: 'sensenova', name: 'SenseNova', live: true },
     ],
   )
+  assert.deepEqual(body.hits, {}, 'no request has been routed yet')
 })
 
 test('a live route with no configurable entry is still listed', () => {

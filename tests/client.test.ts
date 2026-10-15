@@ -457,6 +457,26 @@ test('the page lists the providers the Host publishes, automatically', async () 
   }
 })
 
+test('the page shows how many requests crossed the proxy', async () => {
+  const { mod, restore } = loadBundle(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      providers: [{ id: 'sensenova', name: 'SenseNova', live: true }],
+      hits: { sensenova: 4 },
+    }),
+  }))
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const texts = textsOf(render())
+    assert.ok(texts.includes('已代理 4 次'), 'the routed-request count is rendered')
+  } finally {
+    restore()
+  }
+})
+
 test('a Host that reports no providers degrades to the empty message', async () => {
   const { mod, restore } = loadBundle(async () => ({
     ok: true,

@@ -53,7 +53,7 @@ test('the scope survives lazy consumption of the stream', async () => {
 
     const chunks = []
     // Consumed well outside any run() scope, exactly as a real adapter is.
-    for await (const chunk of router.wrap(agent, lazyAdapter)) chunks.push(chunk)
+    for await (const chunk of router.wrap({ dispatcher: agent, provider: 'lazy' }, lazyAdapter)) chunks.push(chunk)
 
     assert.equal(chunks.length, 1)
     assert.equal(proxy.seen.length, 1, 'the lazy request crossed the proxy')
@@ -100,7 +100,10 @@ test('two providers never share a dispatcher', async () => {
     }
 
     // Two providers, interleaved, each with a DIFFERENT proxy.
-    await Promise.all([drain(router.wrap(a, () => adapter('alpha'))), drain(router.wrap(b, () => adapter('beta')))])
+    await Promise.all([
+      drain(router.wrap({ dispatcher: a, provider: 'alpha' }, () => adapter('alpha'))),
+      drain(router.wrap({ dispatcher: b, provider: 'beta' }, () => adapter('beta'))),
+    ])
 
     assert.deepEqual(proxyA.seen.map(s => s.host), ['alpha.invalid'], 'proxy A only saw provider A')
     assert.deepEqual(proxyB.seen.map(s => s.host), ['beta.invalid'], 'proxy B only saw provider B')
@@ -130,7 +133,10 @@ test('two providers sharing one address still keep separate dispatchers', async 
     const drain = async stream => {
       for await (const _ of stream) {}
     }
-    await Promise.all([drain(router.wrap(a, () => adapter('one'))), drain(router.wrap(b, () => adapter('two')))])
+    await Promise.all([
+      drain(router.wrap({ dispatcher: a, provider: 'one' }, () => adapter('one'))),
+      drain(router.wrap({ dispatcher: b, provider: 'two' }, () => adapter('two'))),
+    ])
 
     assert.deepEqual(proxy.seen.map(s => s.host).sort(), ['one.invalid', 'two.invalid'])
   } finally {
@@ -144,7 +150,7 @@ test('two providers sharing one address still keep separate dispatchers', async 
 test('return() before the first next() never touches the adapter', async () => {
   const router = acquireFetchRouter()
   let constructed = false
-  const stream = router.wrap({ close: async () => {} }, () => {
+  const stream = router.wrap({ dispatcher: { close: async () => {} }, provider: 'abandoned' }, () => {
     constructed = true
     return (async function* () {
       yield 1
@@ -173,4 +179,101 @@ test('two holders share one shim and restore it only once both release', () => {
   assert.notEqual(globalThis.fetch, before, 'still held by the second holder')
   second.release()
   assert.equal(globalThis.fetch, before)
+})
+
+test('onHit fires once per request that crosses the proxy', async () => {
+  const proxy = await startRecordingProxy()
+  const router = acquireFetchRouter()
+  const agent = new ProxyAgent({ uri: `http://127.0.0.1:${proxy.port}` })
+  let hits = 0
+
+  try {
+    const stream = router.wrap(
+      { dispatcher: agent, provider: 'counted', onHit: () => { hits += 1 } },
+      () => (async function* () {
+        await new Promise(resolve => setImmediate(resolve))
+        await fetch('http://counted.invalid/x')
+        yield 1
+      })(),
+    )
+    for await (const _ of stream) {
+      // consume
+    }
+    assert.equal(hits, 1, 'the routed request was counted exactly once')
+    assert.equal(proxy.seen.length, 1)
+  } finally {
+    await agent.close()
+    router.release()
+    await proxy.close()
+  }
+})
+
+test('a direct verdict from decide keeps the native path and is not counted', async () => {
+  const proxy = await startRecordingProxy()
+  const router = acquireFetchRouter()
+  const agent = new ProxyAgent({ uri: `http://127.0.0.1:${proxy.port}` })
+  let seenHost: string | undefined
+  let hits = 0
+
+  try {
+    const stream = router.wrap(
+      {
+        dispatcher: agent,
+        provider: 'ruled',
+        onHit: () => { hits += 1 },
+        decide: host => { seenHost = host; return 'direct' },
+      },
+      () => (async function* () {
+        await new Promise(resolve => setImmediate(resolve))
+        // Unreachable: a `direct` verdict means this never crosses the proxy.
+        await fetch('http://127.0.0.1:1/bypassed')
+        yield 1
+      })(),
+    )
+    await assert.rejects(async () => {
+      for await (const _ of stream) {
+        // the request fails directly, without the proxy
+      }
+    })
+    assert.equal(seenHost, '127.0.0.1', 'decide saw the target host')
+    assert.equal(proxy.seen.length, 0, 'a direct verdict must not cross the proxy')
+    assert.equal(hits, 0, 'a direct request is not a hit')
+  } finally {
+    await agent.close()
+    router.release()
+    await proxy.close()
+  }
+})
+
+test('decide sees undefined for a target it cannot parse', async () => {
+  const router = acquireFetchRouter()
+  const agent = new ProxyAgent({ uri: 'http://127.0.0.1:1' })
+  let called = false
+  let seenHost: string | undefined = 'unset'
+
+  try {
+    const stream = router.wrap(
+      {
+        dispatcher: agent,
+        provider: 'unparsable',
+        decide: host => { called = true; seenHost = host; return 'direct' },
+      },
+      () => (async function* () {
+        // `new URL('/relative/path')` THROWS, so requestHost must swallow it and
+        // hand the rule an undefined host rather than letting the throw escape.
+        await fetch('/relative/path')
+        yield 1
+      })(),
+    )
+    await assert.rejects(async () => {
+      for await (const _ of stream) {
+        // the native fetch rejects on a relative URL
+      }
+    })
+    assert.equal(called, true, 'decide must still run')
+    assert.equal(seenHost, undefined, 'an unparsable target reaches decide as undefined')
+  } finally {
+    await agent.close()
+    router.release()
+  }
 })
