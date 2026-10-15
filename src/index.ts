@@ -85,6 +85,14 @@ export function apply(ctx: any, config?: ProxyConfig): void {
   }
 
   /**
+   * The `dsh-provider-proxy: ` prefix on a recorded problem is a Host-log
+   * convention. Both endpoints that serve the settings page are UI payloads, so
+   * the prefix is stripped at the boundary; `providerProxyState` and the log
+   * keep the string exactly as the table recorded it.
+   */
+  const bareMessage = (message: string): string => message.replace(/^dsh-provider-proxy:\s*/, '')
+
+  /**
    * Every error reachable from one throw: the value itself, its `cause` chain,
    * and any `AggregateError.errors` on the way.
    *
@@ -147,12 +155,10 @@ export function apply(ctx: any, config?: ProxyConfig): void {
       // Two very different reasons land here. A route the guards REJECTED (a bad
       // port, an HTTP password with no username) is missing from the table too,
       // and answering "not enabled" for it names a cause that is not the case —
-      // the setting IS on. The problem the table recorded is what explains it;
-      // its `dsh-provider-proxy: ` prefix is a Host-log convention and only adds
-      // noise on a card, so it is stripped here rather than at every render site.
+      // the setting IS on. The problem the table recorded is what explains it.
       const problem = problems.get(provider)
       if (problem !== undefined) {
-        return { ok: false, kind: 'route-rejected', error: problem.replace(/^dsh-provider-proxy:\s*/, '') }
+        return { ok: false, kind: 'route-rejected', error: bareMessage(problem) }
       }
       return { ok: false, kind: 'no-route', error: `provider "${provider}" 未启用代理` }
     }
@@ -266,7 +272,9 @@ export function apply(ctx: any, config?: ProxyConfig): void {
           try {
             const text = JSON.stringify({
               ...catalog(),
-              problems: Object.fromEntries(problems),
+              problems: Object.fromEntries(
+                [...problems].map(([id, message]) => [id, bareMessage(message)]),
+              ),
               hits: Object.fromEntries(hits),
             })
             res.writeHead(200, {

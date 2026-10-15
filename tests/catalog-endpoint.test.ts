@@ -9,7 +9,7 @@ import { EventEmitter } from 'node:events'
 const { apply } = await import('../lib/index.js')
 
 /** Collect the route the plugin registers, and answer it. */
-function mountHost(llm, web) {
+function mountHost(llm, web, providers = {}) {
   const routes = new Map()
   const ctx = new EventEmitter()
   ctx.on = (event, fn, opts) => {
@@ -29,7 +29,7 @@ function mountHost(llm, web) {
     }
     return () => {}
   }
-  const config = { providers: { get: () => ({}) } }
+  const config = { providers: { get: () => providers } }
   apply(ctx, config)
   return { ctx, routes, config }
 }
@@ -119,6 +119,24 @@ test('a throwing llm service does not break the endpoint', () => {
   const { status, body } = get(routes)
   assert.equal(status, 200)
   assert.deepEqual(body.providers, [])
+})
+
+test('a refused route is published as a problem, without the Host-log prefix', () => {
+  const { routes } = mountHost(
+    { listProviders: () => [], listConfigurableProviders: () => [] },
+    undefined,
+    // An http route with a username and no password is refused by the guards, so
+    // it never reaches the proxy table: this map is the only trace of it, and the
+    // page has nowhere else to learn why the card does nothing.
+    { p: { enabled: true, protocol: 'http', host: 'proxy.test', port: 8080, username: 'alice' } },
+  )
+  const { body } = get(routes)
+  assert.deepEqual(body.providers, [], 'a refused route gets no card of its own')
+  assert.match(body.problems.p, /用户名/, 'the reason must reach the page')
+  assert.ok(
+    !body.problems.p.includes('dsh-provider-proxy:'),
+    'the Host-log prefix must not travel in the UI payload',
+  )
 })
 
 test('the Host half never mutates its config object', () => {

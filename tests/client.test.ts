@@ -457,6 +457,38 @@ test('the page lists the providers the Host publishes, automatically', async () 
   }
 })
 
+test('a route the Host refused is reported in the connection diagnostics', async () => {
+  // A rejected route is absent from the provider list, so the panel is the only
+  // place that says why — without it the user has to press Test on the card to
+  // discover that the setting was refused at all.
+  const { mod, restore } = loadBundle(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      providers: [{ id: 'sensenova', name: 'SenseNova', live: true }],
+      hits: {},
+      problems: { sensenova: '配置了代理用户名但没有密码；请补全密码或清空用户名' },
+    }),
+  }))
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const texts = textsOf(render())
+    assert.ok(
+      texts.includes('sensenova：配置了代理用户名但没有密码；请补全密码或清空用户名'),
+      'the refusal reason must be shown next to the provider it belongs to',
+    )
+    assert.ok(
+      JSON.stringify(render()).includes('dsw-alias-state-error-primary'),
+      'a refused route takes the error colour',
+    )
+    assert.ok(texts.includes('连接诊断 (1)'), 'the collapsed panel must announce that it has content')
+  } finally {
+    restore()
+  }
+})
+
 test('the page shows how many requests crossed the proxy', async () => {
   const { mod, restore } = loadBundle(async () => ({
     ok: true,

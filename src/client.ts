@@ -267,8 +267,12 @@ function testResultFrom(body: any, strings: Record<string, string>): Record<stri
  */
 let catalogueSetter: ((catalog: Catalog) => void) | undefined = () => {}
 
-/** What the Host endpoint publishes: the provider rows plus per-provider hit counts. */
-type Catalog = { rows: ProviderRow[]; hits: Record<string, number> }
+/** What the Host endpoint publishes: provider rows, hit counts, rejected routes. */
+type Catalog = {
+  rows: ProviderRow[]
+  hits: Record<string, number>
+  problems: Record<string, string>
+}
 
 /** Read the Host's provider catalogue. Same-origin, so no token is needed. */
 async function fetchCatalog(): Promise<Catalog> {
@@ -293,7 +297,17 @@ async function fetchCatalog(): Promise<Catalog> {
       if (typeof count === 'number' && Number.isFinite(count)) hits[id] = count
     }
   }
-  return { rows, hits }
+  // A route the Host REFUSED (a bad port, half-filled credentials) is absent from
+  // the provider list entirely, so this map is the only place that says why it is
+  // missing. The Host already stripped the log prefix from it.
+  const problems: Record<string, string> = {}
+  const rejected = body?.problems
+  if (rejected !== null && typeof rejected === 'object') {
+    for (const [id, message] of Object.entries(rejected)) {
+      if (typeof message === 'string' && message.length > 0) problems[id] = message
+    }
+  }
+  return { rows, hits, problems }
 }
 
 const byName = (a: ProviderRow, b: ProviderRow): number => a.name.localeCompare(b.name)
@@ -426,6 +440,10 @@ const S = {
     color: 'var(--dsw-alias-state-error-primary, #f85149)',
     fontWeight: '500',
   },
+  /** A rejected route is a failure of the settings, not a warning about them. */
+  diagProblem: {
+    color: 'var(--dsw-alias-state-error-primary, #f85149)',
+  },
   advanced: {
     marginTop: '4px',
     fontSize: '12px',
@@ -515,16 +533,30 @@ function renderPage(ctx: any): unknown {
       .then(catalog => catalogueSetter?.(catalog))
       .catch((error: any) => {
         note(`provider 列表获取失败：${error?.message ?? error}`)
-        catalogueSetter?.({ rows: [], hits: {} })
+        catalogueSetter?.({ rows: [], hits: {}, problems: {} })
       })
-    return { rows: undefined as ProviderRow[] | undefined, hits: {} as Record<string, number>, pending: true }
+    return {
+      rows: undefined as ProviderRow[] | undefined,
+      hits: {} as Record<string, number>,
+      problems: {} as Record<string, string>,
+      pending: true,
+    }
   })
   // The setter is published right after the hook so the initializer's promise
   // can reach it. It is re-published on every render, so the latest wins.
-  catalogueSetter = catalog => setState({ rows: catalog.rows, hits: catalog.hits, pending: false })
+  catalogueSetter = catalog =>
+    setState({ rows: catalog.rows, hits: catalog.hits, problems: catalog.problems, pending: false })
 
   const published = state.rows ?? []
   const hits = state.hits ?? {}
+  // Rendered straight from state rather than through `note()`: `diagnostics` is
+  // cleared at the start of every render, so a note written when the catalog
+  // arrives would not survive to the next pass.
+  const problems = state.problems ?? {}
+  const problemLines = Object.entries(problems).map(([id, message]) =>
+    h('li', { key: `p:${id}`, style: S.diagProblem }, `${id}：${message}`),
+  )
+  const problemCount = problemLines.length
   note(
     `provider 列表：来自 Host 共 ${published.length} 个（${published.map((r: ProviderRow) => r.id).join('、') || '无'}）`,
   )
@@ -848,13 +880,23 @@ function renderPage(ctx: any): unknown {
           color: 'var(--dsw-alias-label-secondary)',
         },
       },
-      h('summary', { className: styles.diagSummary }, t.diagnostics),
+      // The count is the only visible signal while the panel is collapsed: a
+      // rejected route is not a page that refuses to render, it is one that
+      // quietly does nothing.
+      h(
+        'summary',
+        { className: styles.diagSummary },
+        problemCount === 0 ? t.diagnostics : `${t.diagnostics} (${problemCount})`,
+      ),
       h(
         'ul',
         { className: styles.diagList, style: { margin: '6px 0 0', paddingLeft: '18px' } },
-        ...(diagnostics.length === 0
+        ...(problemCount === 0 && diagnostics.length === 0
           ? [h('li', { key: 'none' }, t.diagPending)]
-          : diagnostics.map((line, index) => h('li', { key: `d${index}` }, line))),
+          : [
+              ...problemLines,
+              ...diagnostics.map((line, index) => h('li', { key: `d${index}` }, line)),
+            ]),
       ),
     ),
   )
