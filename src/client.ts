@@ -226,6 +226,40 @@ const CATALOG_PATH = '/dsh-provider-proxy/providers'
 const TEST_PATH = '/dsh-provider-proxy/test'
 
 /**
+ * Latency bands for the self-check result, in milliseconds.
+ *
+ * The colour is decoration, never information: the numeric value is always
+ * printed, so an unknown theme token (which resolves to `unset`) costs colour,
+ * never the reading. The `var(..., fallback)` form keeps the colours visible even
+ * if the theme renames the token.
+ */
+const LATENCY_FAST_MS = 500
+const LATENCY_SLOW_MS = 1500
+
+function latencyColor(ms: unknown): string {
+  if (typeof ms !== 'number' || !Number.isFinite(ms)) return 'var(--dsw-alias-label-secondary)'
+  if (ms <= LATENCY_FAST_MS) return 'var(--dsw-alias-state-success-primary, #2ea043)'
+  if (ms <= LATENCY_SLOW_MS) return 'var(--dsw-alias-state-warn-primary, #d29922)'
+  return 'var(--dsw-alias-state-error-primary, #f85149)'
+}
+
+/** Normalize the Host's self-check payload into the shape the card renders. */
+function testResultFrom(body: any, strings: Record<string, string>): Record<string, unknown> {
+  const ok = body?.ok === true
+  return {
+    pending: false,
+    ok,
+    ms: typeof body?.ms === 'number' && Number.isFinite(body.ms) ? body.ms : undefined,
+    ip: typeof body?.exitIp === 'string' && body.exitIp.length > 0 ? body.exitIp : undefined,
+    error: ok
+      ? undefined
+      : typeof body?.error === 'string' && body.error.length > 0
+        ? body.error
+        : strings.testFailed,
+  }
+}
+
+/**
  * The setter the lazy catalogue initializer resolves through.
  *
  * It is republished after every render, so the newest one always wins, and a
@@ -496,28 +530,15 @@ function renderPage(ctx: any): unknown {
     setDraft((current: any) => ({ ...current, [id]: { ...current[id], [field]: value } }))
 
   // Self-check outcomes keyed by provider id: `{ pending: true }` while the Host
-  // is testing, then `{ pending: false, text }` with the rendered result.
+  // is testing, then the normalized result the card renders.
   const [tests, setTests] = (React.useState ?? ((v: any) => [v, () => {}]))({})
-
-  /** Turn the Host's self-check payload into one line. */
-  const describeTest = (body: any): string => {
-    if (body?.ok === true) {
-      const ip =
-        typeof body.exitIp === 'string' && body.exitIp.length > 0
-          ? ` · ${t.exitIpLabel}${body.exitIp}`
-          : ''
-      return `✓ ${body.ms} ms${ip}`
-    }
-    const detail = typeof body?.error === 'string' && body.error.length > 0 ? body.error : t.testFailed
-    return `✗ ${detail}`
-  }
 
   /**
    * Run the Host's self-check for one provider.
    *
-   * A SUCCESSFUL check also refreshes the catalogue: the same request the check
-   * just proved also bumped that provider's hit counter, and the count is
-   * otherwise only read once, at mount.
+   * A SUCCESSFUL check also refreshes the catalogue: the request the check just
+   * proved also bumped that provider's hit counter, and the count is otherwise
+   * only read once, at mount.
    */
   const runTest = (id: string): void => {
     setTests((current: any) => ({ ...current, [id]: { pending: true } }))
@@ -529,7 +550,7 @@ function renderPage(ctx: any): unknown {
           body: JSON.stringify({ provider: id }),
         })
         const body = await response.json()
-        setTests((current: any) => ({ ...current, [id]: { pending: false, text: describeTest(body) } }))
+        setTests((current: any) => ({ ...current, [id]: testResultFrom(body, t) }))
         if (body?.ok === true) {
           void fetchCatalog()
             .then(catalog => catalogueSetter?.(catalog))
@@ -538,7 +559,7 @@ function renderPage(ctx: any): unknown {
       } catch (error: any) {
         setTests((current: any) => ({
           ...current,
-          [id]: { pending: false, text: `✗ ${error?.message ?? error}` },
+          [id]: { pending: false, ok: false, error: String(error?.message ?? error) },
         }))
       }
     })()
@@ -613,6 +634,7 @@ function renderPage(ctx: any): unknown {
         // The MERGED value, so a just-typed value shows immediately.
         const route = view({ ...configured[row.id], ...draft[row.id] })
         const disabled = !route.enabled
+        const result = tests[row.id]
         return h(
           'section',
           {
@@ -747,13 +769,28 @@ function renderPage(ctx: any): unknown {
                     className: styles.testButton,
                     style: S.testButton,
                     type: 'button',
-                    disabled: tests[row.id]?.pending === true,
+                    disabled: result?.pending === true,
                     onClick: () => runTest(row.id),
                   },
-                  tests[row.id]?.pending === true ? t.testRunning : t.testButton,
+                  result?.pending === true ? t.testRunning : t.testButton,
                 ),
-                typeof tests[row.id]?.text === 'string'
-                  ? h('span', { className: styles.testResult, style: S.testResult }, tests[row.id].text)
+                result?.pending === false
+                  ? h(
+                      'span',
+                      { className: styles.testResult, style: S.testResult },
+                      result.ok === true
+                        ? [
+                            // Only the latency carries the band colour; the exit IP
+                            // stays in the secondary label colour.
+                            h(
+                              'span',
+                              { key: 'lat', style: { color: latencyColor(result.ms) } },
+                              `✓ ${typeof result.ms === 'number' ? result.ms : '—'} ms`,
+                            ),
+                            result.ip === undefined ? null : ` · ${t.exitIpLabel}${result.ip}`,
+                          ]
+                        : `✗ ${result.error}`,
+                    )
                   : null,
               )
             : null,

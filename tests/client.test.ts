@@ -490,6 +490,34 @@ test('an enabled provider offers the connection self-check', async () => {
   }
 })
 
+test('a fast self-check latency is rendered in the success colour', async () => {
+  const { mod, restore } = loadBundle(async url => ({
+    ok: true,
+    status: 200,
+    json: async () =>
+      String(url).includes('/test')
+        ? { ok: true, ms: 120, status: 200, exitIp: '1.2.3.4' }
+        : { providers: [{ id: 'sensenova', name: 'SenseNova', live: true }] },
+  }))
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const button = findButton(render())
+    assert.ok(button, 'the self-check button must be rendered')
+    button.props.onClick()
+    await settle()
+    const tree = JSON.stringify(render())
+    assert.ok(tree.includes('120 ms'), 'the latency value is always shown')
+    assert.ok(
+      tree.includes('dsw-alias-state-success-primary'),
+      'a fast latency uses the success colour',
+    )
+  } finally {
+    restore()
+  }
+})
+
 test('the cards expose the advanced target-host rules', async () => {
   const { mod, restore } = loadBundle()
   try {
@@ -594,6 +622,16 @@ test('a configured provider stays visible even if the Host stopped offering it',
     restore()
   }
 })
+
+function findButton(node) {
+  if (node === null || typeof node !== 'object') return undefined
+  if (Array.isArray(node)) {
+    for (const n of node) { const found = findButton(n); if (found) return found }
+    return undefined
+  }
+  if (node.type === 'button') return node
+  return node.children ? findButton(node.children) : undefined
+}
 
 test('each provider is rendered as its own card section', async () => {
   // The requested layout: one card per provider, not one merged form.
