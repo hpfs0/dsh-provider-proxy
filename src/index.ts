@@ -71,6 +71,8 @@ export function apply(ctx: any, config?: ProxyConfig): void {
   /** Where the self-check sends its request; overridable so a blocked echo host can be replaced. */
   const DEFAULT_TEST_URL = 'https://api.ipify.org?format=json'
   const TEST_TIMEOUT_MS = 10_000
+  /** The self-check body carries one provider id; anything larger is refused, not buffered. */
+  const MAX_REQUEST_BYTES = 8 * 1024
   /** One in-flight check per provider, so a repeated click cannot multiply outbound requests. */
   const selfChecks = new Map<string, Promise<Record<string, unknown>>>()
 
@@ -287,7 +289,13 @@ export function apply(ctx: any, config?: ProxyConfig): void {
         kind: 'exact',
         path: '/dsh-provider-proxy/test',
         handler: (req: any, res: any) => {
+          // One response per request, whatever arrives later: an aborted
+          // connection can fire 'error', and a body that was already refused can
+          // still be followed by 'end'.
+          let replied = false
           const send = (status: number, payload: unknown): void => {
+            if (replied) return
+            replied = true
             const text = JSON.stringify(payload)
             res.writeHead(status, {
               'content-type': 'application/json; charset=utf-8',
@@ -304,10 +312,28 @@ export function apply(ctx: any, config?: ProxyConfig): void {
             send(400, { ok: false, kind: 'body', error: '无法读取请求体' })
             return
           }
+          let bytes = 0
           const chunks: Buffer[] = []
-          req.on('data', (chunk: Buffer) => chunks.push(chunk))
+          req.on('data', (chunk: Buffer) => {
+            if (replied) return
+            bytes += chunk.length
+            // The body is one provider id. Anything larger is not a caller this
+            // endpoint serves, and buffering it would be a free memory sink on a
+            // webServer deployments may bind beyond loopback. The rest of the
+            // stream is discarded rather than read.
+            if (bytes > MAX_REQUEST_BYTES) {
+              send(413, {
+                ok: false,
+                kind: 'body',
+                error: `请求体超过 ${MAX_REQUEST_BYTES} 字节上限`,
+              })
+              return
+            }
+            chunks.push(chunk)
+          })
           req.on('error', () => send(400, { ok: false, kind: 'body', error: '读取请求体失败' }))
           req.on('end', () => {
+            if (replied) return
             void (async () => {
               let provider: unknown
               try {

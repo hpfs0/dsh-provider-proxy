@@ -150,6 +150,14 @@ test('the endpoint refuses anything but POST', async () => {
   assert.equal(body.kind, 'method')
 })
 
+test('an oversized body is refused instead of buffered', async () => {
+  const { routes } = mountHost({ providers: { get: () => ({}) }, testUrl: 'http://echo.invalid/ip' })
+  const { status, body } = await selfCheck(routes, { provider: 'p', pad: 'x'.repeat(16 * 1024) })
+  assert.equal(status, 413)
+  assert.equal(body.ok, false)
+  assert.equal(body.kind, 'body')
+})
+
 test('concurrent checks for one provider share a single outbound request', async () => {
   const proxy = await startEchoProxy(60)
   try {
