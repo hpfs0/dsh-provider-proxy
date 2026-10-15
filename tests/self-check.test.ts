@@ -112,6 +112,37 @@ test('a provider with no live route is reported, not tested', async () => {
   assert.equal(body.kind, 'no-route')
 })
 
+// A route that is enabled but REJECTED by a guard (here: an HTTP password with
+// no username) is absent from the live table too. Reporting "not enabled" for it
+// names the wrong cause — the setting IS on — and the whole point of the check is
+// to point at the hop that actually failed.
+test('a route rejected by validation reports the recorded problem', async () => {
+  const { routes } = mountHost({
+    providers: {
+      get: () => ({
+        p: {
+          enabled: true,
+          protocol: 'http',
+          host: '127.0.0.1',
+          port: 7890,
+          username: '',
+          password: 'secret',
+        },
+      }),
+    },
+    testUrl: 'http://echo.invalid/ip',
+  })
+  const { status, body } = await selfCheck(routes, { provider: 'p' })
+  assert.equal(status, 200)
+  assert.equal(body.ok, false)
+  assert.equal(body.kind, 'route-rejected')
+  assert.match(body.error, /没有用户名/, 'the report must name the cause the table recorded')
+  assert.ok(
+    !body.error.includes('dsh-provider-proxy:'),
+    'the Host-log prefix is noise on a card and must not reach the page',
+  )
+})
+
 test('the endpoint refuses anything but POST', async () => {
   const { routes } = mountHost({ providers: { get: () => ({}) }, testUrl: 'http://echo.invalid/ip' })
   const { status, body } = await selfCheck(routes, { provider: 'p' }, 'GET')

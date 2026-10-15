@@ -142,6 +142,16 @@ export function apply(ctx: any, config?: ProxyConfig): void {
   const runSelfCheck = async (provider: string): Promise<Record<string, unknown>> => {
     const route = current.get(provider)
     if (route === undefined) {
+      // Two very different reasons land here. A route the guards REJECTED (a bad
+      // port, an HTTP password with no username) is missing from the table too,
+      // and answering "not enabled" for it names a cause that is not the case —
+      // the setting IS on. The problem the table recorded is what explains it;
+      // its `dsh-provider-proxy: ` prefix is a Host-log convention and only adds
+      // noise on a card, so it is stripped here rather than at every render site.
+      const problem = problems.get(provider)
+      if (problem !== undefined) {
+        return { ok: false, kind: 'route-rejected', error: problem.replace(/^dsh-provider-proxy:\s*/, '') }
+      }
       return { ok: false, kind: 'no-route', error: `provider "${provider}" 未启用代理` }
     }
     const started = performance.now()
