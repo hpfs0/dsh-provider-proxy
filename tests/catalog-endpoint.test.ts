@@ -9,7 +9,7 @@ import { EventEmitter } from 'node:events'
 const { apply } = await import('../lib/index.js')
 
 /** Collect the route the plugin registers, and answer it. */
-function mountHost(llm) {
+function mountHost(llm, web) {
   const routes = new Map()
   const ctx = new EventEmitter()
   ctx.on = (event, fn, opts) => {
@@ -23,6 +23,9 @@ function mountHost(llm) {
   ctx.inject = (services, cb) => {
     if (services.includes('webServer')) {
       cb({ webServer: { register: route => routes.set(route.path, route) } })
+    }
+    if (services.includes('web') && web !== undefined) {
+      cb({ web })
     }
     return () => {}
   }
@@ -63,6 +66,24 @@ test('the endpoint lists live and configurable providers', () => {
     ],
   )
   assert.deepEqual(body.hits, {}, 'no request has been routed yet')
+})
+
+test('a live web service publishes the reserved web-search row', () => {
+  const { routes } = mountHost(
+    { listProviders: () => [{ id: 'sensenova', name: 'SenseNova' }], listConfigurableProviders: () => [] },
+    { search: async () => ({ sources: [], truncated: false }) },
+  )
+  const { body } = get(routes)
+  assert.ok(
+    body.providers.some(row => row.id === 'web-search' && row.name === 'Web 搜索' && row.live === true),
+    'the reserved web-search row must be published when the web service exists',
+  )
+})
+
+test('a composition without a web service publishes no web-search row', () => {
+  const { routes } = mountHost({ listProviders: () => [], listConfigurableProviders: () => [] })
+  const { body } = get(routes)
+  assert.ok(!body.providers.some(row => row.id === 'web-search'), 'nothing to route, so no card')
 })
 
 test('a live route with no configurable entry is still listed', () => {

@@ -58,6 +58,8 @@ dsh plugin --profile web add dsh-provider-proxy
 
 两者都按后缀匹配（`example.com` 覆盖 `api.example.com`），`*` 表示全部，大小写不敏感。**默认是 fail-closed**：启用了代理的路由默认走代理，只有「`bypassHosts` 命中」与「`onlyHosts` 非空且未命中」两种显式例外才直连；解析不出目标主机时**仍走代理**，避免畸形 URL 把带凭据的请求悄悄直连出去。
 
+当组成里存在 web 服务时，列表还会多出一张 **Web 搜索** 卡片（保留 id `web-search`，字段与其它卡片完全相同，也支持自检、计数与域名规则）。它承载 `web_search` 工具的流量；不启用它，搜索保持直连。
+
 > **为什么是独立设置页，而不是内嵌在 Models 的 provider 卡片里？**
 > 本插件最早按卡片内嵌（`settings.models.provider-card`）实现，但那个槽位是 keyed 的、
 > 按 provider 命名空间派发，第三方注册在 0.2.0-rc.1 上始终匹配不上——不报错、不发请求、
@@ -90,6 +92,8 @@ dsh plugin --profile web add dsh-provider-proxy
 - **代理认证字段的成对规则。** SOCKS5 下填了用户名就必须填密码（`Socks5ProxyAgent` 只在两者齐备时才发起认证；只填用户名会被拒绝并给出提示，而不是静默降级为无认证）；HTTP/HTTPS 下填了密码就必须填用户名（基本认证无法只发密码）。不合规则的配置会被拒绝并在「连接诊断」里说明，而不是被静默忽略——否则在强制认证的代理端，报错会指向代理而真正原因是设置缺项。HTTP/HTTPS 下只填用户名仍照常工作。
 - **SOCKS5 不支持 `socks://` 别名与 SOCKS5 over TLS**（`proxyTls`）。
 - **`bypassHosts` 命中时由本机解析并连接目标**（DNS 不经过代理）。SOCKS5 下这一点后果最明显：命中的域名不再由代理端解析，本机 DNS 会暴露该次查询。
+- **`web_search` 可以走代理，`web_fetch` 不行。** 搜索 provider（`dsh-web-search-deepseek`）用全局 `fetch`，插件通过包裹 `ctx.web.search` 把它送进代理作用域；这条成立的前提是：工具每次调用都重新取 `ctx.web.search`，且 provider 的 `search()` 是 await-to-completion（不是惰性消费的流）。`web_fetch` 则用 `undici` 自带的 `dispatcher`（来自官方的进程级 env 策略），没有 per-provider 注入点，本插件覆盖不到——需要覆盖它请改用 `HTTP_PROXY` 之类的环境变量。
+- **保留 id `web-search`。** 它的路由存在 `providers` 字典里；真实 provider 若恰好撞名，会与该路由共用同一份配置，无害。
 - **上游若绕过 `globalThis.fetch` 自行建连，则不受影响。** `llm-deepseek` 确认是调用时解析全局 `fetch`；`llm-pi-ai` 走外部 SDK，抓取 `fetch` 的时机未能在源码层面确证。
 - **不支持 PAC**，也不读取系统代理设置。
 - **不改写 `baseURL`** —— 反向代理/中转请直接在 provider 上配置。

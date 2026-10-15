@@ -16,6 +16,17 @@ export const name = 'dsh-provider-proxy'
 export const inject = ['llm']
 
 /**
+ * Reserved provider id whose route carries `ctx.web.search` traffic.
+ *
+ * It lives in the ordinary provider dictionary, so its card, its settings write
+ * path, its hit counter and its diagnostics are all the normal ones. A real
+ * provider colliding with this id would simply share the route — harmless, and
+ * far less likely than the alternative of a separate top-level field needing a
+ * special case in every one of those places.
+ */
+export const WEB_SEARCH_KEY = 'web-search'
+
+/**
  * The Config this fiber receives.
  *
  * It is NOT `ConfigShape`: under the Loader `providers` is a Volatile REFERENCE,
@@ -46,6 +57,8 @@ export function apply(ctx: any, config?: ProxyConfig): void {
   let current = new Map<string, RouteEntry>()
   let problems = new Map<string, string>()
   let closed = false
+  /** Whether a `web` service exists, i.e. whether the reserved route has anything to carry. */
+  let webAvailable = false
 
   // Request counts, keyed by provider id. Held OUTSIDE the proxy table so a
   // rebuild (a settings write) never resets them; only a plugin reload does.
@@ -219,6 +232,13 @@ export function apply(ctx: any, config?: ProxyConfig): void {
     } catch {
       // ignore
     }
+    // The reserved route rides in the provider dictionary, so its card and its
+    // settings write path are the ordinary ones; publishing a row is what lets
+    // the page render it without a special case. It appears only when the web
+    // service actually exists — otherwise there is nothing for it to route.
+    if (webAvailable && out.every(row => row.id !== WEB_SEARCH_KEY)) {
+      out.push({ id: WEB_SEARCH_KEY, name: 'Web 搜索', live: true })
+    }
     out.sort((a, b) => a.name.localeCompare(b.name))
     return { providers: out }
   }
@@ -310,6 +330,42 @@ export function apply(ctx: any, config?: ProxyConfig): void {
       // The page degrades to whatever is already configured.
       void error
     }
+  })
+
+  // `web_search` reaches the network with a bare global `fetch`, and `ctx.web`
+  // exposes no waterfall to hook. Wrapping the service METHOD is therefore the
+  // only seam. Entering the router scope around the call is enough — the scope
+  // propagates through `await`, and the search is await-to-completion rather than
+  // a lazily-consumed stream, so no per-iterator wrapping is needed here.
+  //
+  // Two preconditions make this work, and a future provider could break either:
+  // the tool accesses `ctx.web.search` afresh on every call (no early
+  // destructure), and the provider's `search()` awaits to completion.
+  ctx.inject?.(['web'], (wctx: any) => {
+    const web = wctx?.web
+    if (web === undefined || typeof web.search !== 'function') return
+    webAvailable = true
+    const original = web.search
+    const patched = function (this: unknown, request: unknown, signal?: unknown): unknown {
+      const route = current.get(WEB_SEARCH_KEY)
+      if (route === undefined) return original.call(this, request, signal)
+      return router.run(
+        {
+          dispatcher: route.dispatcher,
+          provider: WEB_SEARCH_KEY,
+          onHit: () => bump(WEB_SEARCH_KEY),
+          decide: route.decide,
+        },
+        () => original.call(this, request, signal),
+      )
+    }
+    web.search = patched
+    // Restore on dispose, undoing only OUR wrapper: another plugin may have
+    // wrapped the method after we did, and its wrapper must survive.
+    const registerEffect = typeof wctx?.effect === 'function' ? wctx.effect.bind(wctx) : ctx.effect?.bind(ctx)
+    registerEffect?.(() => () => {
+      if (web.search === patched) web.search = original
+    })
   })
 
   ctx.effect(() => {
