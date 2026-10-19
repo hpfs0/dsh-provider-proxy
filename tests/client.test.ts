@@ -593,6 +593,33 @@ test('a fast self-check latency is rendered in the success colour', async () => 
   }
 })
 
+test('a self-check that went direct says so, instead of reading as a proxy success', async () => {
+  const { mod, restore } = loadBundle(async url => ({
+    ok: true,
+    status: 200,
+    json: async () =>
+      String(url).includes('/test')
+        ? { ok: true, ms: 30, status: 200, viaProxy: false }
+        : { providers: [{ id: 'sensenova', name: 'SenseNova', live: true }] },
+  }))
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const button = findButton(cardFor(render(), 'sensenova'))
+    assert.ok(button, 'the self-check button must be rendered')
+    button.props.onClick()
+    await settle()
+    const texts = textsOf(render())
+    assert.ok(
+      texts.some(text => text.includes('直连（未经过代理）')),
+      'a direct check must say it never used the proxy, so green is not read as "the proxy works"',
+    )
+  } finally {
+    restore()
+  }
+})
+
 test('a failed self-check is rendered in the error colour, without the Host-log prefix', async () => {
   const { mod, restore } = loadBundle(async url => ({
     ok: true,

@@ -101,6 +101,7 @@ test('a reachable proxy reports ok with latency and the exit IP', async () => {
     assert.equal(status, 200)
     assert.equal(body.ok, true, 'the proxy carried the request')
     assert.equal(body.exitIp, '203.0.113.9')
+    assert.equal(body.viaProxy, true, 'a non-local target is probed through the proxy')
     assert.equal(typeof body.ms, 'number')
     assert.equal(proxy.seen.length, 1, 'the request really crossed the proxy')
     assert.equal(proxy.seen[0].url, 'http://echo.invalid/ip', 'the proxy saw the absolute-form target')
@@ -579,3 +580,73 @@ test('the candidate list is capped so one setting cannot multiply outbound calls
     await proxy.close()
   }
 })
+
+// ---- the check honours the SAME proxy/direct rule real traffic does ----
+
+test('a loopback upstream is checked DIRECT, never forced through the proxy', async () => {
+  // A local relay (LiteLLM, Ollama, a mock) is the common case now that the
+  // check defaults to the provider's real upstream. Forcing it through a forward
+  // proxy that cannot reach it would report a HEALTHY route as "the proxy is
+  // broken" — the exact false positive `localDirect` exists to remove. The echo
+  // server stands in for the relay; the scripted proxy answers every target with
+  // a 502, so a proxied probe could not possibly succeed.
+  const echo = await startEchoProxy()
+  const proxy = await startScriptedProxy(() => ({ status: 502, body: '{}' }))
+  try {
+    const { routes } = mountHost({
+      providers: {
+        get: () => ({
+          p: {
+            enabled: true,
+            protocol: 'http',
+            host: '127.0.0.1',
+            port: proxy.port,
+            testTarget: `http://127.0.0.1:${echo.port}/upstream`,
+          },
+        }),
+      },
+      testUrl: 'http://echo.invalid/ip',
+    })
+    const { body } = await selfCheck(routes, { provider: 'p' })
+    assert.equal(body.ok, true, 'reaching the loopback upstream is a success')
+    assert.equal(body.viaProxy, false, 'the loopback target must be reached direct')
+    assert.equal(echo.seen.length, 1, 'the request went straight to the local upstream')
+    assert.equal(proxy.seen.length, 0, 'the proxy must not have been used at all')
+  } finally {
+    await echo.close()
+    await proxy.close()
+  }
+})
+
+test('a failed direct probe names the target, never a proxy it never used', async () => {
+  // Nothing listens on this loopback port, and the target is loopback, so the
+  // route decides DIRECT. Reporting "代理不可达" here would send the operator
+  // after a hop this probe never touched.
+  const proxy = await startScriptedProxy(() => ({ status: 502, body: '{}' }))
+  try {
+    const { routes } = mountHost({
+      providers: {
+        get: () => ({
+          p: {
+            enabled: true,
+            protocol: 'http',
+            host: '127.0.0.1',
+            port: proxy.port,
+            testTarget: 'http://127.0.0.1:65533/upstream',
+          },
+        }),
+      },
+      testUrl: 'http://echo.invalid/ip',
+    })
+    const { body } = await selfCheck(routes, { provider: 'p' })
+    assert.equal(body.ok, false)
+    assert.equal(body.viaProxy, false)
+    assert.equal(body.kind, 'target', 'a direct failure is about the target, not the proxy')
+    assert.match(body.error, /目标不可达/, 'the report must name the hop that actually failed')
+    assert.ok(!body.error.includes('代理'), 'a direct probe must never blame a proxy it did not use')
+    assert.equal(proxy.seen.length, 0, 'the proxy was never contacted')
+  } finally {
+    await proxy.close()
+  }
+})
+

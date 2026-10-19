@@ -253,6 +253,10 @@ function testResultFrom(body: any, strings: Record<string, string>): Record<stri
     ok,
     ms: typeof body?.ms === 'number' && Number.isFinite(body.ms) ? body.ms : undefined,
     ip: typeof body?.exitIp === 'string' && body.exitIp.length > 0 ? body.exitIp : undefined,
+    // The Host probes a target the way routing would: a loopback/private upstream
+    // (or a bypassHosts match) is reached DIRECT, not through the proxy. The card
+    // says so, so a green check is not read as "the proxy works".
+    direct: body?.viaProxy === false,
     error: ok
       ? undefined
       : typeof body?.error === 'string' && body.error.length > 0
@@ -1465,6 +1469,7 @@ function renderPage(ctx: any): unknown {
                               `✓ ${typeof result.ms === 'number' ? result.ms : '—'} ms`,
                             ),
                             result.ip === undefined ? null : ` · ${t.exitIpLabel}${result.ip}`,
+                            result.direct === true ? ` · ${t.directLabel}` : null,
                           ]
                         : h('span', { key: 'err', style: S.testFailure }, `✗ ${result.error}`),
                     )
@@ -1613,6 +1618,7 @@ const EN = {
   testDisabledNote: 'Not enabled — test only: ',
   testFailed: 'Test failed',
   exitIpLabel: 'exit IP ',
+  directLabel: 'direct (not through the proxy)',
   advanced: 'Advanced: target host rules',
   onlyHosts: 'Proxy only',
   onlyHostsHint: 'Comma/space separated; when set, only requests to these hosts are proxied (suffix match, * for all).',
@@ -1666,6 +1672,7 @@ const ZH = {
   testDisabledNote: '未启用，仅测试：',
   testFailed: '测试失败',
   exitIpLabel: '出口 IP ',
+  directLabel: '直连（未经过代理）',
   advanced: '高级：目标域名规则',
   onlyHosts: '仅走代理',
   onlyHostsHint: '逗号或空格分隔；非空时只有匹配这些主机的请求走代理（后缀匹配，* 表示全部）。',

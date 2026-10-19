@@ -240,8 +240,16 @@ export function apply(ctx: any, config?: ProxyConfig): void {
     return out
   }
 
-  /** Classify a self-check failure so the report points at the hop that actually failed. */
-  const classifyTestError = (error: unknown): { kind: string; error: string } => {
+  /**
+   * Classify a self-check failure so the report points at the hop that actually
+   * failed.
+   *
+   * `viaProxy` decides WHICH hop that is: the same connection error means "the
+   * proxy is unreachable" on a proxied probe but "the target is unreachable" on a
+   * direct one. Naming the proxy for a direct probe would send the operator after
+   * a hop the check never used.
+   */
+  const classifyTestError = (error: unknown, viaProxy: boolean): { kind: string; error: string } => {
     const chain = causesOf(error)
     const names = chain
       .map(node => (node as { name?: unknown }).name)
@@ -263,7 +271,9 @@ export function apply(ctx: any, config?: ProxyConfig): void {
     const connectivity = ['ECONNREFUSED', 'ENOTFOUND', 'EHOSTUNREACH', 'ENETUNREACH', 'ECONNRESET', 'EAI_AGAIN']
     const code = connectivity.find(candidate => codes.includes(candidate))
     if (code !== undefined) {
-      return { kind: 'proxy-unreachable', error: `代理不可达（${code}）：${message}` }
+      return viaProxy
+        ? { kind: 'proxy-unreachable', error: `代理不可达（${code}）：${message}` }
+        : { kind: 'target', error: `目标不可达（${code}）：${message}` }
     }
     if (names.includes('ProxyAuthentication') || messages.some(text => text.includes('407'))) {
       return { kind: 'proxy-auth', error: `代理要求认证（HTTP 407）：${message}` }
@@ -293,32 +303,47 @@ export function apply(ctx: any, config?: ProxyConfig): void {
   }
 
   /**
-   * Send one request to ONE target through a route's own dispatcher.
+   * Send one request to ONE target, honoured the way real traffic would be.
    *
-   * The dispatcher is passed EXPLICITLY rather than by entering the router's
-   * AsyncLocalStorage scope: that scope intercepts `globalThis.fetch`, so a plain
-   * `undici.fetch` call would go straight out and report a broken proxy as a
-   * success — the one failure this whole feature exists to eliminate.
+   * The proxy/direct decision comes from the route's OWN `decide`, exactly as a
+   * live request consults it: a loopback/private target, a `bypassHosts` match,
+   * or an `onlyHosts` miss goes DIRECT, and only a proxied probe carries the
+   * dispatcher. This matters most now that the check defaults to the provider's
+   * real upstream: a local relay upstream (LiteLLM, Ollama) would otherwise be
+   * forced through a forward proxy that cannot reach it, and the check would
+   * report a healthy route as "the proxy is broken" — the very false positive
+   * `localDirect` exists to remove.
+   *
+   * When it IS proxied, the dispatcher is passed EXPLICITLY rather than by
+   * entering the router's AsyncLocalStorage scope: that scope intercepts
+   * `globalThis.fetch`, so a plain `undici.fetch` call would go straight out and
+   * report a broken proxy as a success — the one failure this whole feature
+   * exists to eliminate.
    */
   const probeTarget = async (
     target: string,
     route: RouteEntry,
   ): Promise<Record<string, unknown>> => {
+    let host: string | undefined
     try {
-      new URL(target)
+      host = new URL(target).hostname
     } catch {
       return { ok: false, kind: 'target', error: `自检目标不是合法 URL：${target}` }
     }
+    const viaProxy = route.decide(host) === 'proxy'
     const started = performance.now()
     try {
       const response = await undiciFetch(target, {
-        dispatcher: route.dispatcher,
+        // A direct probe must NOT carry the dispatcher, or undici would force it
+        // through the proxy anyway.
+        ...(viaProxy ? { dispatcher: route.dispatcher } : {}),
         signal: AbortSignal.timeout(TEST_TIMEOUT_MS),
       } as never)
       const ms = Math.round(performance.now() - started)
-      // 407 is the proxy demanding credentials: a RESULT, not a throw.
-      if (response.status === 407) {
-        return { ok: false, ms, status: 407, kind: 'proxy-auth', error: '代理要求认证（HTTP 407）' }
+      // 407 is the proxy demanding credentials: a RESULT, not a throw. Only a
+      // proxied request can be answered by a proxy this way.
+      if (viaProxy && response.status === 407) {
+        return { ok: false, ms, status: 407, kind: 'proxy-auth', viaProxy, error: '代理要求认证（HTTP 407）' }
       }
       let exitIp: string | undefined
       try {
@@ -327,21 +352,28 @@ export function apply(ctx: any, config?: ProxyConfig): void {
       } catch {
         // A non-JSON echo still proves the request crossed the proxy.
       }
-      // Any status below 500 means the request DID cross the proxy and reached
-      // something. Against a real upstream a bare POST normally answers 4xx
-      // (401/404) — the expected answer, and proof the path works. A 5xx is the
-      // opposite: an HTTP proxy that cannot reach its upstream answers 502/503/504
-      // ITSELF, so it reads as a broken path rather than a refused request.
+      // Any status below 500 means the request DID reach something — the target
+      // when it went direct, or the far side of the proxy. Against a real upstream
+      // a bare POST normally answers 4xx (401/404) — the expected answer, and
+      // proof the path works. A 5xx is the opposite: an HTTP proxy that cannot
+      // reach its upstream answers 502/503/504 ITSELF, so it reads as a broken
+      // path rather than a refused request.
       const reachable = response.status < 500
       return {
         ok: reachable,
         ms,
         status: response.status,
+        viaProxy,
         ...(exitIp === undefined ? {} : { exitIp }),
         kind: reachable ? 'ok' : 'target',
       }
     } catch (error) {
-      return { ok: false, ms: Math.round(performance.now() - started), ...classifyTestError(error) }
+      return {
+        ok: false,
+        ms: Math.round(performance.now() - started),
+        viaProxy,
+        ...classifyTestError(error, viaProxy),
+      }
     }
   }
 
