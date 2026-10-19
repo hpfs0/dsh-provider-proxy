@@ -162,9 +162,20 @@ export function apply(ctx: any, config?: ProxyConfig): void {
       }
       return { ok: false, kind: 'no-route', error: `provider "${provider}" 未启用代理` }
     }
+    // A route's own testTarget wins over the top-level testUrl, so a check can
+    // point at the provider's REAL upstream and prove the end-to-end path, not
+    // just the proxy hop. Validated here rather than in the route guards on
+    // purpose: this value never touches routing, so a typo costs a failed
+    // check, not a route the table refuses to carry.
+    const target = route.testTarget.length > 0 ? route.testTarget : plainTestUrl()
+    try {
+      new URL(target)
+    } catch {
+      return { ok: false, kind: 'target', error: `自检目标不是合法 URL：${target}` }
+    }
     const started = performance.now()
     try {
-      const response = await undiciFetch(plainTestUrl(), {
+      const response = await undiciFetch(target, {
         dispatcher: route.dispatcher,
         signal: AbortSignal.timeout(TEST_TIMEOUT_MS),
       } as never)

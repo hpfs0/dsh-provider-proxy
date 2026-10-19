@@ -173,3 +173,60 @@ test('concurrent checks for one provider share a single outbound request', async
     await proxy.close()
   }
 })
+
+// A route's own testTarget wins over the top-level testUrl: pointing the check
+// at the provider's REAL upstream proves the end-to-end path, not just the
+// proxy hop.
+test('a provider testTarget overrides the top-level testUrl', async () => {
+  const proxy = await startEchoProxy()
+  try {
+    const { routes } = mountHost({
+      providers: {
+        get: () => ({
+          p: {
+            enabled: true,
+            protocol: 'http',
+            host: '127.0.0.1',
+            port: proxy.port,
+            testTarget: 'http://echo.invalid/upstream',
+          },
+        }),
+      },
+      testUrl: 'http://echo.invalid/ip',
+    })
+    const { body } = await selfCheck(routes, { provider: 'p' })
+    assert.equal(body.ok, true)
+    assert.equal(proxy.seen[0].url, 'http://echo.invalid/upstream', 'the check used the route target, not the global testUrl')
+  } finally {
+    await proxy.close()
+  }
+})
+
+// testTarget never touches routing, so a typo must not reject the route — it
+// only fails the check, and names the bad value instead of the proxy hop.
+test('an unparsable testTarget fails the check without rejecting the route', async () => {
+  const proxy = await startEchoProxy()
+  try {
+    const { routes } = mountHost({
+      providers: {
+        get: () => ({
+          p: {
+            enabled: true,
+            protocol: 'http',
+            host: '127.0.0.1',
+            port: proxy.port,
+            testTarget: 'not a url',
+          },
+        }),
+      },
+      testUrl: 'http://echo.invalid/ip',
+    })
+    const { body } = await selfCheck(routes, { provider: 'p' })
+    assert.equal(body.ok, false)
+    assert.equal(body.kind, 'target')
+    assert.match(body.error, /自检目标/, 'the report must name the misconfigured field')
+    assert.equal(proxy.seen.length, 0, 'nothing was sent for an unparsable target')
+  } finally {
+    await proxy.close()
+  }
+})

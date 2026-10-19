@@ -612,6 +612,7 @@ test('the cards expose the advanced target-host rules', async () => {
     const texts = textsOf(render())
     assert.ok(texts.includes('高级：目标域名规则'), 'the advanced rules section must be rendered')
     assert.ok(texts.includes('仅走代理'), 'the onlyHosts field must be rendered')
+    assert.ok(texts.includes('自检目标'), 'the per-provider testTarget field must be rendered')
   } finally {
     restore()
   }

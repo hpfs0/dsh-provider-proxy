@@ -110,6 +110,12 @@ export const ProviderProxyRoute = z.object({
   onlyHosts: z.string().default(''),
   /** Comma/space-separated TARGET hosts that bypass the proxy; takes priority over `onlyHosts`. */
   bypassHosts: z.string().default(''),
+  /**
+   * Optional self-check target for THIS provider's 测试 button. Empty falls back
+   * to the top-level `testUrl`. Only the self-check reads it; routing never
+   * touches it, so a bad value costs a failed check, never a broken route.
+   */
+  testTarget: z.string().default(''),
 })
 
 export const Config = z.object({
@@ -132,6 +138,7 @@ export interface ProviderProxyRouteValue {
   password: string
   onlyHosts: string
   bypassHosts: string
+  testTarget: string
 }
 
 export interface ConfigShape {
@@ -159,8 +166,9 @@ export function normalizeRoute(
   // hostname, so both sides of the comparison agree.
   const onlyHosts = value.onlyHosts.trim().toLowerCase()
   const bypassHosts = value.bypassHosts.trim().toLowerCase()
+  const testTarget = value.testTarget.trim()
 
-  if (!value.enabled) return { ...value, port: value.port || 0, onlyHosts, bypassHosts }
+  if (!value.enabled) return { ...value, port: value.port || 0, onlyHosts, bypassHosts, testTarget }
 
   const host = value.host.trim()
   if (host.length === 0) {
@@ -174,5 +182,5 @@ export function normalizeRoute(
       `dsh-provider-proxy: provider "${provider}" 的代理端口无效（需为 1-65535 的整数）`,
     )
   }
-  return { ...value, host, username: value.username.trim(), onlyHosts, bypassHosts }
+  return { ...value, host, username: value.username.trim(), onlyHosts, bypassHosts, testTarget }
 }

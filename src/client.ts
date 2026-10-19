@@ -33,6 +33,7 @@ type RouteValue = {
   password: string
   onlyHosts: string
   bypassHosts: string
+  testTarget: string
 }
 
 /** The provider rows we know about, and which of them are actually live. */
@@ -357,6 +358,7 @@ function view(route: Partial<RouteValue> | undefined): RouteValue {
     password: route?.password ?? '',
     onlyHosts: route?.onlyHosts ?? '',
     bypassHosts: route?.bypassHosts ?? '',
+    testTarget: route?.testTarget ?? '',
   }
 }
 
@@ -931,6 +933,21 @@ function renderPage(ctx: any): unknown {
               }),
               t.bypassHostsHint,
             ),
+            // The self-check target: empty uses the top-level testUrl, set makes
+            // this card's Test request this URL — a real upstream proves the whole
+            // path, not just the proxy hop.
+            field(
+              t.testTarget,
+              h('input', {
+                className: styles.input,
+                style: S.input,
+                disabled,
+                placeholder: 'https://api.example.com',
+                value: route.testTarget,
+                onChange: (event: any) => bind(row.id, 'testTarget')(event.target.value),
+              }),
+              t.testTargetHint,
+            ),
           ),
         )
       })
@@ -999,6 +1016,8 @@ const EN = {
   onlyHostsHint: 'Comma/space separated; when set, only requests to these hosts are proxied (suffix match, * for all).',
   bypassHosts: 'Bypass',
   bypassHostsHint: 'Comma/space separated; requests to these hosts go direct, taking priority.',
+  testTarget: 'Self-check target',
+  testTargetHint: 'Empty uses the top-level testUrl; when set, this card\'s Test requests this URL instead — point it at a real upstream to verify the end-to-end path.',
   socks5Hint: 'SOCKS5 tunnels the connection; the proxy resolves the target host name.',
   on: 'proxied',
   live: 'active',
@@ -1030,6 +1049,8 @@ const ZH = {
   onlyHostsHint: '逗号或空格分隔；非空时只有匹配这些主机的请求走代理（后缀匹配，* 表示全部）。',
   bypassHosts: '直连',
   bypassHostsHint: '逗号或空格分隔；匹配这些主机的请求直连，优先于上一项。',
+  testTarget: '自检目标',
+  testTargetHint: '留空用顶层 testUrl；填写后该卡片的「测试」改为请求这个地址，可拿真实上游验证端到端路径。',
   socks5Hint: 'SOCKS5 会建立隧道，目标域名由代理端解析。',
   on: '走代理',
   live: '启用中',

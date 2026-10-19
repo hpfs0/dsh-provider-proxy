@@ -26,6 +26,11 @@ export interface RouteEntry {
   dispatcher: DispatcherLike
   /** Whether one request's target host goes through the proxy or stays direct. */
   decide: (host: string | undefined) => 'proxy' | 'direct'
+  /**
+   * This route's self-check target: a URL, or '' to use the top-level `testUrl`.
+   * Only the self-check reads it; a bad value fails a check, never a route.
+   */
+  testTarget: string
 }
 
 function proxyUrl(route: ProviderProxyRouteValue): string {
@@ -233,6 +238,7 @@ export function createProxyTable(
       proxyOrigin: displayOrigin(route, url),
       dispatcher,
       decide: buildDecide(route),
+      testTarget: route.testTarget,
     })
   }
 
