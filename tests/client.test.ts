@@ -1596,3 +1596,47 @@ test('the shared default block accepts a pasted proxy URL too', async () => {
     restore()
   }
 })
+
+// ---- filtering the provider list ----
+
+test('the list can be filtered without touching any saved setting', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const { writes } = harness
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const input = findInputsByPlaceholder(render(), '按名称或 id 过滤…')[0]
+    assert.ok(input, 'expected the filter input above the cards')
+
+    input.props.onChange({ target: { value: 'sense' } })
+    assert.ok(cardFor(render(), 'sensenova'), 'a matching provider stays')
+    assert.equal(cardFor(render(), 'openai'), undefined, 'a non-matching provider is hidden')
+
+    input.props.onChange({ target: { value: '' } })
+    assert.ok(cardFor(render(), 'openai'), 'clearing the filter brings every card back')
+
+    await writeSettle()
+    assert.equal(writes.length, 0, 'the filter is a view concern, it must never write a setting')
+  } finally {
+    restore()
+  }
+})
+
+test('a filter that matches nothing says so, instead of an empty page', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    findInputsByPlaceholder(render(), '按名称或 id 过滤…')[0].props.onChange({ target: { value: 'zzz' } })
+    const texts = textsOf(render())
+    assert.ok(texts.includes('没有匹配的 provider。'))
+    assert.ok(
+      !texts.includes('没有检测到任何 provider。'),
+      'a filter miss must not read as though the deployment offered nothing',
+    )
+  } finally {
+    restore()
+  }
+})

@@ -748,6 +748,12 @@ function renderPage(ctx: any): unknown {
   const [tests, setTests] = (React.useState ?? ((v: any) => [v, () => {}]))({})
 
   /**
+   * The list filter. Purely a view concern: it hides cards, it never touches a
+   * saved setting, so a page with no filter one day still shows every route.
+   */
+  const [filter, setFilter] = (React.useState ?? ((v: any) => [v, () => {}]))('')
+
+  /**
    * Run the Host's self-check for one provider.
    *
    * The check is not routed traffic, so it never changes the hit count; the count
@@ -1065,9 +1071,28 @@ function renderPage(ctx: any): unknown {
     ),
   )
 
+  const query = filter.trim().toLowerCase()
+  const shown =
+    query.length === 0
+      ? rows
+      : rows.filter(row => `${row.id} ${row.name}`.toLowerCase().includes(query))
+  const filterRow =
+    rows.length === 0
+      ? null
+      : field(
+          t.filterLabel,
+          h('input', {
+            className: styles.input,
+            style: S.input,
+            placeholder: t.filterPlaceholder,
+            value: filter,
+            onChange: (event: any) => setFilter(event.target.value),
+          }),
+        )
+
   // ALWAYS an array: a single element is not iterable, and spreading one threw
   // "Spread syntax requires ...iterable[Symbol.iterator]" on an empty list.
-  const body: unknown[] = rows.length === 0
+  const body: unknown[] = shown.length === 0
     ? [
         h(
           'p',
@@ -1084,10 +1109,10 @@ function renderPage(ctx: any): unknown {
               color: 'var(--dsw-alias-state-idle-primary)',
             },
           },
-          t.empty,
+          query.length > 0 ? t.noMatch : t.empty,
         ),
       ]
-    : rows.map(row => {
+    : shown.map(row => {
         // The MERGED value, so a just-typed value shows immediately.
         const route = view({ ...configured[row.id], ...draft[row.id] })
         // The endpoint controls are editable whether or not the route is on: the
@@ -1356,6 +1381,7 @@ function renderPage(ctx: any): unknown {
     { className: styles.root, style: S.root },
     h('p', { className: styles.lead, style: { margin: '0 0 4px', fontSize: '12px', lineHeight: '1.6', color: 'var(--dsw-alias-label-secondary)' } }, t.lead),
     defaultBlock,
+    filterRow,
     ...body,
     h(
       'details',
@@ -1402,6 +1428,9 @@ const EN = {
   defaultLead: 'One endpoint, reused by every provider that turns on "Use the default proxy".',
   inheritingDefault: 'Using the default proxy: ',
   defaultMissing: 'The default proxy is not configured (missing host or port), so this provider is not proxied.',
+  filterLabel: 'Filter',
+  filterPlaceholder: 'Filter by name or id…',
+  noMatch: 'No provider matches the filter.',
   protocol: 'Type',
   host: 'IP / host',
   port: 'Port',
@@ -1442,6 +1471,9 @@ const ZH = {
   defaultLead: '为勾选「使用默认代理」的 provider 复用的端点，只填一次。',
   inheritingDefault: '使用默认代理：',
   defaultMissing: '顶层默认代理未配置（缺主机或端口），该 provider 不会走代理。',
+  filterLabel: '过滤',
+  filterPlaceholder: '按名称或 id 过滤…',
+  noMatch: '没有匹配的 provider。',
   protocol: '类型',
   host: 'IP / 主机',
   port: '端口',
