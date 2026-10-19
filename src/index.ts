@@ -398,9 +398,14 @@ export function apply(ctx: any, config?: ProxyConfig): void {
    * A route's own `testTarget` first, then the provider's REAL upstream when its
    * adapter publishes one, then the top-level `testUrl` — which may itself name
    * several echo services.
+   *
+   * Takes the target as a plain string so the cooldown key can call it too, with
+   * the raw config's value: the key must be built from the SAME resolution the
+   * check uses, or the two can disagree about what the next request would try.
    */
-  const selfCheckTargets = (provider: string, route: RouteEntry): string[] => {
-    if (route.testTarget.length > 0) return [route.testTarget]
+  const selfCheckTargets = (provider: string, testTarget: string | undefined): string[] => {
+    const own = (testTarget ?? '').trim()
+    if (own.length > 0) return [own]
     const upstream = upstreamOf(provider)
     if (upstream !== undefined) return [upstream]
     return plainTestUrls()
@@ -413,7 +418,15 @@ export function apply(ctx: any, config?: ProxyConfig): void {
    * question about a configuration the user has since edited. The route's own
    * transport fields are used, plus `testTarget`; when the route opts into the
    * shared endpoint, that endpoint's fields are what actually carry the request,
-   * so they are folded in instead. It is held in memory only and never logged.
+   * so they are folded in instead.
+   *
+   * `onlyHosts`/`bypassHosts`/`localDirect` and the resolved target list are part
+   * of the answer too, and each one changes it visibly: they decide whether the
+   * probe is proxied or direct (`viaProxy`), and the target list is where the
+   * top-level `testUrl` enters when the route names no target of its own. Leaving
+   * them out meant an edit inside the cooldown handed back the pre-edit verdict
+   * with `cached: true` and issued no request at all. It is held in memory only
+   * and never logged.
    */
   const selfCheckKey = (provider: string): string => {
     const raw = plainProviders(config)[provider] ?? {}
@@ -429,6 +442,10 @@ export function apply(ctx: any, config?: ProxyConfig): void {
       endpoint.username ?? '',
       endpoint.password ?? '',
       raw.testTarget ?? '',
+      raw.onlyHosts ?? '',
+      raw.bypassHosts ?? '',
+      plainLocalDirect(config),
+      selfCheckTargets(provider, raw.testTarget),
     ])
   }
 
@@ -470,7 +487,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
     }
     try {
       let last: Record<string, unknown> | undefined
-      for (const target of selfCheckTargets(provider, route)) {
+      for (const target of selfCheckTargets(provider, route.testTarget)) {
         const outcome = await probeTarget(target, route)
         if (outcome.ok === true) return outcome
         last = outcome

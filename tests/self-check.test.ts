@@ -686,3 +686,90 @@ test('a configuration change inside the cooldown is re-checked, not answered fro
   }
 })
 
+test('the cooldown key covers the routing rules, not just the proxy address', async () => {
+  // `bypassHosts`/`onlyHosts`/`localDirect` decide whether the probe is proxied or
+  // direct, which is exactly what `viaProxy` — and therefore the whole diagnosis —
+  // reports. An edit to one of them inside the cooldown used to hand back the
+  // pre-edit `viaProxy` with `cached: true` and issue no request at all.
+  //
+  // The route is DISABLED on purpose: a disabled one is rebuilt from the config on
+  // every check (that is the pre-enable flow this feature exists for), so flipping
+  // a field is the only variable here. An enabled route would sit in the built
+  // table until a settings event rebuilt it, which is a different path.
+  const proxy = await startScriptedProxy(() => ({ status: 200, body: JSON.stringify({ ip: '203.0.113.9' }) }))
+  try {
+    const providers = {
+      p: {
+        enabled: false,
+        protocol: 'http',
+        host: '127.0.0.1',
+        port: proxy.port,
+        testTarget: 'http://echo.invalid/ip',
+        bypassHosts: '',
+      },
+    }
+    const { routes } = mountHost({ providers: { get: () => providers } })
+
+    const first = await selfCheck(routes, { provider: 'p' })
+    assert.equal(first.body.viaProxy, true, 'nothing bypasses this target yet')
+    assert.equal(proxy.seen.length, 1)
+
+    // The same target, now explicitly direct. The answer CHANGES, so the cooldown
+    // must not be allowed to answer for the old one.
+    providers.p.bypassHosts = 'echo.invalid'
+    const second = await selfCheck(routes, { provider: 'p' })
+    assert.notEqual(second.body.cached, true, 'a changed routing rule must not be answered from the cooldown')
+    assert.equal(second.body.viaProxy, false, 'the new rule decided this probe')
+    assert.equal(proxy.seen.length, 1, 'a direct probe must not cross the proxy')
+  } finally {
+    await proxy.close()
+  }
+})
+
+test('the cooldown key covers testUrl, which is what a route without a target uses', async () => {
+  // The top-level `testUrl` is the target whenever the route names none — the
+  // common case for a provider whose adapter publishes no upstream. Editing it
+  // inside the cooldown used to return the old answer untouched.
+  const proxy = await startScriptedProxy(() => ({ status: 200, body: JSON.stringify({ ip: '203.0.113.9' }) }))
+  try {
+    const config = {
+      providers: { get: () => ({ p: { enabled: true, protocol: 'http', host: '127.0.0.1', port: proxy.port } }) },
+      testUrl: 'http://first.invalid/ip',
+    }
+    const { routes } = mountHost(config)
+
+    const first = await selfCheck(routes, { provider: 'p' })
+    assert.equal(first.body.ok, true)
+    assert.deepEqual(proxy.seen, ['http://first.invalid/ip'])
+
+    config.testUrl = 'http://second.invalid/ip'
+    const second = await selfCheck(routes, { provider: 'p' })
+    assert.notEqual(second.body.cached, true, 'a changed testUrl must not be answered from the cooldown')
+    assert.deepEqual(
+      proxy.seen,
+      ['http://first.invalid/ip', 'http://second.invalid/ip'],
+      'the new target was actually tried',
+    )
+  } finally {
+    await proxy.close()
+  }
+})
+
+test('the cooldown still caches an UNCHANGED configuration', async () => {
+  // The fingerprint must not be so eager that it defeats the cooldown it exists to
+  // key: an impatient second click on an untouched route gets the remembered
+  // answer, marked `cached`, with no new outbound request.
+  const proxy = await startEchoProxy()
+  try {
+    const { routes } = mountHost(oneRoute(proxy.port))
+    const first = await selfCheck(routes, { provider: 'p' })
+    assert.equal(first.body.cached, undefined)
+    const second = await selfCheck(routes, { provider: 'p' })
+    assert.equal(second.body.cached, true, 'an unchanged configuration is still cached')
+    assert.equal(second.body.exitIp, first.body.exitIp)
+    assert.equal(proxy.seen.length, 1, 'the cached answer cost no outbound request')
+  } finally {
+    await proxy.close()
+  }
+})
+

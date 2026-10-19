@@ -1381,8 +1381,89 @@ test('a card using an unconfigured default explains the refusal', async () => {
     const [tree] = renderPage(mod, harness)
     const card = cardFor(tree, 'sensenova')
     assert.ok(
-      textsOf(card).some(text => text.includes('顶层默认代理未配置')),
+      textsOf(card).some(text => text.includes('顶层默认代理不可用')),
       'the card must say why it is not proxied instead of showing empty inputs',
+    )
+    assert.ok(
+      textsOf(card).some(text => text.includes('未填写代理地址')),
+      'and it must name the REASON, so the user is sent to the right field',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('a scheme-carrying default explains THAT, not a missing host or port', async () => {
+  // The card previously said "missing host or port" for every refusal, including
+  // the ones where both are perfectly filled in — sending the user to the field
+  // that was already right. The reason now comes from the shared predicate, so it
+  // is the same sentence the Host records.
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        defaultProxy: { protocol: 'http', host: 'https://1.2.3.4', port: 7890 },
+        providers: {
+          sensenova: {
+            enabled: true,
+            useDefault: true,
+            protocol: 'http',
+            host: '',
+            port: 0,
+            username: '',
+            password: '',
+          },
+        },
+      },
+    })
+    const [tree] = renderPage(mod, harness)
+    const card = cardFor(tree, 'sensenova')
+    assert.ok(
+      textsOf(card).some(text => text.includes('只填主机名或 IP')),
+      'the card must name the scheme/path rule the host actually breaks',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('a half-filled default credential disables the bulk button and explains why', async () => {
+  // The shared predicate must agree with the credential guards in
+  // `buildRouteEntry`: a default carrying a username and no password builds NO
+  // route, so calling it usable here would light the block green and enable a
+  // button that just refuses every card it touches.
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        defaultProxy: { protocol: 'http', host: '127.0.0.1', port: 7890, username: 'alice', password: '' },
+        providers: {
+          sensenova: {
+            enabled: true,
+            useDefault: true,
+            protocol: 'http',
+            host: '',
+            port: 0,
+            username: '',
+            password: '',
+          },
+        },
+      },
+    })
+    const [tree, render] = renderPage(mod, harness)
+    const applyAll = findButtons(tree).find(button =>
+      textsOf(button).includes('所有 provider 使用默认代理'),
+    )
+    assert.ok(applyAll)
+    assert.equal(
+      applyAll.props.disabled,
+      true,
+      'a default that builds no route must not be advertised as usable',
+    )
+    const card = cardFor(render(), 'sensenova')
+    assert.ok(
+      textsOf(card).some(text => text.includes('配置了代理用户名但没有密码')),
+      'the card must name the half-filled credential, not a missing address',
     )
   } finally {
     restore()

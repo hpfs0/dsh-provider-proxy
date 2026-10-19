@@ -424,6 +424,38 @@ test('the shared-endpoint predicate is the SAME record the Host and browser appl
   assert.equal(defaultProxyProblem({ host: 'proxy.test', port: 8080 }), undefined)
 })
 
+test('a half-filled default credential is not usable — the guards would refuse the route', async () => {
+  // The predicate must PREDICT the build, or the browser goes green on a default
+  // that produces `entries.size === 0` for every card pointing at it. Both
+  // directions of the pairing, on the predicate and on the build that follows it.
+  const endpoint = (username: string, password: string) => ({ host: 'proxy.test', port: 8080, username, password })
+  assert.match(defaultProxyProblem(endpoint('alice', '')) ?? '', /用户名.*密码/)
+  assert.match(defaultProxyProblem(endpoint('', 'hunter2')) ?? '', /密码.*用户名/)
+  // A paired credential — including the empty pair — is fine.
+  assert.equal(defaultProxyProblem(endpoint('', '')), undefined)
+  assert.equal(defaultProxyProblem(endpoint('alice', 'hunter2')), undefined)
+
+  // And the build agrees: each half-filled pair is refused, each complete one is not.
+  for (const [username, password] of [['alice', ''], ['', 'hunter2']]) {
+    const { entries, problems } = await createProxyTable(
+      { p: { enabled: true, useDefault: true } },
+      { defaultProxy: { protocol: 'http', host: 'proxy.test', port: 8080, username, password } },
+    )
+    assert.equal(entries.size, 0, `"${username}"/"${password}" must build no route`)
+    assert.notEqual(problems.get('p'), undefined)
+  }
+})
+
+test('the shared predicate tolerates a partial or empty endpoint instead of throwing', async () => {
+  // The browser calls it with whatever the settings document currently holds, and
+  // during a half-typed edit that is not a complete endpoint. `{}` used to throw
+  // `Cannot read properties of undefined (reading 'trim')`.
+  assert.equal(defaultProxyProblem({}), '未填写代理地址')
+  assert.equal(defaultProxyProblem({ host: undefined, port: undefined }), '未填写代理地址')
+  assert.equal(defaultProxyProblem({ host: '   ', port: 8080 }), '未填写代理地址')
+  assert.match(defaultProxyProblem({ host: 'proxy.test', port: 8080, username: 'alice', password: undefined }) ?? '', /用户名/)
+})
+
 test('a shared endpoint carrying a scheme is refused, naming the default block', async () => {
   // The Host rejects this at the DEFAULT block, with a message naming the
   // default — rather than accepting it and only failing later on each card.

@@ -1108,7 +1108,13 @@ function renderPage(ctx: any): unknown {
   // browser copy that only checked "host non-empty and port in range" called
   // `https://1.2.3.4` usable and enabled the bulk button, while the Host refused
   // every route pointed at it.
-  const defaultUsable = defaultProxyProblem(defaultView) === undefined
+  //
+  // The REASON is kept as well as the verdict: the block refuses for several
+  // reasons (no host, a scheme-carrying host, a bad port, a half-filled
+  // credential), and a card that said "missing host or port" for all of them sent
+  // the user to the one field that was already correct.
+  const defaultWhy = defaultProxyProblem(defaultView)
+  const defaultUsable = defaultWhy === undefined
   const defaultOrigin = `${defaultView.protocol}://${defaultView.host}:${defaultView.port}`
   const defaultBlock = h(
     'div',
@@ -1447,7 +1453,7 @@ function renderPage(ctx: any): unknown {
                     key: `${row.id}:inherit`,
                     style: defaultUsable ? S.inheritNote : S.inheritWarning,
                   },
-                  defaultUsable ? `${t.inheritingDefault}${defaultOrigin}` : t.defaultMissing,
+                  defaultUsable ? `${t.inheritingDefault}${defaultOrigin}` : `${t.defaultMissing}${defaultWhy}`,
                 ),
               ]
             : endpointFields),
@@ -1608,7 +1614,7 @@ const EN = {
   defaultTitle: 'Default proxy',
   defaultLead: 'One endpoint, reused by every provider that turns on "Use the default proxy".',
   inheritingDefault: 'Using the default proxy: ',
-  defaultMissing: 'The default proxy is not configured (missing host or port), so this provider is not proxied.',
+  defaultMissing: 'The default proxy cannot be used, so this provider is not proxied: ',
   filterLabel: 'Filter',
   filterPlaceholder: 'Filter by name or id…',
   noMatch: 'No provider matches the filter.',
@@ -1662,7 +1668,7 @@ const ZH = {
   defaultTitle: '默认代理',
   defaultLead: '为勾选「使用默认代理」的 provider 复用的端点，只填一次。',
   inheritingDefault: '使用默认代理：',
-  defaultMissing: '顶层默认代理未配置（缺主机或端口），该 provider 不会走代理。',
+  defaultMissing: '顶层默认代理不可用，该 provider 不会走代理：',
   filterLabel: '过滤',
   filterPlaceholder: '按名称或 id 过滤…',
   noMatch: '没有匹配的 provider。',
