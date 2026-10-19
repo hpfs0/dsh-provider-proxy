@@ -21,6 +21,7 @@
 // at materialization. The binding is what the component reads; importing it for
 // side effects only would leave `styles` undefined at render time.
 import styles from './client.css'
+import { defaultProxyProblem } from './proxy-address.js'
 
 type Protocol = 'http' | 'https' | 'socks5'
 
@@ -1083,13 +1084,11 @@ function renderPage(ctx: any): unknown {
    */
   const storedDefault = (snapshot.value?.defaultProxy ?? {}) as Partial<RouteValue>
   const defaultView = view({ ...storedDefault, ...defaultDraft })
-  // The same predicate the Host uses to decide a route opted into a broken
-  // default; duplicated here because the browser has no access to the Host half.
-  const defaultUsable =
-    defaultView.host.length > 0 &&
-    Number.isInteger(defaultView.port) &&
-    defaultView.port >= 1 &&
-    defaultView.port <= 65535
+  // The SAME predicate the Host applies, imported rather than re-written: a
+  // browser copy that only checked "host non-empty and port in range" called
+  // `https://1.2.3.4` usable and enabled the bulk button, while the Host refused
+  // every route pointed at it.
+  const defaultUsable = defaultProxyProblem(defaultView) === undefined
   const defaultOrigin = `${defaultView.protocol}://${defaultView.host}:${defaultView.port}`
   const defaultBlock = h(
     'div',

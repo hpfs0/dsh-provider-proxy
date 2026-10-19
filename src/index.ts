@@ -743,3 +743,4 @@ export function apply(ctx: any, config?: ProxyConfig): void {
 export { acquireFetchRouter } from './fetch-router.js'
 export { buildRouteEntry, createProxyTable, closeTable, proxyUrl } from './proxy-table.js'
 export { Config, ProviderProxyRoute, normalizeRoute, normalizeDefaultProxy, PROTOCOLS } from './config.js'
+export { defaultProxyProblem } from './proxy-address.js'

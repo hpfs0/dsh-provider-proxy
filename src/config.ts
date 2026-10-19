@@ -226,23 +226,6 @@ export function normalizeDefaultProxy(raw: Partial<DefaultProxyValue> | undefine
 }
 
 /**
- * Whether the shared endpoint can actually carry a request.
- *
- * A route that opts in while this is false is REFUSED with a message naming the
- * default, rather than falling back to its own (empty) fields — otherwise the
- * user would see the generic "no proxy address" on a card they never typed an
- * address into, and blame the card.
- */
-export function usableDefaultProxy(defaultProxy: DefaultProxyValue): boolean {
-  return (
-    defaultProxy.host.length > 0 &&
-    Number.isInteger(defaultProxy.port) &&
-    defaultProxy.port >= 1 &&
-    defaultProxy.port <= 65535
-  )
-}
-
-/**
  * Validate one route and return the normalized value, or throw with a
  * field-scoped message. Used by both the Host (before opening a dispatcher)
  * and the settings form (before writing), so an invalid value never reaches

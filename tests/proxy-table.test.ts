@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { buildRouteEntry, closeTable, createProxyTable, normalizeDefaultProxy, normalizeRoute, proxyUrl } from '../lib/index.js'
+import { buildRouteEntry, closeTable, createProxyTable, defaultProxyProblem, normalizeDefaultProxy, normalizeRoute, proxyUrl } from '../lib/index.js'
 
 test('proxyUrl assembles host, port and protocol', () => {
   assert.equal(
@@ -411,6 +411,29 @@ test('opting into an unconfigured shared endpoint is refused, naming the default
   )
   assert.equal(blank.entries.size, 0)
   assert.match(blank.problems.get('p'), /默认代理/)
+})
+
+test('the shared-endpoint predicate is the SAME record the Host and browser apply', async () => {
+  // One predicate, imported by both halves. A missing host, a host carrying a
+  // scheme or path, and an out-of-range port are each reported with the reason;
+  // a populated endpoint is fine.
+  assert.equal(defaultProxyProblem({ host: '', port: 0 }), '未填写代理地址')
+  assert.match(defaultProxyProblem({ host: 'https://1.2.3.4', port: 8080 }) ?? '', /只填主机名或 IP/)
+  assert.match(defaultProxyProblem({ host: 'proxy.test/path', port: 8080 }) ?? '', /只填主机名或 IP/)
+  assert.match(defaultProxyProblem({ host: 'proxy.test', port: 0 }) ?? '', /端口/)
+  assert.equal(defaultProxyProblem({ host: 'proxy.test', port: 8080 }), undefined)
+})
+
+test('a shared endpoint carrying a scheme is refused, naming the default block', async () => {
+  // The Host rejects this at the DEFAULT block, with a message naming the
+  // default — rather than accepting it and only failing later on each card.
+  const { entries, problems } = await createProxyTable(
+    { p: { enabled: true, useDefault: true } },
+    { defaultProxy: { protocol: 'http', host: 'https://1.2.3.4', port: 8080 } },
+  )
+  assert.equal(entries.size, 0)
+  assert.match(problems.get('p'), /使用默认代理/)
+  assert.match(problems.get('p'), /只填主机名或 IP/)
 })
 
 test('useDefault is irrelevant to a disabled route', async () => {

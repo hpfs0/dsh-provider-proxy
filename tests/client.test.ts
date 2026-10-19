@@ -1889,6 +1889,32 @@ test('the bulk button is disabled while the default is unusable', async () => {
   }
 })
 
+test('a default host carrying a scheme does not read as usable', async () => {
+  // The browser must apply the SAME predicate the Host does. A host like
+  // `https://1.2.3.4` has no scheme/path removed by the paste handler here, and
+  // the Host refuses every route that points at it — so the browser must not
+  // light the block green nor enable the bulk button.
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: { defaultProxy: { protocol: 'http', host: 'https://1.2.3.4', port: 7890 } },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const applyAll = findButtons(render()).find(button =>
+      textsOf(button).includes('所有 provider 使用默认代理'),
+    )
+    assert.ok(applyAll)
+    assert.equal(
+      applyAll.props.disabled,
+      true,
+      'a scheme-carrying host cannot carry a route, so the bulk button must stay off',
+    )
+  } finally {
+    restore()
+  }
+})
+
 test('an enabled route with no record yet says so; a disabled one stays silent', async () => {
   const { mod, restore } = loadBundle()
   try {

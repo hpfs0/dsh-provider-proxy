@@ -19,10 +19,10 @@ import { ProxyAgent, Socks5ProxyAgent } from 'undici'
 import {
   normalizeDefaultProxy,
   normalizeRoute,
-  usableDefaultProxy,
   type DefaultProxyValue,
   type ProviderProxyRouteValue,
 } from './config.js'
+import { defaultProxyProblem } from './proxy-address.js'
 import type { DispatcherLike } from './fetch-router.js'
 
 export interface RouteEntry {
@@ -245,10 +245,11 @@ export function buildRouteEntry(
   // Checked BEFORE the merge so the refusal names the setting the user actually
   // has to fix — the default block — instead of the card's empty fields.
   if (raw?.useDefault === true) {
-    if (!usableDefaultProxy(options.defaultProxy)) {
+    const why = defaultProxyProblem(options.defaultProxy)
+    if (why !== undefined) {
       return {
         ok: false,
-        problem: `dsh-provider-proxy: provider "${provider}" 启用了「使用默认代理」，但顶层默认代理未配置（需填写主机与 1-65535 的端口）`,
+        problem: `dsh-provider-proxy: provider "${provider}" 启用了「使用默认代理」，但顶层默认代理不可用：${why}`,
       }
     }
     effective = withDefaultProxy(raw, options.defaultProxy)
