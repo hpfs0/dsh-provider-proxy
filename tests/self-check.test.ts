@@ -174,6 +174,26 @@ test('concurrent checks for one provider share a single outbound request', async
   }
 })
 
+// The in-flight dedup only merges CONCURRENT checks; without a cooldown, a slow
+// echo target could be hammered serially by repeated clicks. A click inside the
+// cooldown gets the remembered answer back — the truth about an unchanged
+// configuration, marked cached — instead of a new outbound request.
+test('a completed check is answered from the cooldown without a new outbound request', async () => {
+  const proxy = await startEchoProxy()
+  try {
+    const { routes } = mountHost(oneRoute(proxy.port))
+    const first = await selfCheck(routes, { provider: 'p' })
+    assert.equal(first.body.cached, undefined, 'a fresh check is not marked cached')
+    const second = await selfCheck(routes, { provider: 'p' })
+    assert.equal(second.body.cached, true, 'a click inside the cooldown is answered from memory')
+    assert.equal(second.body.ok, true)
+    assert.equal(second.body.exitIp, '203.0.113.9')
+    assert.equal(proxy.seen.length, 1, 'no second outbound request was made')
+  } finally {
+    await proxy.close()
+  }
+})
+
 // A route's own testTarget wins over the top-level testUrl: pointing the check
 // at the provider's REAL upstream proves the end-to-end path, not just the
 // proxy hop.

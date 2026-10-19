@@ -100,8 +100,9 @@ dsh plugin --profile web add dsh-provider-proxy
 - **不支持 PAC**，也不读取系统代理设置。
 - **不改写 `baseURL`** —— 反向代理/中转请直接在 provider 上配置。
 - **代理不可达时**请求照常失败，DSH 既有的重试与错误码语义不变。
-- **连接自检依赖 `testUrl` 可达。** 默认的回显主机在部分网络下可能不可达，会让自检误报失败；请通过 `testUrl` 换成自建回显服务。自检只接受 `POST`，同一 provider 的多次点击会共享同一次在飞请求，不会被当成外呼放大器。
+- **连接自检依赖 `testUrl` 可达。** 默认的回显主机在部分网络下可能不可达，会让自检误报失败；请通过 `testUrl` 换成自建回显服务。自检只接受 `POST`，同一 provider 的在飞请求会合并、完成后的 3 秒内重复点击直接返回上次结果（标记 `cached`），不会被当成外呼放大器。
 - **代理密码以明文随设置写入 `cordis.patch.yml`。** HTTP/HTTPS 的密码会拼进交给 `undici` 的代理 URL（`ProxyAgent` 由此生成 `Proxy-Authorization`），SOCKS5 的密码只作为选项传给 `Socks5ProxyAgent`；两者都不会出现在日志或诊断里的代理 URL——那里只显示不含凭据的 origin。
+- **设置页的两个端点没有自己的鉴权。** `/dsh-provider-proxy/providers`（provider 列表、计数、被拒原因）与 `/dsh-provider-proxy/test` 的访问边界完全由 DSH 的 webServer 决定。webServer 只绑定本机回环时没有顾虑；若它绑定到非 loopback 地址，同网络的其它主机可以读到这些信息并触发自检外呼（自检有在飞合并、8 KiB 请求体上限与 3 秒冷却，但仍是可触发的外呼）。
 
 ## 如何验证代理确实生效
 

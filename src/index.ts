@@ -75,6 +75,16 @@ export function apply(ctx: any, config?: ProxyConfig): void {
   const MAX_REQUEST_BYTES = 8 * 1024
   /** One in-flight check per provider, so a repeated click cannot multiply outbound requests. */
   const selfChecks = new Map<string, Promise<Record<string, unknown>>>()
+  /**
+   * The last COMPLETED check per provider, with its finish time. A click inside
+   * the cooldown gets the remembered answer back instead of a new outbound
+   * request: the in-flight dedup above only merges CONCURRENT checks, so without
+   * this, a slow echo target could be hammered serially by impatient clicks.
+   * The answer is the truth about a configuration that has not changed — not a
+   * stale value — and it is marked `cached` so a caller can tell.
+   */
+  const SELF_CHECK_COOLDOWN_MS = 3_000
+  const lastChecks = new Map<string, { at: number; result: Record<string, unknown> }>()
 
   /** Read `testUrl`, which is Volatile under the Loader and therefore needs `.get()`. */
   const plainTestUrl = (): string => {
@@ -368,7 +378,15 @@ export function apply(ctx: any, config?: ProxyConfig): void {
               }
               let pending = selfChecks.get(provider)
               if (pending === undefined) {
-                pending = runSelfCheck(provider)
+                const last = lastChecks.get(provider)
+                if (last !== undefined && Date.now() - last.at < SELF_CHECK_COOLDOWN_MS) {
+                  send(200, { ...last.result, cached: true })
+                  return
+                }
+                pending = runSelfCheck(provider).then(result => {
+                  lastChecks.set(provider, { at: Date.now(), result })
+                  return result
+                })
                 selfChecks.set(provider, pending)
                 void pending.finally(() => {
                   if (selfChecks.get(provider) === pending) selfChecks.delete(provider)
