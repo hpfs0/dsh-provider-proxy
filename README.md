@@ -60,6 +60,8 @@ dsh plugin --profile web add dsh-provider-proxy
 
 两者都按后缀匹配（`example.com` 覆盖 `api.example.com`），`*` 表示全部，大小写不敏感。**默认是 fail-closed**：启用了代理的路由默认走代理，只有「`bypassHosts` 命中」与「`onlyHosts` 非空且未命中」两种显式例外才直连；解析不出目标主机时**仍走代理**，避免畸形 URL 把带凭据的请求悄悄直连出去。
 
+带协议前缀（`https://…`）或路径（`example.com/v1`）的条目永远匹配不上——规则只认主机名。这类条目会在输入框下以错误色标出，因为后果是静默的：`onlyHosts` 里的死条目会让 fail-closed 把流量直连出去，而用户以为已经走代理。
+
 当组成里存在 web 服务时，列表还会多出一张 **Web 搜索** 卡片（保留 id `web-search`，字段与其它卡片完全相同，也支持自检、计数与域名规则）。它承载 `web_search` 工具的流量；不启用它，搜索保持直连。
 
 > **为什么是独立设置页，而不是内嵌在 Models 的 provider 卡片里？**

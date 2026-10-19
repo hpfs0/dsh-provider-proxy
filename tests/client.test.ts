@@ -618,6 +618,52 @@ test('the cards expose the advanced target-host rules', async () => {
   }
 })
 
+test('a target-host rule entry that can never match is flagged where it is typed', async () => {
+  // A malformed entry fails SILENTLY on the Host side: `onlyHosts` with a dead
+  // entry means fail-closed sends the traffic DIRECT while the user believes it
+  // is proxied. The page must name the offending entry at the input itself.
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: {
+            enabled: true,
+            protocol: 'http',
+            host: '10.0.0.1',
+            port: 7890,
+            username: '',
+            password: '',
+            onlyHosts: 'https://api.example.com, *.example.com',
+            bypassHosts: 'localhost',
+          },
+          openai: { enabled: false, protocol: 'http', host: '', port: 0, username: '', password: '' },
+        },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const texts = textsOf(render())
+
+    const warning = texts.find(t => t.includes('永远匹配不上'))
+    assert.ok(warning, 'a dead rule entry must be flagged')
+    assert.ok(
+      warning.includes('https://api.example.com'),
+      'the warning names the entry that cannot match',
+    )
+    assert.ok(
+      !warning.includes('*.example.com'),
+      'a `*.`-prefixed entry is valid (the Host strips the prefix) and must not be flagged',
+    )
+    assert.ok(
+      !texts.some(t => t.includes('localhost') && t.includes('永远匹配不上')),
+      'a well-formed bypass entry keeps the ordinary hint',
+    )
+  } finally {
+    restore()
+  }
+})
+
 test('a Host that reports no providers degrades to the empty message', async () => {
   const { mod, restore } = loadBundle(async () => ({
     ok: true,
