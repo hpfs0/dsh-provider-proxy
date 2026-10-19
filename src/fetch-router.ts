@@ -47,6 +47,15 @@ export interface RouterStore {
   /** Called once per request that actually leaves through the proxy. */
   onHit?: () => void
   /**
+   * Called once the request SETTLES.
+   *
+   * `ok` reads the outcome exactly as the connection self-check does — a
+   * response below 500 means the path worked — and `detail` is that response on
+   * success or the raw error on failure, left unclassified so the caller can
+   * name the failure with whatever error vocabulary it already has.
+   */
+  onSettle?: (ok: boolean, detail: unknown) => void
+  /**
    * Decide whether one request is proxied or sent directly, given its target
    * host (`undefined` when the input carries no parsable URL). Absent means
    * "always proxy within this scope".
@@ -122,10 +131,23 @@ function installSharedRouter(): RouterState {
     // Same undici realm as the dispatcher — Node's own fetch would reject it.
     // The init is passed through structurally: the DOM `RequestInit` and the
     // undici one disagree on `body`/`duplex`, so both are erased here.
-    return undiciFetch(input as never, {
+    const inFlight = undiciFetch(input as never, {
       ...(init as Record<string, unknown> | undefined),
       dispatcher: active.dispatcher as never,
-    } as never) as never
+    } as never) as unknown as Promise<{ status: number }>
+    if (active.onSettle !== undefined) {
+      const settle = active.onSettle
+      // Observe the OUTCOME without changing the caller's promise: the handlers
+      // hang off a DERIVED promise, both arms are handled here so nothing can
+      // surface as an unhandled rejection, and the original is returned as-is.
+      void inFlight
+        .then(
+          response => settle(response.status < 500, response),
+          (error: unknown) => settle(false, error),
+        )
+        .catch(() => undefined)
+    }
+    return inFlight as never
   }
 
   Object.defineProperty(globalThis, 'fetch', {

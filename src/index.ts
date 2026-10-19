@@ -95,8 +95,24 @@ export function apply(ctx: any, config?: ProxyConfig): void {
   // rebuild (a settings write) never resets them; only a plugin reload does.
   // Counted at request initiation — see fetch-router.ts.
   const hits = new Map<string, number>()
+  /**
+   * Per-provider liveness: when the last proxied request STARTED, and how it
+   * ended. `hits` answers "has this route ever been used"; this answers "does it
+   * still work" — the question a silently stalled proxy actually raises.
+   */
+  const lastUse = new Map<string, { at: number; ok?: boolean; code?: string }>()
   const bump = (provider: string): void => {
     hits.set(provider, (hits.get(provider) ?? 0) + 1)
+    const previous = lastUse.get(provider)
+    lastUse.set(provider, { at: Date.now(), ok: previous?.ok, code: previous?.code })
+  }
+  const settle = (provider: string) => (ok: boolean, detail: unknown): void => {
+    const previous = lastUse.get(provider) ?? { at: Date.now() }
+    lastUse.set(provider, {
+      at: previous.at,
+      ok,
+      code: ok ? String((detail as { status?: unknown } | undefined)?.status ?? '') : failureCodeOf(detail),
+    })
   }
 
   /** Where the self-check sends its request; overridable so a blocked echo host can be replaced. */
@@ -229,6 +245,27 @@ export function apply(ctx: any, config?: ProxyConfig): void {
       return { kind: 'proxy-auth', error: `代理要求认证（HTTP 407）：${message}` }
     }
     return { kind: 'target', error: `请求失败：${message}` }
+  }
+
+  /**
+   * A short machine code for a transport failure, for a card's "last failure".
+   *
+   * Walks the same cause chain the self-check classifier does: `fetch` hides the
+   * real code one or two levels down, so reading only the top value would report
+   * a useless "fetch failed" for every kind of outage.
+   */
+  const failureCodeOf = (error: unknown): string => {
+    const chain = causesOf(error)
+    const names = chain
+      .map(node => (node as { name?: unknown }).name)
+      .filter((name): name is string => typeof name === 'string')
+    if (names.includes('TimeoutError')) return 'TIMEOUT'
+    if (names.includes('AbortError')) return 'ABORTED'
+    for (const node of chain) {
+      const code = (node as { code?: unknown }).code
+      if (typeof code === 'string' && code.length > 0) return code
+    }
+    return 'ERROR'
   }
 
   /**
@@ -413,6 +450,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
                 [...problems].map(([id, message]) => [id, bareMessage(message)]),
               ),
               hits: Object.fromEntries(hits),
+              lastUse: Object.fromEntries(lastUse),
             })
             res.writeHead(200, {
               'content-type': 'application/json; charset=utf-8',
@@ -542,6 +580,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
         {
           dispatcher: route.dispatcher,
           onHit: () => bump(WEB_SEARCH_KEY),
+          onSettle: settle(WEB_SEARCH_KEY),
           decide: route.decide,
         },
         () => original.call(this, request, signal),
@@ -578,6 +617,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
           {
             dispatcher: route.dispatcher,
             onHit: () => bump(provider),
+            onSettle: settle(provider),
             decide: route.decide,
           },
           next as () => AsyncIterable<unknown>,
@@ -613,6 +653,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
       })),
       problems: Object.fromEntries(problems),
       hits: Object.fromEntries(hits),
+      lastUse: Object.fromEntries(lastUse),
     }),
   })
 }

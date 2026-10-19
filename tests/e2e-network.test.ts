@@ -224,3 +224,71 @@ test('an invalid route is reported without breaking a valid one', async () => {
     await proxy.close()
   }
 })
+
+// ---- last-use tracking ----
+
+test('a routed request records when it last ran and how it ended', async () => {
+  // `hits` says a route has been used; this says whether it still WORKS, which
+  // is the question a silently stalled proxy actually raises.
+  const proxy = await startRecordingProxy('proxied')
+  const ctx = mockCtx()
+  apply(ctx, {
+    providers: { sensenova: { enabled: true, protocol: 'http', host: '127.0.0.1', port: proxy.port } },
+  })
+  await settle()
+
+  try {
+    async function* adapter() {
+      await fetch('http://provider-target.invalid/v1/chat/completions')
+      yield { type: 'finish' }
+    }
+    for await (const _ of ctx.emit('llm/stream', { provider: 'sensenova' }, adapter)) {
+      // drain
+    }
+    await settle()
+
+    const record = ctx.providerProxyState.lastUse.sensenova
+    assert.ok(record, 'the route the request crossed is recorded')
+    assert.equal(record.ok, true, 'the proxy answered, so the last use reads as a success')
+    assert.equal(record.code, '200', 'the ANSWER is kept, not just the verdict')
+    assert.equal(typeof record.at, 'number')
+  } finally {
+    for (const cleanup of ctx.cleanups) {
+      if (typeof cleanup === 'function') await cleanup()
+    }
+    await proxy.close()
+  }
+})
+
+test('a failed routed request records the real failure code', async () => {
+  // Nothing listens on port 1. The card must be able to name WHY, not only that
+  // something went wrong — a bare "fetch failed" points at nothing.
+  const ctx = mockCtx()
+  apply(ctx, {
+    providers: { p: { enabled: true, protocol: 'http', host: '127.0.0.1', port: 1 } },
+  })
+  await settle()
+
+  try {
+    async function* adapter() {
+      await fetch('http://provider-target.invalid/v1/chat/completions')
+      yield { type: 'finish' }
+    }
+    const stream = ctx.emit('llm/stream', { provider: 'p' }, adapter)
+    await assert.rejects(async () => {
+      for await (const _ of stream) {
+        // drain
+      }
+    }, 'the caller still sees the rejection: observing must not swallow it')
+    await settle()
+
+    const record = ctx.providerProxyState.lastUse.p
+    assert.ok(record)
+    assert.equal(record.ok, false)
+    assert.match(record.code, /ECONNREFUSED/, 'the real code, not a generic "ERROR"')
+  } finally {
+    for (const cleanup of ctx.cleanups) {
+      if (typeof cleanup === 'function') await cleanup()
+    }
+  }
+})

@@ -269,11 +269,31 @@ function testResultFrom(body: any, strings: Record<string, string>): Record<stri
  */
 let catalogueSetter: ((catalog: Catalog) => void) | undefined = () => {}
 
+/** How one provider's last proxied request ended, as the Host recorded it. */
+type LastUse = { at: number; ok?: boolean; code?: string }
+
 /** What the Host endpoint publishes: provider rows, hit counts, rejected routes. */
 type Catalog = {
   rows: ProviderRow[]
   hits: Record<string, number>
   problems: Record<string, string>
+  lastUse: Record<string, LastUse>
+}
+
+/**
+ * A coarse "how long ago", for the last-use line.
+ *
+ * Deliberately coarse: the page only re-reads the catalogue every 10 s, so a
+ * second-precision string would look stale on its own and mean nothing.
+ */
+function relativeTime(at: number, t: Record<string, string>): string {
+  const seconds = Math.max(0, Math.round((Date.now() - at) / 1000))
+  if (seconds < 60) return t.justNow
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}${t.minutesAgo}`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}${t.hoursAgo}`
+  return `${Math.floor(hours / 24)}${t.daysAgo}`
 }
 
 /** Read the Host's provider catalogue. Same-origin, so no token is needed. */
@@ -309,7 +329,24 @@ async function fetchCatalog(): Promise<Catalog> {
       if (typeof message === 'string' && message.length > 0) problems[id] = message
     }
   }
-  return { rows, hits, problems }
+  // The last-use record: when each provider's most recent proxied request
+  // started, and how it ended. Anything malformed is dropped rather than
+  // rendered, so a bad payload cannot put a non-numeric timestamp on the page.
+  const lastUse: Record<string, LastUse> = {}
+  const publishedLastUse = body?.lastUse
+  if (publishedLastUse !== null && typeof publishedLastUse === 'object') {
+    for (const [id, raw] of Object.entries(publishedLastUse)) {
+      const entry = raw as LastUse | undefined
+      if (entry === null || typeof entry !== 'object') continue
+      if (typeof entry.at !== 'number' || !Number.isFinite(entry.at)) continue
+      lastUse[id] = {
+        at: entry.at,
+        ...(typeof entry.ok === 'boolean' ? { ok: entry.ok } : {}),
+        ...(typeof entry.code === 'string' && entry.code.length > 0 ? { code: entry.code } : {}),
+      }
+    }
+  }
+  return { rows, hits, problems, lastUse }
 }
 
 /**
@@ -691,25 +728,46 @@ function renderPage(ctx: any): unknown {
       .then(catalog => catalogueSetter?.(catalog))
       .catch((error: any) => {
         note(`provider 列表获取失败：${error?.message ?? error}`)
-        catalogueSetter?.({ rows: [], hits: {}, problems: {} })
+        catalogueSetter?.({ rows: [], hits: {}, problems: {}, lastUse: {} })
       })
     return {
       rows: undefined as ProviderRow[] | undefined,
       hits: {} as Record<string, number>,
       problems: {} as Record<string, string>,
+      lastUse: {} as Record<string, LastUse>,
       pending: true,
     }
   })
   // The setter is published right after the hook so the initializer's promise
   // can reach it. It is re-published on every render, so the latest wins.
   catalogueSetter = catalog =>
-    setState({ rows: catalog.rows, hits: catalog.hits, problems: catalog.problems, pending: false })
+    setState({
+      rows: catalog.rows,
+      hits: catalog.hits,
+      problems: catalog.problems,
+      lastUse: catalog.lastUse,
+      pending: false,
+    })
   // Keeps the catalogue (rows, hit counts, rejected routes) current while the
   // page is open; see the function's own notes for the staleness handling.
   touchCatalogPolling()
 
   const published = state.rows ?? []
   const hits = state.hits ?? {}
+  const lastUse = state.lastUse ?? {}
+
+  /**
+   * The one-line last-use summary for a card, or `undefined` when the route has
+   * never carried a request. `hits` says the route HAS been used; this says
+   * whether it still works — the question a silently stalled proxy raises.
+   */
+  const lastUseText = (id: string): string | undefined => {
+    const use = lastUse[id]
+    if (use === undefined) return undefined
+    if (use.ok === true) return `${t.recentOk}${relativeTime(use.at, t)}`
+    if (use.ok === false) return `${t.recentFail}${use.code ?? 'ERROR'}`
+    return `${t.recentStarted}${relativeTime(use.at, t)}`
+  }
   // Rendered straight from state rather than through `note()`: `diagnostics` is
   // cleared at the start of every render, so a note written when the catalog
   // arrives would not survive to the next pass.
@@ -1119,6 +1177,7 @@ function renderPage(ctx: any): unknown {
         // point of the self-check below is to verify a setting BEFORE switching
         // it on, which is impossible if the fields can only be typed into while
         // traffic is already flowing through them. `enabled` gates routing only.
+        const lastText = lastUseText(row.id)
         const result = tests[row.id]
         // Rule entries that can never match: flagged under the input instead of
         // failing silently — a dead `onlyHosts` entry means fail-closed sends
@@ -1237,6 +1296,20 @@ function renderPage(ctx: any): unknown {
                     `${t.hitCountPrefix}${hits[row.id] ?? 0}${t.hitCountSuffix}`,
                   )
                 : null,
+              // The last-use line. A failure takes the error colour, same rule as
+              // a failed self-check: it is an answer, not decoration.
+              lastText === undefined
+                ? null
+                : h(
+                    'span',
+                    {
+                      style: {
+                        ...S.hits,
+                        ...(lastUse[row.id]?.ok === false ? S.inheritWarning : {}),
+                      },
+                    },
+                    lastText,
+                  ),
             ),
             h(
               'span',
@@ -1441,6 +1514,13 @@ const EN = {
   passwordHintProxy: 'Sent to the proxy as an authentication password; stored with this setting.',
   hitCountPrefix: '',
   hitCountSuffix: ' proxied',
+  recentOk: 'last ok ',
+  recentFail: 'last failure ',
+  recentStarted: 'last call ',
+  justNow: 'just now',
+  minutesAgo: ' min ago',
+  hoursAgo: ' h ago',
+  daysAgo: ' d ago',
   testButton: 'Test',
   testRunning: 'Testing…',
   testDisabledNote: 'Not enabled — test only: ',
@@ -1484,6 +1564,13 @@ const ZH = {
   passwordHintProxy: '作为代理认证口令发送给代理；随该设置一起保存。',
   hitCountPrefix: '已代理 ',
   hitCountSuffix: ' 次',
+  recentOk: '最近成功 ',
+  recentFail: '最近失败 ',
+  recentStarted: '最近调用 ',
+  justNow: '刚刚',
+  minutesAgo: ' 分钟前',
+  hoursAgo: ' 小时前',
+  daysAgo: ' 天前',
   testButton: '测试',
   testRunning: '测试中…',
   testDisabledNote: '未启用，仅测试：',

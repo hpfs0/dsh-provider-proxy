@@ -1640,3 +1640,91 @@ test('a filter that matches nothing says so, instead of an empty page', async ()
     restore()
   }
 })
+
+// ---- last-use / last-failure on the card ----
+
+test('the card names the last failure instead of only flagging it', async () => {
+  const { mod, restore } = loadBundle(async url => ({
+    ok: true,
+    status: 200,
+    json: async () =>
+      String(url).includes('/test')
+        ? {}
+        : {
+            providers: [{ id: 'sensenova', name: 'SenseNova', live: true }],
+            hits: { sensenova: 2 },
+            lastUse: { sensenova: { at: Date.now() - 5 * 60_000, ok: false, code: 'ECONNREFUSED' } },
+          },
+  }))
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const texts = textsOf(render())
+    assert.ok(
+      texts.includes('最近失败 ECONNREFUSED'),
+      'the failure is named with its machine code, so it points somewhere',
+    )
+    assert.ok(
+      JSON.stringify(render()).includes('dsw-alias-state-error-primary'),
+      'a failure is an answer, so it takes the error colour',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('the card shows when a healthy route last ran', async () => {
+  const { mod, restore } = loadBundle(async url => ({
+    ok: true,
+    status: 200,
+    json: async () =>
+      String(url).includes('/test')
+        ? {}
+        : {
+            providers: [{ id: 'sensenova', name: 'SenseNova', live: true }],
+            lastUse: { sensenova: { at: Date.now() - 3 * 60_000, ok: true, code: '200' } },
+          },
+  }))
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    assert.ok(
+      textsOf(render()).includes('最近成功 3 分钟前'),
+      'a healthy route says how long ago it last worked',
+    )
+    assert.ok(
+      !JSON.stringify(render()).includes('最近失败'),
+      'a healthy route must not be labelled a failure',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('a malformed last-use entry is dropped rather than rendered', async () => {
+  const { mod, restore } = loadBundle(async url => ({
+    ok: true,
+    status: 200,
+    json: async () =>
+      String(url).includes('/test')
+        ? {}
+        : {
+            providers: [{ id: 'sensenova', name: 'SenseNova', live: true }],
+            lastUse: { sensenova: { at: 'yesterday', ok: true, code: '200' } },
+          },
+  }))
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const texts = textsOf(render())
+    assert.ok(
+      !texts.some(text => text.includes('最近成功') || text.includes('最近调用')),
+      'a timestamp that is not a finite number must not reach the page',
+    )
+  } finally {
+    restore()
+  }
+})
