@@ -483,3 +483,99 @@ test('a 5xx reads as a broken path, not a success', async () => {
     await proxy.close()
   }
 })
+
+// ---- several echo hosts as fallback candidates ----
+
+/** A proxy whose reply depends on the target, so a candidate walk is observable. */
+async function startScriptedProxy(reply) {
+  const seen = []
+  const server = createServer((req, res) => {
+    seen.push(req.url)
+    const { status, body, headers } = reply(req.url)
+    if (headers !== undefined) {
+      for (const [name, value] of Object.entries(headers)) res.setHeader(name, value)
+    }
+    res.writeHead(status, { 'content-type': 'application/json' })
+    res.end(body)
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  const { port } = server.address()
+  return { seen, port, close: () => new Promise(resolve => server.close(resolve)) }
+}
+
+const routeToProxy = port => ({
+  providers: { get: () => ({ p: { enabled: true, protocol: 'http', host: '127.0.0.1', port } }) },
+})
+
+test('testUrl may name several echo hosts, tried in order', async () => {
+  // Any single public echo host can be unreachable on some networks, and a check
+  // that fails for THAT reason is a check nobody trusts. The first candidate here
+  // is answered by the proxy itself with a 502 (it cannot reach that upstream).
+  const proxy = await startScriptedProxy(url =>
+    String(url).includes('first.invalid')
+      ? { status: 502, body: '{"error":"upstream"}' }
+      : { status: 200, body: JSON.stringify({ ip: '203.0.113.9' }) },
+  )
+  try {
+    const { routes } = mountHost({
+      ...routeToProxy(proxy.port),
+      testUrl: 'http://first.invalid/ip, http://second.invalid/ip',
+    })
+    const { body } = await selfCheck(routes, { provider: 'p' })
+    assert.equal(body.ok, true, 'the second candidate answered, so the setting is fine')
+    assert.equal(body.exitIp, '203.0.113.9')
+    assert.deepEqual(
+      proxy.seen,
+      ['http://first.invalid/ip', 'http://second.invalid/ip'],
+      'both candidates were tried, in the order the setting lists them',
+    )
+  } finally {
+    await proxy.close()
+  }
+})
+
+test('a 407 stops the walk: another candidate would ask the same question', async () => {
+  // A real proxy challenge carries `Proxy-Authenticate`; undici THROWS on it
+  // rather than handing back the response, which is why the whole cause chain is
+  // searched for the 407 when classifying.
+  const proxy = await startScriptedProxy(() => ({
+    status: 407,
+    body: '{}',
+    headers: { 'proxy-authenticate': 'Basic' },
+  }))
+  try {
+    const { routes } = mountHost({
+      ...routeToProxy(proxy.port),
+      testUrl: 'http://first.invalid/ip, http://second.invalid/ip',
+    })
+    const { body } = await selfCheck(routes, { provider: 'p' })
+    assert.equal(body.kind, 'proxy-auth', 'the proxy is the problem, and it is named')
+    assert.equal(proxy.seen.length, 1, 'no point asking a second host the same question')
+  } finally {
+    await proxy.close()
+  }
+})
+
+test('the candidate list is capped so one setting cannot multiply outbound calls', async () => {
+  const proxy = await startScriptedProxy(() => ({ status: 502, body: '{}' }))
+  try {
+    const { routes } = mountHost({
+      ...routeToProxy(proxy.port),
+      testUrl: [
+        'http://a.invalid/ip',
+        'http://b.invalid/ip',
+        'http://c.invalid/ip',
+        'http://d.invalid/ip',
+        'http://e.invalid/ip',
+        'http://f.invalid/ip',
+        'http://g.invalid/ip',
+      ].join(' '),
+    })
+    const { body } = await selfCheck(routes, { provider: 'p' })
+    assert.equal(body.ok, false)
+    // MAX_TEST_TARGETS is 5; a longer list must not become a longer walk.
+    assert.equal(proxy.seen.length, 5, `expected 5 attempts, got ${proxy.seen.length}`)
+  } finally {
+    await proxy.close()
+  }
+})

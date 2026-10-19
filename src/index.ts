@@ -117,6 +117,8 @@ export function apply(ctx: any, config?: ProxyConfig): void {
 
   /** Where the self-check sends its request; overridable so a blocked echo host can be replaced. */
   const DEFAULT_TEST_URL = 'https://api.ipify.org?format=json'
+  /** How many `testUrl` candidates one check may walk. Bounds the outbound cost. */
+  const MAX_TEST_TARGETS = 5
   const TEST_TIMEOUT_MS = 10_000
   /** The self-check body carries one provider id; anything larger is refused, not buffered. */
   const MAX_REQUEST_BYTES = 8 * 1024
@@ -133,12 +135,27 @@ export function apply(ctx: any, config?: ProxyConfig): void {
   const SELF_CHECK_COOLDOWN_MS = 3_000
   const lastChecks = new Map<string, { at: number; result: Record<string, unknown> }>()
 
-  /** Read `testUrl`, which is Volatile under the Loader and therefore needs `.get()`. */
-  const plainTestUrl = (): string => {
+  /**
+   * Read `testUrl`, which is Volatile under the Loader and therefore needs
+   * `.get()`.
+   *
+   * It may name SEVERAL candidates, separated by commas or whitespace: any single
+   * public echo host can be unreachable on some networks, and a check that fails
+   * for that reason is a check nobody trusts. The list is capped so a long one
+   * cannot quietly multiply outbound requests.
+   */
+  const plainTestUrls = (): string[] => {
     const raw = (config as { testUrl?: unknown } | undefined)?.testUrl
     const snapshot = (raw as { get?: () => unknown } | undefined)?.get
     const value = typeof snapshot === 'function' ? snapshot.call(raw) : raw
-    return typeof value === 'string' && value.trim().length > 0 ? value.trim() : DEFAULT_TEST_URL
+    const list =
+      typeof value === 'string'
+        ? value
+            .split(/[,\s]+/)
+            .map(entry => entry.trim())
+            .filter(entry => entry.length > 0)
+        : []
+    return list.length > 0 ? list.slice(0, MAX_TEST_TARGETS) : [DEFAULT_TEST_URL]
   }
 
   /** Walk `path` down a value, giving up at the first non-object. */
@@ -232,6 +249,13 @@ export function apply(ctx: any, config?: ProxyConfig): void {
     const codes = chain
       .map(node => (node as { code?: unknown }).code)
       .filter((code): code is string => typeof code === 'string')
+    // undici THROWS on a proxy 407 rather than returning the response, and the
+    // only place the "407" appears is a CAUSE's message ("Proxy Authentication
+    // Required (407)") — the top-level message is the generic "fetch failed". So
+    // the whole chain is searched, not just the value that was thrown.
+    const messages = chain
+      .map(node => (node as { message?: unknown }).message)
+      .filter((text): text is string => typeof text === 'string')
     const message = error instanceof Error ? error.message : String(error)
     if (names.includes('TimeoutError') || names.includes('AbortError')) {
       return { kind: 'timeout', error: `超时（${TEST_TIMEOUT_MS / 1000}s）：代理或目标无响应` }
@@ -241,7 +265,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
     if (code !== undefined) {
       return { kind: 'proxy-unreachable', error: `代理不可达（${code}）：${message}` }
     }
-    if (names.includes('ProxyAuthentication') || message.includes('407')) {
+    if (names.includes('ProxyAuthentication') || messages.some(text => text.includes('407'))) {
       return { kind: 'proxy-auth', error: `代理要求认证（HTTP 407）：${message}` }
     }
     return { kind: 'target', error: `请求失败：${message}` }
@@ -269,58 +293,20 @@ export function apply(ctx: any, config?: ProxyConfig): void {
   }
 
   /**
-   * Send one request through a provider's OWN dispatcher and report the outcome.
+   * Send one request to ONE target through a route's own dispatcher.
    *
    * The dispatcher is passed EXPLICITLY rather than by entering the router's
    * AsyncLocalStorage scope: that scope intercepts `globalThis.fetch`, so a plain
    * `undici.fetch` call would go straight out and report a broken proxy as a
    * success — the one failure this whole feature exists to eliminate.
    */
-  const runSelfCheck = async (provider: string): Promise<Record<string, unknown>> => {
-    let route = current.get(provider)
-    let temporary = false
-    if (route === undefined) {
-      // Two very different reasons land here. A route the guards REJECTED (a bad
-      // port, an HTTP password with no username) is missing from the table too,
-      // and answering "not enabled" for it names a cause that is not the case —
-      // the setting IS on. The problem the table recorded is what explains it.
-      const problem = problems.get(provider)
-      if (problem !== undefined) {
-        return { ok: false, kind: 'route-rejected', error: bareMessage(problem) }
-      }
-      // A route that is CONFIGURED but not switched on is also absent from the
-      // table. Build one for this check alone, through the SAME builder routing
-      // uses, so a setting can be verified BEFORE it is enabled — and so a bad
-      // one is reported with the reason routing would have given.
-      const configured = plainProviders(config)[provider]
-      if (configured === undefined || configured.enabled === true) {
-        return { ok: false, kind: 'no-route', error: `provider "${provider}" 未启用代理` }
-      }
-      const built = buildRouteEntry(provider, configured, {
-        defaultProxy: normalizeDefaultProxy(plainDefaultProxy(config)),
-        requireEnabled: false,
-        localDirect: plainLocalDirect(config),
-      })
-      if (!built.ok) {
-        return { ok: false, kind: 'route-rejected', error: bareMessage(built.problem) }
-      }
-      route = built.entry
-      temporary = true
-    }
-    // Target precedence: the route's own testTarget, then the provider's REAL
-    // upstream when its adapter publishes one, then the top-level testUrl. The
-    // upstream default is what makes the check prove the END-TO-END path by
-    // default, instead of only that the proxy answers.
-    //
-    // A route testTarget is validated here rather than in the route guards on
-    // purpose: this value never touches routing, so a typo costs a failed check,
-    // not a route the table refuses to carry.
-    const target =
-      route.testTarget.length > 0 ? route.testTarget : (upstreamOf(provider) ?? plainTestUrl())
+  const probeTarget = async (
+    target: string,
+    route: RouteEntry,
+  ): Promise<Record<string, unknown>> => {
     try {
       new URL(target)
     } catch {
-      if (temporary) await route.dispatcher.close().catch(() => undefined)
       return { ok: false, kind: 'target', error: `自检目标不是合法 URL：${target}` }
     }
     const started = performance.now()
@@ -356,6 +342,70 @@ export function apply(ctx: any, config?: ProxyConfig): void {
       }
     } catch (error) {
       return { ok: false, ms: Math.round(performance.now() - started), ...classifyTestError(error) }
+    }
+  }
+
+  /**
+   * Every target this check may try, in order.
+   *
+   * A route's own `testTarget` first, then the provider's REAL upstream when its
+   * adapter publishes one, then the top-level `testUrl` — which may itself name
+   * several echo services.
+   */
+  const selfCheckTargets = (provider: string, route: RouteEntry): string[] => {
+    if (route.testTarget.length > 0) return [route.testTarget]
+    const upstream = upstreamOf(provider)
+    if (upstream !== undefined) return [upstream]
+    return plainTestUrls()
+  }
+
+  /**
+   * Run the connection self-check for one provider.
+   *
+   * A route the table carries is used directly — including one the guards
+   * REJECTED, whose recorded problem is what explains it. A route that is merely
+   * CONFIGURED gets a dispatcher built for this check alone, through the SAME
+   * builder routing uses, so a setting can be verified BEFORE it is switched on
+   * and a bad one is reported with the reason routing would have given.
+   */
+  const runSelfCheck = async (provider: string): Promise<Record<string, unknown>> => {
+    let route = current.get(provider)
+    let temporary = false
+    if (route === undefined) {
+      // Two very different reasons land here. A route the guards REJECTED (a bad
+      // port, an HTTP password with no username) is missing from the table too,
+      // and answering "not enabled" for it names a cause that is not the case —
+      // the setting IS on. The problem the table recorded is what explains it.
+      const problem = problems.get(provider)
+      if (problem !== undefined) {
+        return { ok: false, kind: 'route-rejected', error: bareMessage(problem) }
+      }
+      const configured = plainProviders(config)[provider]
+      if (configured === undefined || configured.enabled === true) {
+        return { ok: false, kind: 'no-route', error: `provider "${provider}" 未启用代理` }
+      }
+      const built = buildRouteEntry(provider, configured, {
+        defaultProxy: normalizeDefaultProxy(plainDefaultProxy(config)),
+        requireEnabled: false,
+        localDirect: plainLocalDirect(config),
+      })
+      if (!built.ok) {
+        return { ok: false, kind: 'route-rejected', error: bareMessage(built.problem) }
+      }
+      route = built.entry
+      temporary = true
+    }
+    try {
+      let last: Record<string, unknown> | undefined
+      for (const target of selfCheckTargets(provider, route)) {
+        const outcome = await probeTarget(target, route)
+        if (outcome.ok === true) return outcome
+        last = outcome
+        // 407 is about the PROXY, not the target: another candidate would ask the
+        // same question and get the same answer.
+        if (outcome.kind === 'proxy-auth') break
+      }
+      return last ?? { ok: false, kind: 'target', error: '没有可用的自检目标' }
     } finally {
       // A dispatcher built for one check must not outlive it: the table owns the
       // long-lived ones, and this one was never in the table to begin with.
