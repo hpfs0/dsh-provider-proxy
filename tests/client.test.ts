@@ -1741,6 +1741,69 @@ test('the card shows when a healthy route last ran', async () => {
   }
 })
 
+test('a request that has only STARTED is shown as a call at its start time', async () => {
+  // The Host keeps `startedAt` apart from the outcome fields. A still-in-flight
+  // request must not be shown as a success or failure, and the time shown is its
+  // START — never the finish time of some other call.
+  const { mod, restore } = loadBundle(async url => ({
+    ok: true,
+    status: 200,
+    json: async () =>
+      String(url).includes('/test')
+        ? {}
+        : {
+            providers: [{ id: 'sensenova', name: 'SenseNova', live: true }],
+            lastUse: { sensenova: { startedAt: Date.now() - 60_000 } },
+          },
+  }))
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const texts = textsOf(render())
+    assert.ok(
+      texts.includes('最近调用 1 分钟前'),
+      'a started-but-unsettled call is shown by its start time',
+    )
+    assert.ok(
+      !JSON.stringify(render()).includes('最近成功'),
+      'an outcome must not be claimed before the request has settled',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('the time a healthy route shows is its FINISH time, not a newer start', async () => {
+  // Two concurrent calls: `startedAt` is the newer (second) start, `at` is the
+  // (older) first call's finish. The card must read the finish time, so the
+  // timestamp always belongs to the call whose outcome is shown.
+  const { mod, restore } = loadBundle(async url => ({
+    ok: true,
+    status: 200,
+    json: async () =>
+      String(url).includes('/test')
+        ? {}
+        : {
+            providers: [{ id: 'sensenova', name: 'SenseNova', live: true }],
+            lastUse: {
+              sensenova: { startedAt: Date.now() - 60_000, at: Date.now() - 5 * 60_000, ok: true, code: '200' },
+            },
+          },
+  }))
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    assert.ok(
+      textsOf(render()).includes('最近成功 5 分钟前'),
+      'the success line uses `at` (finish), not the newer `startedAt`',
+    )
+  } finally {
+    restore()
+  }
+})
+
 test('a malformed last-use entry is dropped rather than rendered', async () => {
   const { mod, restore } = loadBundle(async url => ({
     ok: true,

@@ -275,7 +275,14 @@ function testResultFrom(body: any, strings: Record<string, string>): Record<stri
 let catalogueSetter: ((catalog: Catalog) => void) | undefined = () => {}
 
 /** How one provider's last proxied request ended, as the Host recorded it. */
-type LastUse = { at: number; ok?: boolean; code?: string }
+type LastUse = {
+  /** When the most recent proxied request BEGAN. */
+  startedAt?: number
+  /** When the last request that FINISHED ended; paired with `ok`/`code`. */
+  at?: number
+  ok?: boolean
+  code?: string
+}
 
 /** What the Host endpoint publishes: provider rows, hit counts, rejected routes. */
 type Catalog = {
@@ -335,17 +342,25 @@ async function fetchCatalog(): Promise<Catalog> {
     }
   }
   // The last-use record: when each provider's most recent proxied request
-  // started, and how it ended. Anything malformed is dropped rather than
-  // rendered, so a bad payload cannot put a non-numeric timestamp on the page.
+  // began, and — separately — how the last request that FINISHED ended. Anything
+  // malformed is dropped rather than rendered, so a bad payload cannot put a
+  // non-numeric timestamp on the page. An entry carrying only `startedAt` is
+  // kept: it is a request still in flight, and the page says when it was started.
   const lastUse: Record<string, LastUse> = {}
   const publishedLastUse = body?.lastUse
   if (publishedLastUse !== null && typeof publishedLastUse === 'object') {
     for (const [id, raw] of Object.entries(publishedLastUse)) {
       const entry = raw as LastUse | undefined
       if (entry === null || typeof entry !== 'object') continue
-      if (typeof entry.at !== 'number' || !Number.isFinite(entry.at)) continue
+      const at = typeof entry.at === 'number' && Number.isFinite(entry.at) ? entry.at : undefined
+      const startedAt =
+        typeof entry.startedAt === 'number' && Number.isFinite(entry.startedAt)
+          ? entry.startedAt
+          : undefined
+      if (at === undefined && startedAt === undefined) continue
       lastUse[id] = {
-        at: entry.at,
+        ...(startedAt === undefined ? {} : { startedAt }),
+        ...(at === undefined ? {} : { at }),
         ...(typeof entry.ok === 'boolean' ? { ok: entry.ok } : {}),
         ...(typeof entry.code === 'string' && entry.code.length > 0 ? { code: entry.code } : {}),
       }
@@ -765,13 +780,18 @@ function renderPage(ctx: any): unknown {
    * The one-line last-use summary for a card, or `undefined` when the route has
    * never carried a request. `hits` says the route HAS been used; this says
    * whether it still works — the question a silently stalled proxy raises.
+   *
+   * A success or failure uses `at`, the time the last request FINISHED — the
+   * time its outcome belongs to. A request that has only STARTED uses
+   * `startedAt`, so a still-in-flight call cannot make the page claim an outcome
+   * it does not have yet.
    */
   const lastUseText = (id: string): string | undefined => {
     const use = lastUse[id]
     if (use === undefined) return undefined
-    if (use.ok === true) return `${t.recentOk}${relativeTime(use.at, t)}`
+    if (use.ok === true) return `${t.recentOk}${relativeTime(use.at ?? use.startedAt ?? Date.now(), t)}`
     if (use.ok === false) return `${t.recentFail}${use.code ?? 'ERROR'}`
-    return `${t.recentStarted}${relativeTime(use.at, t)}`
+    return `${t.recentStarted}${relativeTime(use.startedAt ?? use.at ?? Date.now(), t)}`
   }
   // Rendered straight from state rather than through `note()`: `diagnostics` is
   // cleared at the start of every render, so a note written when the catalog

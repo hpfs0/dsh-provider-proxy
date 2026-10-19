@@ -96,20 +96,25 @@ export function apply(ctx: any, config?: ProxyConfig): void {
   // Counted at request initiation — see fetch-router.ts.
   const hits = new Map<string, number>()
   /**
-   * Per-provider liveness: when the last proxied request STARTED, and how it
-   * ended. `hits` answers "has this route ever been used"; this answers "does it
-   * still work" — the question a silently stalled proxy actually raises.
+   * Per-provider liveness. `startedAt` is when the last proxied request BEGAN;
+   * `at`/`ok`/`code` describe the last request that FINISHED. They are kept apart
+   * because LLM calls are concurrent: a single `at` shared by both would pair one
+   * request's start time with another's outcome, and a card could name a failure
+   * that belongs to a call which in fact succeeded.
    */
-  const lastUse = new Map<string, { at: number; ok?: boolean; code?: string }>()
+  const lastUse = new Map<string, { startedAt: number; at?: number; ok?: boolean; code?: string }>()
   const bump = (provider: string): void => {
     hits.set(provider, (hits.get(provider) ?? 0) + 1)
-    const previous = lastUse.get(provider)
-    lastUse.set(provider, { at: Date.now(), ok: previous?.ok, code: previous?.code })
+    // Only the START moves here. The outcome fields are written once a request
+    // settles, so an in-flight call cannot overwrite the last COMPLETED result.
+    lastUse.set(provider, { ...lastUse.get(provider), startedAt: Date.now() })
   }
   const settle = (provider: string) => (ok: boolean, detail: unknown): void => {
-    const previous = lastUse.get(provider) ?? { at: Date.now() }
+    const previous = lastUse.get(provider)
     lastUse.set(provider, {
-      at: previous.at,
+      startedAt: previous?.startedAt ?? Date.now(),
+      // `at` is the FINISH time, written together with the outcome it belongs to.
+      at: Date.now(),
       ok,
       code: ok ? String((detail as { status?: unknown } | undefined)?.status ?? '') : failureCodeOf(detail),
     })

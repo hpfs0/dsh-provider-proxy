@@ -252,6 +252,91 @@ test('a routed request records when it last ran and how it ended', async () => {
     assert.equal(record.ok, true, 'the proxy answered, so the last use reads as a success')
     assert.equal(record.code, '200', 'the ANSWER is kept, not just the verdict')
     assert.equal(typeof record.at, 'number')
+    assert.equal(typeof record.startedAt, 'number')
+    assert.ok(record.startedAt <= record.at, 'the start is recorded separately from the finish')
+  } finally {
+    for (const cleanup of ctx.cleanups) {
+      if (typeof cleanup === 'function') await cleanup()
+    }
+    await proxy.close()
+  }
+})
+
+/**
+ * A forward proxy that answers `/slow` after a delay and everything else at
+ * once, so one request can be observed while it is still in flight.
+ */
+async function startDelayedProxy(delayMs) {
+  const server = createServer((req, res) => {
+    const reply = () => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end('{"ok":true}')
+    }
+    if (String(req.url).includes('slow')) setTimeout(reply, delayMs)
+    else reply()
+  })
+  server.on('connect', (req, socket) => {
+    socket.on('error', () => {})
+    socket.write('HTTP/1.1 200 Connection Established\r\n\r\n')
+    socket.end()
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  const { port } = server.address()
+  return { port, close: () => new Promise(r => server.close(r)) }
+}
+
+test('a request merely STARTED does not overwrite the last COMPLETED outcome', async () => {
+  // Two calls overlap: the first finishes, then a second starts and is still in
+  // flight when the record is read. `at`/`ok`/`code` belong to the COMPLETED
+  // call, so a newer start must move only `startedAt` — otherwise the card would
+  // pair one request's outcome with another's start time.
+  const proxy = await startDelayedProxy(400)
+  const ctx = mockCtx()
+  apply(ctx, {
+    providers: { p: { enabled: true, protocol: 'http', host: '127.0.0.1', port: proxy.port } },
+  })
+  await settle()
+
+  try {
+    async function* first() {
+      await fetch('http://provider-target.invalid/fast')
+      yield { type: 'a' }
+    }
+    for await (const _ of ctx.emit('llm/stream', { provider: 'p' }, first)) {
+      // drain
+    }
+    await settle()
+    const completed = ctx.providerProxyState.lastUse.p
+    assert.equal(completed.ok, true)
+    const completedAt = completed.at
+
+    async function* second() {
+      await fetch('http://provider-target.invalid/slow')
+      yield { type: 'b' }
+    }
+    const iterator = ctx.emit('llm/stream', { provider: 'p' }, second)[Symbol.asyncIterator]()
+    const pending = iterator.next()
+    // A couple of ticks is far inside the 400 ms proxy delay, so the second call
+    // is provably still in flight here.
+    await settle()
+
+    const inflight = ctx.providerProxyState.lastUse.p
+    assert.equal(ctx.providerProxyState.hits.p, 2, 'the second call really started and was counted')
+    assert.equal(inflight.ok, true, 'an in-flight call does not erase the last completed outcome')
+    assert.equal(inflight.at, completedAt, '`at` still names the last COMPLETION, not the newer START')
+    assert.equal(typeof inflight.startedAt, 'number')
+    assert.ok(
+      inflight.startedAt >= completedAt,
+      'the newer start is recorded on its own field, apart from the outcome',
+    )
+
+    // Let the second call finish so nothing is left dangling.
+    await pending
+    await iterator.return()
+    await settle()
+    const after = ctx.providerProxyState.lastUse.p
+    assert.ok(after.at > completedAt, 'once the second call finishes, `at` advances to its finish time')
+    assert.equal(after.ok, true)
   } finally {
     for (const cleanup of ctx.cleanups) {
       if (typeof cleanup === 'function') await cleanup()
