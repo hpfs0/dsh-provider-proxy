@@ -1861,3 +1861,22 @@ test('the bulk button is disabled while the default is unusable', async () => {
     restore()
   }
 })
+
+test('an enabled route with no record yet says so; a disabled one stays silent', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    assert.ok(
+      textsOf(cardFor(render(), 'sensenova')).includes('尚无代理记录'),
+      'a missing record must be distinguishable from a missing feature',
+    )
+    assert.ok(
+      !textsOf(cardFor(render(), 'openai')).includes('尚无代理记录'),
+      'a disabled route cannot have a record, so saying so on it would just be noise',
+    )
+  } finally {
+    restore()
+  }
+})

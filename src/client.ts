@@ -1242,7 +1242,11 @@ function renderPage(ctx: any): unknown {
         // point of the self-check below is to verify a setting BEFORE switching
         // it on, which is impossible if the fields can only be typed into while
         // traffic is already flowing through them. `enabled` gates routing only.
-        const lastText = lastUseText(row.id)
+        // The line exists only once a route has actually carried a request, so an
+        // ENABLED route with no record yet says so — otherwise a missing line is
+        // indistinguishable from the feature not existing. A disabled route stays
+        // silent: it cannot have a record, and saying so on every off card is noise.
+        const lastText = lastUseText(row.id) ?? (route.enabled ? t.noRecord : undefined)
         const result = tests[row.id]
         // Rule entries that can never match: flagged under the input instead of
         // failing silently — a dead `onlyHosts` entry means fail-closed sends
@@ -1599,6 +1603,7 @@ const EN = {
   recentOk: 'last ok ',
   recentFail: 'last failure ',
   recentStarted: 'last call ',
+  noRecord: 'no proxied request yet',
   justNow: 'just now',
   minutesAgo: ' min ago',
   hoursAgo: ' h ago',
@@ -1651,6 +1656,7 @@ const ZH = {
   recentOk: '最近成功 ',
   recentFail: '最近失败 ',
   recentStarted: '最近调用 ',
+  noRecord: '尚无代理记录',
   justNow: '刚刚',
   minutesAgo: ' 分钟前',
   hoursAgo: ' 小时前',
