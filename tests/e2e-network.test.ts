@@ -345,6 +345,46 @@ test('a request merely STARTED does not overwrite the last COMPLETED outcome', a
   }
 })
 
+test('a response cut off mid-body still counts as answered', async () => {
+  // `ok` is decided when the response HEADERS arrive — the point at which
+  // `fetch` resolves — NOT at the end of the body, which is a lazily-forwarded
+  // stream. A proxy that answers and then drops the connection mid-body must
+  // therefore still record ok; that is exactly what the card's "last ok" means.
+  const server = createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' })
+    res.write('data: partial\n\n')
+    // Cut the connection after the headers have flushed.
+    setTimeout(() => res.socket?.destroy(), 20)
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  const { port } = server.address()
+  const ctx = mockCtx()
+  apply(ctx, {
+    providers: { p: { enabled: true, protocol: 'http', host: '127.0.0.1', port } },
+  })
+  await settle()
+
+  try {
+    async function* adapter() {
+      const response = await fetch('http://provider-target.invalid/v1/chat/completions')
+      assert.equal(response.status, 200, 'the headers arrived, so fetch resolved')
+      yield { type: 'finish' }
+    }
+    for await (const _ of ctx.emit('llm/stream', { provider: 'p' }, adapter)) {
+      // drain
+    }
+    await settle()
+    const record = ctx.providerProxyState.lastUse.p
+    assert.equal(record.ok, true, 'the reply arrived, so the route is recorded as working')
+    assert.equal(record.code, '200')
+  } finally {
+    for (const cleanup of ctx.cleanups) {
+      if (typeof cleanup === 'function') await cleanup()
+    }
+    await new Promise(resolve => server.close(resolve))
+  }
+})
+
 test('a failed routed request records the real failure code', async () => {
   // Nothing listens on port 1. The card must be able to name WHY, not only that
   // something went wrong — a bare "fetch failed" points at nothing.

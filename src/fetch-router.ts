@@ -47,12 +47,20 @@ export interface RouterStore {
   /** Called once per request that actually leaves through the proxy. */
   onHit?: () => void
   /**
-   * Called once the request SETTLES.
+   * Called once the request is ANSWERED — a response arrives, or it fails
+   * outright.
    *
-   * `ok` reads the outcome exactly as the connection self-check does — a
-   * response below 500 means the path worked — and `detail` is that response on
-   * success or the raw error on failure, left unclassified so the caller can
-   * name the failure with whatever error vocabulary it already has.
+   * "Answered" is the point at which `fetch` resolves, i.e. response HEADERS,
+   * NOT the end of the body. `ok` therefore means "a response below 500 came
+   * back", exactly as the connection self-check reads it; it does NOT mean the
+   * whole stream ran to completion. A body cut off mid-transfer still reads ok,
+   * and that is deliberate: the body is a lazily-consumed stream a proxy must
+   * forward without draining, so its end is not observable here. The card's
+   * "last ok" carries that same meaning.
+   *
+   * `detail` is the response on success, or the raw error on failure — left
+   * unclassified so the caller can name the failure with whatever error
+   * vocabulary it already has.
    */
   onSettle?: (ok: boolean, detail: unknown) => void
   /**
@@ -137,9 +145,11 @@ function installSharedRouter(): RouterState {
     } as never) as unknown as Promise<{ status: number }>
     if (active.onSettle !== undefined) {
       const settle = active.onSettle
-      // Observe the OUTCOME without changing the caller's promise: the handlers
+      // Observe the reply without changing the caller's promise: the handlers
       // hang off a DERIVED promise, both arms are handled here so nothing can
       // surface as an unhandled rejection, and the original is returned as-is.
+      // This fires when `fetch` resolves — response HEADERS — not when the body
+      // ends; see `onSettle`.
       void inFlight
         .then(
           response => settle(response.status < 500, response),
