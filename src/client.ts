@@ -325,6 +325,23 @@ function view(route: Partial<RouteValue> | undefined): RouteValue {
   }
 }
 
+/**
+ * Pending writes, one debounced timer per provider+field.
+ *
+ * Every keystroke of an input fires `bind`, and the Host rebuilds its whole
+ * proxy table on each settings write (`loader/volatile-update` → `rebuild()`).
+ * Writing per keystroke therefore churns a dispatcher generation per character —
+ * and, worse, a half-typed credential ("username without a password") hits the
+ * Host guards between keystrokes, so the route is refused for an instant and a
+ * misleading problem is recorded. Only the LAST value of a burst needs to reach
+ * the Host; the draft already gives the control its instant feedback.
+ *
+ * Module-level, so the timers survive a re-render (each pass rebuilds `save`)
+ * and a page unmount: a write that was already promised still lands.
+ */
+const WRITE_DELAY_MS = 300
+const pendingWrites = new Map<string, { timer: ReturnType<typeof setTimeout> }>()
+
 /** The provider directory, cached module-side. See renderPage. */
 let directoryCache: ProviderRow[] | undefined
 
@@ -603,23 +620,32 @@ function renderPage(ctx: any): unknown {
   const rows = knownProviders({ ...configured, ...draft }, published)
 
   /**
-   * Persist one field. The control is already showing the new value, so this
-   * only has to succeed quietly; a refusal is reported in the diagnostics.
+   * Persist one field, debounced per provider+field: a burst of edits to the
+   * same field collapses into ONE write carrying the last value. The control is
+   * already showing the new value via the draft, so this only has to succeed
+   * quietly; a refusal is reported in the diagnostics.
    */
   const save = (id: string, field: string, value: unknown) => {
-    void writeConfig(ctx, [{ op: 'set', path: ['providers', id, field], value }])
-      .then(() => {
-        note(`已保存 ${id}.${field} = ${JSON.stringify(value)}`)
-      })
-      .catch((error: any) => {
-        note(`保存失败 ${id}.${field}：${error?.message ?? error}`)
-        // Drop the optimistic value so the stored state shows through again.
-        setDraft((current: any) => {
-          const next = { ...current }
-          delete next[id]
-          return next
+    const key = `${id}\u0000${field}`
+    const pending = pendingWrites.get(key)
+    if (pending !== undefined) clearTimeout(pending.timer)
+    const timer = setTimeout(() => {
+      pendingWrites.delete(key)
+      void writeConfig(ctx, [{ op: 'set', path: ['providers', id, field], value }])
+        .then(() => {
+          note(`已保存 ${id}.${field} = ${JSON.stringify(value)}`)
         })
-      })
+        .catch((error: any) => {
+          note(`保存失败 ${id}.${field}：${error?.message ?? error}`)
+          // Drop the optimistic value so the stored state shows through again.
+          setDraft((current: any) => {
+            const next = { ...current }
+            delete next[id]
+            return next
+          })
+        })
+    }, WRITE_DELAY_MS)
+    pendingWrites.set(key, { timer })
   }
 
   /** One control: update the draft instantly, persist in the background. */

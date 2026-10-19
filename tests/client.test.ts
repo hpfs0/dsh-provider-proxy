@@ -301,6 +301,26 @@ async function settle() {
   for (let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve))
 }
 
+/**
+ * Wait past the settings-write debounce (WRITE_DELAY_MS = 300 in client.ts).
+ *
+ * Timers fire no earlier than their delay, so 350 ms guarantees a write that
+ * was scheduled has actually been issued.
+ */
+async function writeSettle() {
+  await new Promise(resolve => setTimeout(resolve, 350))
+  await settle()
+}
+
+/** Find every input carrying one placeholder, anywhere in the tree. */
+function findInputsByPlaceholder(node, placeholder, out = []) {
+  if (node === null || typeof node !== 'object') return out
+  if (Array.isArray(node)) { node.forEach(n => findInputsByPlaceholder(n, placeholder, out)); return out }
+  if (node.props?.placeholder === placeholder && node.type === 'input') out.push(node)
+  if (node.children) findInputsByPlaceholder(node.children, placeholder, out)
+  return out
+}
+
 test('rendering survives a context that forbids undeclared services', async () => {
   // The shipped build crashed with
   //   Error: cannot get property "remote" without inject
@@ -782,7 +802,8 @@ test('a refused write drops the optimistic value', async () => {
     const target = findCheckboxes(tree).find(b => b.props.checked === false)
     const before = findCheckboxes(tree).filter(b => b.props.checked === true).length
     target.props.onChange({ target: { checked: true } })
-    await settle()
+    // The write is debounced; the refusal (and the rollback) only exists after it fires.
+    await writeSettle()
     tree = render()
     assert.equal(
       findCheckboxes(tree).filter(b => b.props.checked === true).length,
@@ -804,12 +825,36 @@ test('a write goes through the settings form, fenced by the read revision', asyn
     const toggle = findCheckbox(registrations[0].Component())
     assert.ok(toggle, 'expected a checkbox')
     toggle.props.onChange({ target: { checked: true } })
-    await new Promise(resolve => setImmediate(resolve))
+    await writeSettle()
     assert.equal(writes.length, 1)
     assert.equal(writes[0].revision, 7, 'writes are fenced by the revision that was read')
     assert.equal(writes[0].ops[0].op, 'set')
     assert.deepEqual(writes[0].ops[0].path, ['providers', 'openai', 'enabled'])
     assert.equal(writes[0].ops[0].value, true)
+  } finally {
+    restore()
+  }
+})
+
+test('a burst of edits to one field collapses into a single write', async () => {
+  // Typing fires `bind` per keystroke, and every write makes the Host rebuild
+  // its whole proxy table. The debounce must carry only the LAST value through,
+  // so ten characters cost one dispatcher generation instead of ten.
+  const { mod, restore } = loadBundle()
+  try {
+    const { registrations, writes } = mountPlugin(mod)
+    await settle()
+    let tree = registrations[0].Component()
+    // Both cards render a host input; only `sensenova` is enabled (not disabled).
+    const hostInput = findInputsByPlaceholder(tree, '127.0.0.1').find(node => node.props.disabled !== true)
+    assert.ok(hostInput, 'expected an enabled host input')
+    hostInput.props.onChange({ target: { value: '10.0.0.' } })
+    hostInput.props.onChange({ target: { value: '10.0.0.2' } })
+    hostInput.props.onChange({ target: { value: '10.0.0.254' } })
+    await writeSettle()
+    assert.equal(writes.length, 1, `expected 1 coalesced write, got ${writes.length}`)
+    assert.deepEqual(writes[0].ops[0].path, ['providers', 'sensenova', 'host'])
+    assert.equal(writes[0].ops[0].value, '10.0.0.254', 'the write must carry the LAST value of the burst')
   } finally {
     restore()
   }
