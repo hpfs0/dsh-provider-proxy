@@ -637,10 +637,19 @@ function renderPage(ctx: any): unknown {
         })
         .catch((error: any) => {
           note(`保存失败 ${id}.${field}：${error?.message ?? error}`)
-          // Drop the optimistic value so the stored state shows through again.
+          // Drop ONLY the field whose write was refused. Other fields of the
+          // same provider may hold edits that are still pending or already
+          // accepted — dropping the whole draft entry would throw away values
+          // the Host never objected to. An entry left empty by the removal is
+          // dropped entirely, so it cannot keep a phantom row alive.
           setDraft((current: any) => {
+            const entry = current[id]
+            if (entry === undefined || entry[field] === undefined) return current
+            const nextEntry = { ...entry }
+            delete nextEntry[field]
             const next = { ...current }
-            delete next[id]
+            if (Object.keys(nextEntry).length === 0) delete next[id]
+            else next[id] = nextEntry
             return next
           })
         })

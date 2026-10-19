@@ -815,6 +815,40 @@ test('a refused write drops the optimistic value', async () => {
   }
 })
 
+test('a refused write rolls back only the failed field', async () => {
+  // The rollback used to delete the provider's WHOLE draft entry, throwing away
+  // edits of other fields that the Host never objected to. Only the refused
+  // field may revert to the stored value.
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    harness.form.mutate = async ops => {
+      if (ops.some(op => op.path[op.path.length - 1] === 'port')) throw new Error('settings/conflict')
+    }
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const tree = render()
+
+    // The enabled card (`sensenova`): stored host 10.0.0.1, port 7890.
+    const hostInput = findInputsByPlaceholder(tree, '127.0.0.1').find(n => n.props.disabled !== true)
+    const portInput = findInputsByPlaceholder(tree, '7890').find(n => n.props.disabled !== true)
+    assert.ok(hostInput && portInput, 'expected the enabled card host and port inputs')
+
+    // Edit host (write succeeds) and port (write is refused) in one burst.
+    hostInput.props.onChange({ target: { value: '10.9.9.9' } })
+    portInput.props.onChange({ target: { value: '1234' } })
+    await writeSettle()
+
+    const after = render()
+    const hostAfter = findInputsByPlaceholder(after, '127.0.0.1').find(n => n.props.disabled !== true)
+    const portAfter = findInputsByPlaceholder(after, '7890').find(n => n.props.disabled !== true)
+    assert.equal(hostAfter.props.value, '10.9.9.9', 'the accepted host edit must survive the rollback')
+    assert.equal(portAfter.props.value, '7890', 'the refused port edit must revert to the stored value')
+  } finally {
+    restore()
+  }
+})
+
 test('a write goes through the settings form, fenced by the read revision', async () => {
   const { mod, restore } = loadBundle()
   try {
