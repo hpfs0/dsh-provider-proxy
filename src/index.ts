@@ -125,6 +125,55 @@ export function apply(ctx: any, config?: ProxyConfig): void {
     return typeof value === 'string' && value.trim().length > 0 ? value.trim() : DEFAULT_TEST_URL
   }
 
+  /** Walk `path` down a value, giving up at the first non-object. */
+  const walk = (value: unknown, path: readonly unknown[]): unknown => {
+    let node = value
+    for (const key of path) {
+      if (node === null || typeof node !== 'object') return undefined
+      node = (node as Record<string, unknown>)[key as string]
+    }
+    return node
+  }
+
+  /**
+   * The endpoint a provider actually calls, when its adapter publishes one.
+   *
+   * Read from the adapter's SETTINGS SECTION rather than from `listProviders()`,
+   * which carries only `{ id, name }`. `listConfigurableProviders()` supplies the
+   * address — the settings namespace plus the path to the route's profile — and
+   * that is exactly what a configuration surface is meant to consume.
+   *
+   * Everything here is optional and defensively read: a composition without the
+   * settings service, an adapter that registers no section, or a profile that
+   * stores no address all simply yield `undefined`, and the caller falls back to
+   * the top-level `testUrl` exactly as before.
+   */
+  const upstreamOf = (provider: string): string | undefined => {
+    let settings: any
+    try {
+      settings = typeof ctx?.get === 'function' ? ctx.get('settings') : undefined
+    } catch {
+      return undefined
+    }
+    if (settings === undefined || typeof settings.get !== 'function') return undefined
+    let entry: any
+    try {
+      const entries: any[] = ctx.llm?.listConfigurableProviders?.() ?? []
+      entry = entries.find(candidate => candidate?.provider === provider)
+    } catch {
+      return undefined
+    }
+    if (entry === undefined) return undefined
+    let profile: unknown
+    try {
+      profile = walk(settings.get(entry.settingsNs), entry.settingsPath ?? [])
+    } catch {
+      return undefined
+    }
+    const baseURL = (profile as { baseURL?: unknown } | undefined)?.baseURL
+    return typeof baseURL === 'string' && baseURL.trim().length > 0 ? baseURL.trim() : undefined
+  }
+
   /**
    * The `dsh-provider-proxy: ` prefix on a recorded problem is a Host-log
    * convention. Both endpoints that serve the settings page are UI payloads, so
@@ -221,12 +270,16 @@ export function apply(ctx: any, config?: ProxyConfig): void {
       route = built.entry
       temporary = true
     }
-    // A route's own testTarget wins over the top-level testUrl, so a check can
-    // point at the provider's REAL upstream and prove the end-to-end path, not
-    // just the proxy hop. Validated here rather than in the route guards on
-    // purpose: this value never touches routing, so a typo costs a failed
-    // check, not a route the table refuses to carry.
-    const target = route.testTarget.length > 0 ? route.testTarget : plainTestUrl()
+    // Target precedence: the route's own testTarget, then the provider's REAL
+    // upstream when its adapter publishes one, then the top-level testUrl. The
+    // upstream default is what makes the check prove the END-TO-END path by
+    // default, instead of only that the proxy answers.
+    //
+    // A route testTarget is validated here rather than in the route guards on
+    // purpose: this value never touches routing, so a typo costs a failed check,
+    // not a route the table refuses to carry.
+    const target =
+      route.testTarget.length > 0 ? route.testTarget : (upstreamOf(provider) ?? plainTestUrl())
     try {
       new URL(target)
     } catch {
@@ -251,12 +304,18 @@ export function apply(ctx: any, config?: ProxyConfig): void {
       } catch {
         // A non-JSON echo still proves the request crossed the proxy.
       }
+      // Any status below 500 means the request DID cross the proxy and reached
+      // something. Against a real upstream a bare POST normally answers 4xx
+      // (401/404) — the expected answer, and proof the path works. A 5xx is the
+      // opposite: an HTTP proxy that cannot reach its upstream answers 502/503/504
+      // ITSELF, so it reads as a broken path rather than a refused request.
+      const reachable = response.status < 500
       return {
-        ok: response.ok === true,
+        ok: reachable,
         ms,
         status: response.status,
         ...(exitIp === undefined ? {} : { exitIp }),
-        kind: response.ok === true ? 'ok' : 'target',
+        kind: reachable ? 'ok' : 'target',
       }
     } catch (error) {
       return { ok: false, ms: Math.round(performance.now() - started), ...classifyTestError(error) }

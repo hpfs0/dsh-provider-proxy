@@ -12,13 +12,13 @@ import { ProxyAgent } from 'undici'
 const { apply } = await import('../lib/index.js')
 
 /** A fake forward proxy that answers with an IP echo, optionally after a delay. */
-async function startEchoProxy(delayMs = 0) {
+async function startEchoProxy(delayMs = 0, status = 200) {
   const seen = []
   const server = createServer((req, res) => {
     seen.push({ url: req.url, method: req.method })
     const reply = () => {
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ ip: '203.0.113.9' }))
+      res.writeHead(status, { 'content-type': 'application/json' })
+      res.end(status === 200 ? JSON.stringify({ ip: '203.0.113.9' }) : JSON.stringify({ error: 'nope' }))
     }
     if (delayMs > 0) setTimeout(reply, delayMs)
     else reply()
@@ -28,15 +28,27 @@ async function startEchoProxy(delayMs = 0) {
   return { seen, port, close: () => new Promise(resolve => server.close(resolve)) }
 }
 
-/** Mount the Host half with a webServer mock, as the shipped composition does. */
-function mountHost(config) {
+/**
+ * Mount the Host half with a webServer mock, as the shipped composition does.
+ *
+ * `extras.settings` / `extras.configurable` stand in for the settings service and
+ * the adapter directory that a real composition provides; omitting both is the
+ * "no integration available" case.
+ */
+function mountHost(config, extras = {}) {
   const routes = new Map()
   const ctx = new EventEmitter()
   ctx.on = (event, fn) => EventEmitter.prototype.on.call(ctx, event, fn)
   ctx.emit = EventEmitter.prototype.emit.bind(ctx)
   ctx.effect = fn => { fn(); return () => {} }
   ctx.logger = { info() {}, error() {}, warn() {} }
-  ctx.llm = { listProviders: () => [], listConfigurableProviders: () => [] }
+  ctx.llm = {
+    listProviders: () => [],
+    listConfigurableProviders: () => extras.configurable ?? [],
+  }
+  // Cordis's NON-throwing optional lookup: an absent service reads as undefined
+  // rather than throwing, which is what lets the check degrade to `testUrl`.
+  ctx.get = name => (name === 'settings' ? extras.settings : undefined)
   ctx.inject = (services, cb) => {
     if (services.includes('webServer')) {
       cb({ webServer: { register: route => routes.set(route.path, route) } })
@@ -335,4 +347,139 @@ test('a provider with no config at all is still reported as not enabled', async 
   const { body } = await selfCheck(routes, { provider: 'p' })
   assert.equal(body.ok, false)
   assert.equal(body.kind, 'no-route')
+})
+
+// ---- the provider's real upstream as the default check target ----
+
+/** A directory entry plus the settings section an llm-pi-ai route would publish. */
+const publishedUpstream = () => ({
+  configurable: [
+    { provider: 'p', displayName: 'P', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'p'] },
+  ],
+  settings: {
+    get: ns =>
+      ns === 'llm-pi-ai'
+        ? { providers: { p: { baseURL: 'http://echo.invalid/upstream' } } }
+        : undefined,
+  },
+})
+
+test('the check defaults to the upstream the adapter publishes', async () => {
+  // `listProviders()` carries only { id, name }; the address comes from the
+  // adapter's settings section, reached through the configurable-provider
+  // directory. Without this the check only proves the proxy answers.
+  const proxy = await startEchoProxy()
+  try {
+    const { routes } = mountHost(oneRoute(proxy.port), publishedUpstream())
+    const { body } = await selfCheck(routes, { provider: 'p' })
+    assert.equal(body.ok, true)
+    assert.equal(
+      proxy.seen[0].url,
+      'http://echo.invalid/upstream',
+      'the check must use the real upstream, not the bare echo service',
+    )
+  } finally {
+    await proxy.close()
+  }
+})
+
+test('an adapter whose whole section is the profile is read too', async () => {
+  const proxy = await startEchoProxy()
+  try {
+    const { routes } = mountHost(oneRoute(proxy.port), {
+      configurable: [{ provider: 'p', displayName: 'P', settingsNs: 'llm-deepseek', settingsPath: [] }],
+      settings: { get: () => ({ baseURL: 'http://echo.invalid/deepseek' }) },
+    })
+    await selfCheck(routes, { provider: 'p' })
+    assert.equal(
+      proxy.seen[0].url,
+      'http://echo.invalid/deepseek',
+      'an empty settingsPath means the section IS the profile',
+    )
+  } finally {
+    await proxy.close()
+  }
+})
+
+test('a route testTarget still wins over the published upstream', async () => {
+  const proxy = await startEchoProxy()
+  try {
+    const { routes } = mountHost(
+      {
+        providers: {
+          get: () => ({
+            p: {
+              enabled: true,
+              protocol: 'http',
+              host: '127.0.0.1',
+              port: proxy.port,
+              testTarget: 'http://echo.invalid/explicit',
+            },
+          }),
+        },
+        testUrl: 'http://echo.invalid/ip',
+      },
+      publishedUpstream(),
+    )
+    await selfCheck(routes, { provider: 'p' })
+    assert.equal(proxy.seen[0].url, 'http://echo.invalid/explicit')
+  } finally {
+    await proxy.close()
+  }
+})
+
+test('without the settings service the check falls back to testUrl', async () => {
+  const proxy = await startEchoProxy()
+  try {
+    const { routes } = mountHost(oneRoute(proxy.port))
+    await selfCheck(routes, { provider: 'p' })
+    assert.equal(proxy.seen[0].url, 'http://echo.invalid/ip', 'no integration, no behaviour change')
+  } finally {
+    await proxy.close()
+  }
+})
+
+test('a namespace that is not registered yet falls back to testUrl', async () => {
+  const proxy = await startEchoProxy()
+  try {
+    const { routes } = mountHost(oneRoute(proxy.port), {
+      configurable: [
+        { provider: 'p', displayName: 'P', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'p'] },
+      ],
+      settings: { get: () => undefined }, // service present, namespace absent
+    })
+    await selfCheck(routes, { provider: 'p' })
+    assert.equal(proxy.seen[0].url, 'http://echo.invalid/ip')
+  } finally {
+    await proxy.close()
+  }
+})
+
+test('a 4xx from the upstream counts as reachable', async () => {
+  // A bare POST to a real endpoint normally answers 401/404 — that IS the answer,
+  // and reaching it proves the path works. Reporting it as a failure would make
+  // the check useless against every real upstream.
+  const proxy = await startEchoProxy(0, 401)
+  try {
+    const { routes } = mountHost(oneRoute(proxy.port))
+    const { body } = await selfCheck(routes, { provider: 'p' })
+    assert.equal(body.ok, true, 'reaching the upstream is success, whatever it answered')
+    assert.equal(body.status, 401)
+  } finally {
+    await proxy.close()
+  }
+})
+
+test('a 5xx reads as a broken path, not a success', async () => {
+  // An HTTP proxy that cannot reach its upstream answers 502/503/504 ITSELF, so
+  // this is the one status that must never be reported as "fine".
+  const proxy = await startEchoProxy(0, 502)
+  try {
+    const { routes } = mountHost(oneRoute(proxy.port))
+    const { body } = await selfCheck(routes, { provider: 'p' })
+    assert.equal(body.ok, false)
+    assert.equal(body.status, 502)
+  } finally {
+    await proxy.close()
+  }
 })
