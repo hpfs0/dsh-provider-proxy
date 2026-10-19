@@ -310,6 +310,41 @@ async function fetchCatalog(): Promise<Catalog> {
   return { rows, hits, problems }
 }
 
+/**
+ * Catalogue polling while the page is open.
+ *
+ * The catalogue (published rows, hit counts, rejected routes) is fetched once at
+ * mount and would otherwise stay a snapshot for the page's lifetime: the hit
+ * counter never moves, and a route the Host starts or stops refusing stays
+ * invisible. One shared interval re-fetches it every CATALOG_REFRESH_MS.
+ *
+ * `touchCatalogPolling` runs on every render. Writing the module-level timestamp
+ * there is deliberately not treated as a render side effect: it is idempotent,
+ * re-enters nothing (unlike a setState during render), and it is the only signal
+ * that the page is still alive. A page that stops rendering — a closed panel —
+ * goes stale, and the next tick cancels the interval instead of fetching for
+ * nobody. A failed poll is swallowed: the page keeps its last data, and the
+ * mount-time fetch already reports a broken endpoint in the diagnostics.
+ */
+const CATALOG_REFRESH_MS = 10_000
+let catalogPoll: ReturnType<typeof setInterval> | undefined
+let catalogTouchedAt = 0
+
+function touchCatalogPolling(): void {
+  catalogTouchedAt = Date.now()
+  if (catalogPoll !== undefined) return
+  catalogPoll = setInterval(() => {
+    if (Date.now() - catalogTouchedAt > CATALOG_REFRESH_MS * 2 + 1_000) {
+      clearInterval(catalogPoll)
+      catalogPoll = undefined
+      return
+    }
+    void fetchCatalog()
+      .then(catalog => catalogueSetter?.(catalog))
+      .catch(() => undefined)
+  }, CATALOG_REFRESH_MS)
+}
+
 const byName = (a: ProviderRow, b: ProviderRow): number => a.name.localeCompare(b.name)
 
 function view(route: Partial<RouteValue> | undefined): RouteValue {
@@ -563,6 +598,9 @@ function renderPage(ctx: any): unknown {
   // can reach it. It is re-published on every render, so the latest wins.
   catalogueSetter = catalog =>
     setState({ rows: catalog.rows, hits: catalog.hits, problems: catalog.problems, pending: false })
+  // Keeps the catalogue (rows, hit counts, rejected routes) current while the
+  // page is open; see the function's own notes for the staleness handling.
+  touchCatalogPolling()
 
   const published = state.rows ?? []
   const hits = state.hits ?? {}

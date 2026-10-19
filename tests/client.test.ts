@@ -1112,3 +1112,53 @@ test('the stylesheet is injected at materialization, not at script load', () => 
     delete globalThis.__reg
   }
 })
+
+test('the catalogue is re-polled while the page is open and stops when it goes stale', async () => {
+  // The catalogue is a snapshot once fetched: the hit counter would never move
+  // and a route the Host starts refusing would stay invisible. The page keeps a
+  // poll alive while it renders and cancels it once nothing re-renders it —
+  // a closed panel must not leave a fetch running forever.
+  const real = {
+    setInterval: globalThis.setInterval,
+    clearInterval: globalThis.clearInterval,
+    now: Date.now,
+  }
+  let tick = () => {}
+  let period = 0
+  let cleared = false
+  let clock = 1_000_000
+  globalThis.setInterval = (fn, ms) => { tick = fn; period = ms; return 1 }
+  globalThis.clearInterval = () => { cleared = true }
+  Date.now = () => clock
+  const { mod, requested, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+
+    assert.equal(period, 10_000, 'the poll runs at the documented interval')
+
+    const fetchesBefore = requested.length
+    await tick()
+    await settle()
+    assert.ok(
+      requested.length > fetchesBefore,
+      'a poll tick re-fetches the catalogue and feeds it to the live setter',
+    )
+
+    // No further render: the page looks closed. The next tick must cancel the
+    // interval instead of fetching again.
+    clock += 30_000
+    await tick()
+    assert.equal(cleared, true, 'a stale page stops the poll')
+    const afterStop = requested.length
+    await tick()
+    assert.equal(requested.length, afterStop, 'a cancelled poll fetches nothing')
+    assert.ok(render(), 'the page still renders normally afterwards')
+  } finally {
+    globalThis.setInterval = real.setInterval
+    globalThis.clearInterval = real.clearInterval
+    Date.now = real.now
+    restore()
+  }
+})
