@@ -982,6 +982,53 @@ function renderPage(ctx: any): unknown {
   }
 
   /**
+   * Promote a card's own endpoint to the shared default.
+   *
+   * The reduced form of "copy this card to another": once the endpoint lives in
+   * the default block, every other card opts in with one switch, so a
+   * multi-select picker would be a second way to do the same thing.
+   */
+  const promoteToDefault = (id: string): void => {
+    const route = view({ ...configured[id], ...draft[id] })
+    applyDefaultUrl({
+      protocol: route.protocol,
+      host: route.host.trim(),
+      port: route.port,
+      username: route.username,
+      password: route.password,
+    })
+  }
+
+  /** Point every card at the default endpoint, in one write. */
+  const applyDefaultToAll = (): void => {
+    const ids = rows.map(row => row.id)
+    if (ids.length === 0) return
+    setDraft((current: any) => {
+      const next = { ...current }
+      for (const id of ids) next[id] = { ...next[id], useDefault: true }
+      return next
+    })
+    saveMany(
+      '\u0000default\u0000applyAll',
+      ids.map(id => ({ op: 'set', path: ['providers', id, 'useDefault'], value: true })),
+      '所有 provider 的 useDefault',
+      () =>
+        setDraft((current: any) => {
+          const next = { ...current }
+          for (const id of ids) {
+            const entry = next[id]
+            if (entry === undefined || entry.useDefault === undefined) continue
+            const nextEntry = { ...entry }
+            delete nextEntry.useDefault
+            if (Object.keys(nextEntry).length === 0) delete next[id]
+            else next[id] = nextEntry
+          }
+          return next
+        }),
+    )
+  }
+
+  /**
    * A paste handler for any proxy-address field.
    *
    * Only a RECOGNISED proxy URL is intercepted; anything else falls through to
@@ -1126,6 +1173,24 @@ function renderPage(ctx: any): unknown {
         onChange: (event: any) => bindDefault('password')(event.target.value),
       }),
       t.passwordHintProxy,
+    ),
+    // Bulk opt-in, in ONE write: a per-card walk would rebuild the table N times.
+    // Disabled while the default is unusable, because pointing every card at an
+    // empty endpoint would just refuse them all.
+    h(
+      'div',
+      { style: S.testRow, key: 'default:apply' },
+      h(
+        'button',
+        {
+          className: styles.testButton,
+          style: S.testButton,
+          type: 'button',
+          disabled: !defaultUsable || rows.length === 0,
+          onClick: applyDefaultToAll,
+        },
+        t.applyDefaultAll,
+      ),
     ),
   )
 
@@ -1400,6 +1465,21 @@ function renderPage(ctx: any): unknown {
                         : h('span', { key: 'err', style: S.testFailure }, `✗ ${result.error}`),
                     )
                   : null,
+                // Promote this card's endpoint to the shared default. Offered only
+                // when the card carries its OWN endpoint: an inheriting card would
+                // just be copying the default onto itself.
+                endpointStored && !useDefault
+                  ? h(
+                      'button',
+                      {
+                        className: styles.testButton,
+                        style: S.testButton,
+                        type: 'button',
+                        onClick: () => promoteToDefault(row.id),
+                      },
+                      t.setAsDefault,
+                    )
+                  : null,
               )
             : null,
           // Target-host rules, collapsed so the common case stays one short card.
@@ -1504,6 +1584,8 @@ const EN = {
   filterLabel: 'Filter',
   filterPlaceholder: 'Filter by name or id…',
   noMatch: 'No provider matches the filter.',
+  setAsDefault: 'Set as the default proxy',
+  applyDefaultAll: 'Use the default proxy for all providers',
   protocol: 'Type',
   host: 'IP / host',
   port: 'Port',
@@ -1554,6 +1636,8 @@ const ZH = {
   filterLabel: '过滤',
   filterPlaceholder: '按名称或 id 过滤…',
   noMatch: '没有匹配的 provider。',
+  setAsDefault: '设为默认代理',
+  applyDefaultAll: '所有 provider 使用默认代理',
   protocol: '类型',
   host: 'IP / 主机',
   port: '端口',

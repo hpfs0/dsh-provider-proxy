@@ -576,7 +576,9 @@ test('a fast self-check latency is rendered in the success colour', async () => 
     const harness = mountPlugin(mod)
     const [, render] = renderPage(mod, harness)
     await settle()
-    const button = findButton(render())
+    // Scoped to the card: the shared-default block above it renders a button of
+    // its own, so a bare findButton would grab that one instead.
+    const button = findButton(cardFor(render(), 'sensenova'))
     assert.ok(button, 'the self-check button must be rendered')
     button.props.onClick()
     await settle()
@@ -604,7 +606,7 @@ test('a failed self-check is rendered in the error colour, without the Host-log 
     const harness = mountPlugin(mod)
     const [, render] = renderPage(mod, harness)
     await settle()
-    const button = findButton(render())
+    const button = findButton(cardFor(render(), 'sensenova'))
     assert.ok(button, 'the self-check button must be rendered')
     button.props.onClick()
     await settle()
@@ -783,6 +785,15 @@ function findButton(node) {
   }
   if (node.type === 'button') return node
   return node.children ? findButton(node.children) : undefined
+}
+
+/** Every button in a subtree, in document order. */
+function findButtons(node, out = []) {
+  if (node === null || typeof node !== 'object') return out
+  if (Array.isArray(node)) { node.forEach(n => findButtons(n, out)); return out }
+  if (node.type === 'button') out.push(node)
+  if (node.children) findButtons(node.children, out)
+  return out
 }
 
 test('each provider is rendered as its own card section', async () => {
@@ -1723,6 +1734,128 @@ test('a malformed last-use entry is dropped rather than rendered', async () => {
     assert.ok(
       !texts.some(text => text.includes('最近成功') || text.includes('最近调用')),
       'a timestamp that is not a finite number must not reach the page',
+    )
+  } finally {
+    restore()
+  }
+})
+
+// ---- promote to default / bulk apply ----
+
+test('a card promotes its own endpoint to the shared default', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const { registrations, writes } = mountPlugin(mod)
+    await settle()
+    const card = cardFor(registrations[0].Component(), 'sensenova')
+    const promote = findButtons(card).find(button => textsOf(button).includes('设为默认代理'))
+    assert.ok(promote, 'a card carrying its own endpoint offers the promote button')
+    promote.props.onClick()
+    await writeSettle()
+    assert.deepEqual(
+      writes[0].ops.map(op => [op.path[0], op.path[1], op.value]),
+      [
+        ['defaultProxy', 'protocol', 'http'],
+        ['defaultProxy', 'host', '10.0.0.1'],
+        ['defaultProxy', 'port', 7890],
+        ['defaultProxy', 'username', ''],
+        ['defaultProxy', 'password', ''],
+      ],
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('an inheriting card has nothing to promote', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        defaultProxy: { protocol: 'http', host: '127.0.0.1', port: 7890, username: '', password: '' },
+        providers: {
+          sensenova: {
+            enabled: true,
+            useDefault: true,
+            protocol: 'http',
+            host: '',
+            port: 0,
+            username: '',
+            password: '',
+          },
+        },
+      },
+    })
+    const [tree] = renderPage(mod, harness)
+    assert.equal(
+      findButtons(cardFor(tree, 'sensenova')).find(button => textsOf(button).includes('设为默认代理')),
+      undefined,
+      'a card already using the default would only be copying it onto itself',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('the bulk button points every card at the default, in ONE write', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        defaultProxy: { protocol: 'http', host: '127.0.0.1', port: 7890, username: '', password: '' },
+        providers: {
+          sensenova: {
+            enabled: true,
+            protocol: 'http',
+            host: '10.0.0.1',
+            port: 7890,
+            username: '',
+            password: '',
+          },
+        },
+      },
+    })
+    const { writes } = harness
+    // `renderPage` (not a bare Component() call) keeps ONE hook store across
+    // renders, so the catalogue that arrives asynchronously actually sticks.
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const applyAll = findButtons(render()).find(button =>
+      textsOf(button).includes('所有 provider 使用默认代理'),
+    )
+    assert.ok(applyAll, 'expected the bulk button in the shared-default block')
+    assert.notEqual(applyAll.props.disabled, true, 'the default is usable, so the button is enabled')
+
+    applyAll.props.onClick()
+    await writeSettle()
+    assert.equal(writes.length, 1, 'one write, not one table rebuild per card')
+    // Rows sort by name, so OpenAI precedes SenseNova.
+    assert.deepEqual(
+      writes[0].ops.map(op => [op.path[1], op.path[2], op.value]),
+      [
+        ['openai', 'useDefault', true],
+        ['sensenova', 'useDefault', true],
+      ],
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('the bulk button is disabled while the default is unusable', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const applyAll = findButtons(render()).find(button =>
+      textsOf(button).includes('所有 provider 使用默认代理'),
+    )
+    assert.ok(applyAll)
+    assert.equal(
+      applyAll.props.disabled,
+      true,
+      'pointing every card at an empty endpoint would just refuse them all',
     )
   } finally {
     restore()
