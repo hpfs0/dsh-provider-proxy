@@ -359,18 +359,28 @@ export function apply(ctx: any, config?: ProxyConfig): void {
       }
       // Any status below 500 means the request DID reach something — the target
       // when it went direct, or the far side of the proxy. Against a real upstream
-      // a bare POST normally answers 4xx (401/404) — the expected answer, and
+      // a bare GET normally answers 4xx (401/404) — the expected answer, and
       // proof the path works. A 5xx is the opposite: an HTTP proxy that cannot
       // reach its upstream answers 502/503/504 ITSELF, so it reads as a broken
       // path rather than a refused request.
       const reachable = response.status < 500
+      if (reachable) {
+        return {
+          ok: true,
+          ms,
+          status: response.status,
+          viaProxy,
+          ...(exitIp === undefined ? {} : { exitIp }),
+          kind: 'ok',
+        }
+      }
       return {
-        ok: reachable,
+        ok: false,
         ms,
         status: response.status,
         viaProxy,
-        ...(exitIp === undefined ? {} : { exitIp }),
-        kind: reachable ? 'ok' : 'target',
+        kind: 'target',
+        error: `目标返回 HTTP ${response.status}（5xx，上游或链路异常）`,
       }
     } catch (error) {
       return {

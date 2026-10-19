@@ -480,6 +480,7 @@ test('a 5xx reads as a broken path, not a success', async () => {
     const { body } = await selfCheck(routes, { provider: 'p' })
     assert.equal(body.ok, false)
     assert.equal(body.status, 502)
+    assert.match(body.error, /502/, 'a bare "测试失败" points at nothing; the status must be named')
   } finally {
     await proxy.close()
   }
