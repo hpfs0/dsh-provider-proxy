@@ -383,6 +383,55 @@ function view(route: Partial<RouteValue> | undefined): RouteValue {
   }
 }
 
+/** Drop the brackets WHATWG URL keeps on an IPv6 literal host. */
+function unbracket(hostname: string): string {
+  return hostname.startsWith('[') && hostname.endsWith(']') ? hostname.slice(1, -1) : hostname
+}
+
+/**
+ * Split a pasted full proxy URL into route fields, or `undefined` when the text
+ * is not one.
+ *
+ * `socks5` is a NON-special scheme, so WHATWG URL still parses its userinfo and
+ * port (verified), but three quirks are handled here:
+ *  - the userinfo is NOT percent-decoded by the parser, so it is decoded here;
+ *  - an IPv6 literal comes back bracketed, and the host field wants it bare;
+ *  - a DEFAULT port is normalized away by the parser, so a missing port stays 0
+ *    ("not configured") instead of being invented.
+ */
+function splitProxyUrl(text: string): Partial<RouteValue> | undefined {
+  const trimmed = text.trim()
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) return undefined
+  let url: URL
+  try {
+    url = new URL(trimmed)
+  } catch {
+    return undefined
+  }
+  const scheme = url.protocol.slice(0, -1).toLowerCase()
+  // `socks://` is a common spelling this plugin does not accept on its own;
+  // normalizing it here means a pasted alias still lands on the supported
+  // transport instead of being rejected later.
+  const protocol = scheme === 'socks' ? 'socks5' : scheme
+  if (!PROTOCOLS.includes(protocol as Protocol)) return undefined
+  if (url.hostname.length === 0) return undefined
+  const decode = (value: string): string => {
+    try {
+      return decodeURIComponent(value)
+    } catch {
+      return value
+    }
+  }
+  const parsedPort = url.port.length > 0 ? Number.parseInt(url.port, 10) : 0
+  return {
+    protocol: protocol as Protocol,
+    host: unbracket(url.hostname),
+    port: Number.isNaN(parsedPort) ? 0 : parsedPort,
+    username: decode(url.username),
+    password: decode(url.password),
+  }
+}
+
 /**
  * Pending writes, one debounced timer per provider+field.
  *
@@ -799,6 +848,92 @@ function renderPage(ctx: any): unknown {
     })
   }
 
+  /**
+   * One debounced write carrying SEVERAL edits at once.
+   *
+   * Used for a pasted proxy URL: five separate writes would each rebuild the
+   * Host's whole proxy table, and a half-applied paste (credentials without the
+   * host, say) would hit the credential guards mid-burst — the same trap the
+   * per-field debounce exists to avoid.
+   */
+  const saveMany = (key: string, ops: unknown[], label: string, onRefused: () => void) => {
+    const pending = pendingWrites.get(key)
+    if (pending !== undefined) clearTimeout(pending.timer)
+    const timer = setTimeout(() => {
+      pendingWrites.delete(key)
+      void writeConfig(ctx, ops)
+        .then(() => {
+          note(`已保存 ${label}`)
+        })
+        .catch((error: any) => {
+          note(`保存失败 ${label}：${error?.message ?? error}`)
+          onRefused()
+        })
+    }, WRITE_DELAY_MS)
+    pendingWrites.set(key, { timer })
+  }
+
+  /** Undo one set of pasted fields in a card's draft. */
+  const rollbackRouteFields = (id: string, fields: readonly string[]): void => {
+    setDraft((current: any) => {
+      const entry = current[id]
+      if (entry === undefined) return current
+      const nextEntry = { ...entry }
+      for (const field of fields) delete nextEntry[field]
+      const next = { ...current }
+      if (Object.keys(nextEntry).length === 0) delete next[id]
+      else next[id] = nextEntry
+      return next
+    })
+  }
+
+  /** Apply a parsed proxy URL to one card: one draft update, one write. */
+  const applyCardUrl = (id: string, parts: Record<string, unknown>): void => {
+    setDraft((current: any) => ({ ...current, [id]: { ...current[id], ...parts } }))
+    const fields = Object.keys(parts)
+    saveMany(
+      `${id}\u0000*paste`,
+      fields.map(field => ({ op: 'set', path: ['providers', id, field], value: parts[field] })),
+      `${id}.*（粘贴代理 URL）`,
+      () => rollbackRouteFields(id, fields),
+    )
+  }
+
+  /** Apply a parsed proxy URL to the shared default endpoint. */
+  const applyDefaultUrl = (parts: Record<string, unknown>): void => {
+    setDefaultDraft((current: any) => ({ ...current, ...parts }))
+    const fields = Object.keys(parts)
+    saveMany(
+      '\u0000default\u0000*paste',
+      fields.map(field => ({ op: 'set', path: ['defaultProxy', field], value: parts[field] })),
+      '默认代理（粘贴代理 URL）',
+      () => {
+        setDefaultDraft((current: any) => {
+          const next = { ...current }
+          for (const field of fields) delete next[field]
+          return next
+        })
+      },
+    )
+  }
+
+  /**
+   * A paste handler for any proxy-address field.
+   *
+   * Only a RECOGNISED proxy URL is intercepted; anything else falls through to
+   * the browser so a pasted bare host still lands in the field normally.
+   */
+  const onProxyUrlPaste =
+    (apply: (parts: Record<string, unknown>) => void) =>
+    (event: any): void => {
+      const text = event?.clipboardData?.getData?.('text')
+      if (typeof text !== 'string') return
+      const parts = splitProxyUrl(text)
+      if (parts === undefined) return
+      event.preventDefault?.()
+      apply(parts)
+    }
+
   const field = (label: string, control: unknown, hint?: string, hintError?: boolean): unknown =>
     h(
       'label',
@@ -885,6 +1020,8 @@ function renderPage(ctx: any): unknown {
         placeholder: '127.0.0.1',
         value: defaultView.host,
         onChange: (event: any) => bindDefault('host')(event.target.value),
+        // Same convenience as the cards: a full URL fills the whole block.
+        onPaste: onProxyUrlPaste(applyDefaultUrl),
       }),
       t.hostHint,
     ),
@@ -1002,6 +1139,8 @@ function renderPage(ctx: any): unknown {
               placeholder: '127.0.0.1',
               value: route.host,
               onChange: (event: any) => bind(row.id, 'host')(event.target.value),
+              // A pasted full proxy URL fills every transport field at once.
+              onPaste: onProxyUrlPaste(parts => applyCardUrl(row.id, parts)),
             }),
             t.hostHint,
           ),
@@ -1268,7 +1407,7 @@ const EN = {
   port: 'Port',
   username: 'Username',
   password: 'Password',
-  hostHint: 'Host or IP only, without scheme or path.',
+  hostHint: 'Host or IP only, without scheme or path. A full proxy URL (socks5://user:pass@host:1080) can be pasted instead — it is split into the fields.',
   passwordHint: 'Sent to the SOCKS5 proxy for authentication; stored with this setting.',
   passwordHintProxy: 'Sent to the proxy as an authentication password; stored with this setting.',
   hitCountPrefix: '',
@@ -1308,7 +1447,7 @@ const ZH = {
   port: '端口',
   username: '用户名',
   password: '密码',
-  hostHint: '只填主机名或 IP，不要带协议前缀或路径。',
+  hostHint: '只填主机名或 IP，不要带协议前缀或路径；也可以直接粘贴完整代理 URL（如 socks5://user:pass@host:1080），会自动拆分到各字段。',
   passwordHint: '仅作为 SOCKS5 认证口令发送给代理；随该设置一起保存。',
   passwordHintProxy: '作为代理认证口令发送给代理；随该设置一起保存。',
   hitCountPrefix: '已代理 ',

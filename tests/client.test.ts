@@ -1480,3 +1480,119 @@ test('the endpoint fields stay editable while the route is off', async () => {
     restore()
   }
 })
+
+// ---- pasting a full proxy URL ----
+
+/** Fire a paste of `text` at one input, reporting whether it was intercepted. */
+function paste(input, text) {
+  let prevented = false
+  input.props.onPaste({
+    clipboardData: { getData: () => text },
+    preventDefault: () => { prevented = true },
+  })
+  return prevented
+}
+
+test('pasting a full proxy URL fills the card fields in ONE write', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const { registrations, writes } = mountPlugin(mod)
+    await settle()
+    const card = cardFor(registrations[0].Component(), 'sensenova')
+    const host = findInputsByPlaceholder(card, '127.0.0.1')[0]
+    assert.ok(host, 'expected the card host input')
+
+    const prevented = paste(host, 'socks5://alice:hunter2@proxy.test:1080')
+    await writeSettle()
+
+    assert.equal(prevented, true, 'a recognised URL is applied, not also typed into the field')
+    assert.equal(writes.length, 1, 'the whole URL lands as ONE write, not five table rebuilds')
+    assert.deepEqual(
+      writes[0].ops.map(op => [op.path[1], op.path[2], op.value]),
+      [
+        ['sensenova', 'protocol', 'socks5'],
+        ['sensenova', 'host', 'proxy.test'],
+        ['sensenova', 'port', 1080],
+        ['sensenova', 'username', 'alice'],
+        ['sensenova', 'password', 'hunter2'],
+      ],
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('pasted credentials are percent-decoded and an IPv6 host is unbracketed', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const { registrations, writes } = mountPlugin(mod)
+    await settle()
+    const card = cardFor(registrations[0].Component(), 'sensenova')
+    paste(findInputsByPlaceholder(card, '127.0.0.1')[0], 'socks5://u%3Ap:p%40ss@[::1]:1080')
+    await writeSettle()
+    const byField = Object.fromEntries(writes[0].ops.map(op => [op.path[2], op.value]))
+    assert.equal(byField.host, '::1', 'WHATWG brackets an IPv6 literal; the field wants it bare')
+    assert.equal(byField.username, 'u:p', 'the parser does not decode userinfo, so this does')
+    assert.equal(byField.password, 'p@ss')
+    assert.equal(byField.protocol, 'socks5')
+    assert.equal(byField.port, 1080)
+  } finally {
+    restore()
+  }
+})
+
+test('a pasted socks:// alias lands on socks5', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const { registrations, writes } = mountPlugin(mod)
+    await settle()
+    const card = cardFor(registrations[0].Component(), 'sensenova')
+    paste(findInputsByPlaceholder(card, '127.0.0.1')[0], 'socks://proxy.test:1080')
+    await writeSettle()
+    const byField = Object.fromEntries(writes[0].ops.map(op => [op.path[2], op.value]))
+    assert.equal(byField.protocol, 'socks5', 'the alias the plugin itself rejects is normalised, not stored')
+    assert.equal(byField.host, 'proxy.test')
+  } finally {
+    restore()
+  }
+})
+
+test('a pasted value that is not a proxy URL is left alone', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const { registrations, writes } = mountPlugin(mod)
+    await settle()
+    const card = cardFor(registrations[0].Component(), 'sensenova')
+    const prevented = paste(findInputsByPlaceholder(card, '127.0.0.1')[0], '10.0.0.7')
+    await writeSettle()
+    assert.equal(prevented, false, 'a bare host must still land in the field normally')
+    assert.equal(writes.length, 0)
+  } finally {
+    restore()
+  }
+})
+
+test('the shared default block accepts a pasted proxy URL too', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const { registrations, writes } = mountPlugin(mod)
+    registrations[0].Component()
+    await settle()
+    const host = findInputsOutsideSections(registrations[0].Component(), '127.0.0.1')[0]
+    assert.ok(host, 'expected the default block host input')
+    paste(host, 'http://bob:pw@10.0.0.1:3128')
+    await writeSettle()
+    assert.deepEqual(
+      writes[0].ops.map(op => [op.path[0], op.path[1], op.value]),
+      [
+        ['defaultProxy', 'protocol', 'http'],
+        ['defaultProxy', 'host', '10.0.0.1'],
+        ['defaultProxy', 'port', 3128],
+        ['defaultProxy', 'username', 'bob'],
+        ['defaultProxy', 'password', 'pw'],
+      ],
+    )
+  } finally {
+    restore()
+  }
+})
