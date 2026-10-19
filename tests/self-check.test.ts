@@ -7,6 +7,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { EventEmitter } from 'node:events'
+import { ProxyAgent } from 'undici'
 
 const { apply } = await import('../lib/index.js')
 
@@ -249,4 +250,89 @@ test('an unparsable testTarget fails the check without rejecting the route', asy
   } finally {
     await proxy.close()
   }
+})
+
+// ---- checking a route BEFORE it is switched on ----
+
+/** A disabled route pointing at a fake proxy: configured, but not in the live table. */
+const disabledRoute = (port) => ({
+  providers: {
+    get: () => ({ p: { enabled: false, protocol: 'http', host: '127.0.0.1', port } }),
+  },
+  testUrl: 'http://echo.invalid/ip',
+})
+
+test('a configured but disabled route can be checked before it is switched on', async () => {
+  const proxy = await startEchoProxy()
+  try {
+    const { routes } = mountHost(disabledRoute(proxy.port))
+    const { status, body } = await selfCheck(routes, { provider: 'p' })
+    assert.equal(status, 200)
+    assert.equal(body.ok, true, 'the check must build the disabled route for one request')
+    assert.equal(body.exitIp, '203.0.113.9')
+    assert.equal(proxy.seen.length, 1, 'the request really crossed the proxy')
+  } finally {
+    await proxy.close()
+  }
+})
+
+test('the dispatcher built for a disabled route is released, never leaked', async () => {
+  const proxy = await startEchoProxy()
+  // Count DISTINCT dispatchers, not calls: undici's `ProxyAgent.close()` re-enters
+  // its own `close` once (it closes the inner agent through the same method), so
+  // a call counter reads 2 for a single, correctly-closed dispatcher.
+  const closed = new Set()
+  const originalClose = ProxyAgent.prototype.close
+  // Node runs each test FILE in its own process, so this spy is confined here.
+  ProxyAgent.prototype.close = function patchedClose(...args) {
+    closed.add(this)
+    return originalClose.apply(this, args)
+  }
+  try {
+    const { routes } = mountHost(disabledRoute(proxy.port))
+    await selfCheck(routes, { provider: 'p' })
+    assert.equal(
+      closed.size,
+      1,
+      'exactly one dispatcher was built for the check, and it was released',
+    )
+  } finally {
+    ProxyAgent.prototype.close = originalClose
+    await proxy.close()
+  }
+})
+
+test('a disabled route with no endpoint is refused with the real reason', async () => {
+  // Answering "not enabled" here would name a cause that is not the case: the
+  // card has an endpoint block the user simply has not filled in yet.
+  const { routes } = mountHost({
+    providers: { get: () => ({ p: { enabled: false, protocol: 'http', host: '', port: 0 } }) },
+    testUrl: 'http://echo.invalid/ip',
+  })
+  const { status, body } = await selfCheck(routes, { provider: 'p' })
+  assert.equal(status, 200)
+  assert.equal(body.ok, false)
+  assert.equal(body.kind, 'route-rejected')
+  assert.match(body.error, /未填写代理地址/, 'the report must name the missing setting')
+})
+
+test('a disabled route runs the same credential guards as routing', async () => {
+  const { routes } = mountHost({
+    providers: {
+      get: () => ({
+        p: { enabled: false, protocol: 'http', host: 'proxy.test', port: 8080, password: 'secret' },
+      }),
+    },
+    testUrl: 'http://echo.invalid/ip',
+  })
+  const { body } = await selfCheck(routes, { provider: 'p' })
+  assert.equal(body.kind, 'route-rejected')
+  assert.match(body.error, /没有用户名/, 'a setting routing would refuse is not reported as fine')
+})
+
+test('a provider with no config at all is still reported as not enabled', async () => {
+  const { routes } = mountHost({ providers: { get: () => ({}) }, testUrl: 'http://echo.invalid/ip' })
+  const { body } = await selfCheck(routes, { provider: 'p' })
+  assert.equal(body.ok, false)
+  assert.equal(body.kind, 'no-route')
 })

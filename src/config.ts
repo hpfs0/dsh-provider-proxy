@@ -242,6 +242,7 @@ export function usableDefaultProxy(defaultProxy: DefaultProxyValue): boolean {
 export function normalizeRoute(
   provider: string,
   raw: Partial<ProviderProxyRouteValue> | undefined,
+  options?: { requireEnabled?: boolean },
 ): ProviderProxyRouteValue {
   const value = plain<ProviderProxyRouteValue>(ProviderProxyRoute(raw ?? {}))
 
@@ -252,7 +253,14 @@ export function normalizeRoute(
   const bypassHosts = value.bypassHosts.trim().toLowerCase()
   const testTarget = value.testTarget.trim()
 
-  if (!value.enabled) return { ...value, port: value.port || 0, onlyHosts, bypassHosts, testTarget }
+  // A disabled route is normally returned untouched: nothing has been asked of
+  // it, so a half-typed endpoint must not be reported as a problem. The
+  // self-check DOES ask — it builds a dispatcher for a route the user has not
+  // switched on yet — so it passes `requireEnabled: false` to get exactly the
+  // validation routing would apply once the route is on.
+  if (!value.enabled && options?.requireEnabled !== false) {
+    return { ...value, port: value.port || 0, onlyHosts, bypassHosts, testTarget }
+  }
 
   const host = value.host.trim()
   if (host.length === 0) {

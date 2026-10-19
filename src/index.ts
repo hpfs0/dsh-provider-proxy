@@ -9,8 +9,12 @@
 import { fetch as undiciFetch } from 'undici'
 
 import { acquireFetchRouter } from './fetch-router.js'
-import { closeTable, createProxyTable, type RouteEntry } from './proxy-table.js'
-import type { DefaultProxyValue, ProviderProxyRouteValue } from './config.js'
+import { buildRouteEntry, closeTable, createProxyTable, type RouteEntry } from './proxy-table.js'
+import {
+  normalizeDefaultProxy,
+  type DefaultProxyValue,
+  type ProviderProxyRouteValue,
+} from './config.js'
 
 export const name = 'dsh-provider-proxy'
 export const inject = ['llm']
@@ -171,7 +175,8 @@ export function apply(ctx: any, config?: ProxyConfig): void {
    * success — the one failure this whole feature exists to eliminate.
    */
   const runSelfCheck = async (provider: string): Promise<Record<string, unknown>> => {
-    const route = current.get(provider)
+    let route = current.get(provider)
+    let temporary = false
     if (route === undefined) {
       // Two very different reasons land here. A route the guards REJECTED (a bad
       // port, an HTTP password with no username) is missing from the table too,
@@ -181,7 +186,25 @@ export function apply(ctx: any, config?: ProxyConfig): void {
       if (problem !== undefined) {
         return { ok: false, kind: 'route-rejected', error: bareMessage(problem) }
       }
-      return { ok: false, kind: 'no-route', error: `provider "${provider}" 未启用代理` }
+      // A route that is CONFIGURED but not switched on is also absent from the
+      // table. Build one for this check alone, through the SAME builder routing
+      // uses, so a setting can be verified BEFORE it is enabled — and so a bad
+      // one is reported with the reason routing would have given.
+      const configured = plainProviders(config)[provider]
+      if (configured === undefined || configured.enabled === true) {
+        return { ok: false, kind: 'no-route', error: `provider "${provider}" 未启用代理` }
+      }
+      const built = buildRouteEntry(
+        provider,
+        configured,
+        normalizeDefaultProxy(plainDefaultProxy(config)),
+        false,
+      )
+      if (!built.ok) {
+        return { ok: false, kind: 'route-rejected', error: bareMessage(built.problem) }
+      }
+      route = built.entry
+      temporary = true
     }
     // A route's own testTarget wins over the top-level testUrl, so a check can
     // point at the provider's REAL upstream and prove the end-to-end path, not
@@ -192,6 +215,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
     try {
       new URL(target)
     } catch {
+      if (temporary) await route.dispatcher.close().catch(() => undefined)
       return { ok: false, kind: 'target', error: `自检目标不是合法 URL：${target}` }
     }
     const started = performance.now()
@@ -221,6 +245,10 @@ export function apply(ctx: any, config?: ProxyConfig): void {
       }
     } catch (error) {
       return { ok: false, ms: Math.round(performance.now() - started), ...classifyTestError(error) }
+    } finally {
+      // A dispatcher built for one check must not outlive it: the table owns the
+      // long-lived ones, and this one was never in the table to begin with.
+      if (temporary) await route.dispatcher.close().catch(() => undefined)
     }
   }
 
@@ -513,5 +541,5 @@ export function apply(ctx: any, config?: ProxyConfig): void {
 }
 
 export { acquireFetchRouter } from './fetch-router.js'
-export { createProxyTable, closeTable, proxyUrl } from './proxy-table.js'
+export { buildRouteEntry, createProxyTable, closeTable, proxyUrl } from './proxy-table.js'
 export { Config, ProviderProxyRoute, normalizeRoute, normalizeDefaultProxy, PROTOCOLS } from './config.js'

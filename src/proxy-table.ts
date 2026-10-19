@@ -174,12 +174,134 @@ function withDefaultProxy(
   }
 }
 
+/** One built route, or the reason it could not be built. */
+export type RouteBuildResult =
+  | { ok: true; entry: RouteEntry }
+  | { ok: false; problem: string }
+
+/**
+ * Build one route entry, or explain why it cannot be built.
+ *
+ * Shared by the routing table and the connection self-check ON PURPOSE: the
+ * check must run the exact validations routing runs, or it would report a route
+ * healthy that the table refuses — the false positive this whole feature exists
+ * to eliminate.
+ *
+ * `requireEnabled` is forwarded to `normalizeRoute`. The table skips a disabled
+ * route before it gets here (`requireEnabled` true is then never exercised on
+ * one); the self-check builds a disabled route anyway (`false`), so a setting
+ * can be verified BEFORE it is switched on.
+ */
+export function buildRouteEntry(
+  provider: string,
+  raw: Partial<ProviderProxyRouteValue>,
+  shared: DefaultProxyValue,
+  requireEnabled: boolean,
+): RouteBuildResult {
+  let effective = raw
+  // A route that opted into the shared endpoint takes the proxy address from it.
+  // Checked BEFORE the merge so the refusal names the setting the user actually
+  // has to fix — the default block — instead of the card's empty fields.
+  if (raw?.useDefault === true) {
+    if (!usableDefaultProxy(shared)) {
+      return {
+        ok: false,
+        problem: `dsh-provider-proxy: provider "${provider}" 启用了「使用默认代理」，但顶层默认代理未配置（需填写主机与 1-65535 的端口）`,
+      }
+    }
+    effective = withDefaultProxy(raw, shared)
+  }
+
+  let route: ProviderProxyRouteValue
+  try {
+    route = normalizeRoute(provider, effective, { requireEnabled })
+  } catch (error) {
+    return { ok: false, problem: error instanceof Error ? error.message : String(error) }
+  }
+
+  // A SOCKS5 username without a password must be REFUSED, not downgraded.
+  //
+  // undici's Socks5Client only offers USERNAME_PASSWORD when both parts are
+  // present (`if (options.username && options.password)`); with a username
+  // alone it quietly advertises NO_AUTH. Against a proxy that requires
+  // authentication the user would then be told "Authentication failed" — a
+  // wrong diagnosis pointing at the proxy rather than at the missing setting.
+  if (route.protocol === 'socks5' && route.username.length > 0 && route.password.length === 0) {
+    return {
+      ok: false,
+      problem: 'dsh-provider-proxy: SOCKS5 配置了用户名但没有密码；请补全密码或清空用户名',
+    }
+  }
+
+  // The mirror of the rule above, for the same reason: undici only offers
+  // USERNAME_PASSWORD when BOTH parts are present, so a lone password is worse
+  // than useless — the client advertises NO_AUTH. The tunnel would succeed
+  // against an open proxy and fail against the one the credential was entered
+  // for, which reads as "the password is wrong" when it was never sent.
+  if (route.protocol === 'socks5' && route.password.length > 0 && route.username.length === 0) {
+    return {
+      ok: false,
+      problem: 'dsh-provider-proxy: SOCKS5 配置了密码但没有用户名；请补全用户名或清空密码',
+    }
+  }
+
+  // An HTTP/HTTPS password WITHOUT a username is refused outright: basic auth
+  // cannot send a password alone, and silently dropping it would leave the user
+  // believing a credential is in use when it is not. This is the symmetric
+  // counterpart of the SOCKS5 guard above and lives on the same `problems`
+  // path, so both mistakes are reported the same way.
+  if (route.protocol !== 'socks5' && route.password.length > 0 && route.username.length === 0) {
+    return {
+      ok: false,
+      problem: 'dsh-provider-proxy: 配置了代理密码但没有用户名；请补全用户名或清空密码',
+    }
+  }
+
+  // The mirror for HTTP/HTTPS, where the asymmetry is worth spelling out:
+  // undici WOULD send `Basic base64("alice:")` — a username with an EMPTY
+  // password — so nothing is dropped and a lenient proxy accepts it. It is
+  // refused anyway, because a half-filled credential is nearly always a
+  // half-typed one, and "both or neither" is one rule to hold across all three
+  // transports instead of "the pairing each transport happens to carry". The
+  // cost is real and documented in the README: a proxy whose credential truly
+  // has an empty password cannot be configured here.
+  if (route.protocol !== 'socks5' && route.username.length > 0 && route.password.length === 0) {
+    return {
+      ok: false,
+      problem: 'dsh-provider-proxy: 配置了代理用户名但没有密码；请补全密码或清空用户名',
+    }
+  }
+
+  const url = proxyUrl(route)
+  let dispatcher: DispatcherLike
+  try {
+    dispatcher = createDispatcher(route, url, route.password)
+  } catch (error) {
+    return { ok: false, problem: error instanceof Error ? error.message : String(error) }
+  }
+  return {
+    ok: true,
+    entry: {
+      provider,
+      proxyOrigin: displayOrigin(route, url),
+      dispatcher,
+      decide: buildDecide(route),
+      testTarget: route.testTarget,
+    },
+  }
+}
+
 /**
  * Build the dispatchers for every enabled, valid route.
  *
  * Invalid routes are skipped rather than thrown: one mistyped provider must not
  * stop the others from proxying. The caller surfaces the reason through
  * `problems`, which the Client shows instead of failing the whole table.
+ *
+ * Only an ENABLED route is carried — and, consequently, only an enabled route
+ * is ever refused: a route nobody has switched on has not asked for anything
+ * yet, so a half-typed endpoint on it is not a problem to report. The self-check
+ * is what makes a disabled route buildable on demand.
  */
 export function createProxyTable(
   config: { readonly [provider: string]: Partial<ProviderProxyRouteValue> } | undefined,
@@ -189,103 +311,11 @@ export function createProxyTable(
   const problems = new Map<string, string>()
   const shared = normalizeDefaultProxy(defaultProxy)
 
-  for (const [provider, rawConfig] of Object.entries(config ?? {})) {
-    let raw = rawConfig
-    // A route that opted into the shared endpoint takes the proxy address from
-    // it. That address is validated HERE rather than being merged and left to
-    // fail the route's own check, so the refusal names the setting the user
-    // actually has to fix (the default block, not the card).
-    if (raw?.enabled === true && raw?.useDefault === true) {
-      if (!usableDefaultProxy(shared)) {
-        problems.set(
-          provider,
-          `dsh-provider-proxy: provider "${provider}" 启用了「使用默认代理」，但顶层默认代理未配置（需填写主机与 1-65535 的端口）`,
-        )
-        continue
-      }
-      raw = withDefaultProxy(raw, shared)
-    }
-    let route: ProviderProxyRouteValue
-    try {
-      route = normalizeRoute(provider, raw)
-    } catch (error) {
-      problems.set(provider, error instanceof Error ? error.message : String(error))
-      continue
-    }
-    if (!route.enabled) continue
-
-    // A SOCKS5 username without a password must be REFUSED, not downgraded.
-    //
-    // undici's Socks5Client only offers USERNAME_PASSWORD when both parts are
-    // present (`if (options.username && options.password)`); with a username
-    // alone it quietly advertises NO_AUTH. Against a proxy that requires
-    // authentication the user would then be told "Authentication failed" — a
-    // wrong diagnosis pointing at the proxy rather than at the missing setting.
-    if (route.protocol === 'socks5' && route.username.length > 0 && route.password.length === 0) {
-      problems.set(
-        provider,
-        'dsh-provider-proxy: SOCKS5 配置了用户名但没有密码；请补全密码或清空用户名',
-      )
-      continue
-    }
-
-    // The mirror of the rule above, for the same reason: undici only offers
-    // USERNAME_PASSWORD when BOTH parts are present, so a lone password is worse
-    // than useless — the client advertises NO_AUTH. The tunnel would succeed
-    // against an open proxy and fail against the one the credential was entered
-    // for, which reads as "the password is wrong" when it was never sent.
-    if (route.protocol === 'socks5' && route.password.length > 0 && route.username.length === 0) {
-      problems.set(
-        provider,
-        'dsh-provider-proxy: SOCKS5 配置了密码但没有用户名；请补全用户名或清空密码',
-      )
-      continue
-    }
-
-    // An HTTP/HTTPS password WITHOUT a username is refused outright: basic auth
-    // cannot send a password alone, and silently dropping it would leave the user
-    // believing a credential is in use when it is not. This is the symmetric
-    // counterpart of the SOCKS5 guard above and lives on the same `problems`
-    // path, so both mistakes are reported the same way.
-    if (route.protocol !== 'socks5' && route.password.length > 0 && route.username.length === 0) {
-      problems.set(
-        provider,
-        'dsh-provider-proxy: 配置了代理密码但没有用户名；请补全用户名或清空密码',
-      )
-      continue
-    }
-
-    // The mirror for HTTP/HTTPS, where the asymmetry is worth spelling out:
-    // undici WOULD send `Basic base64("alice:")` — a username with an EMPTY
-    // password — so nothing is dropped and a lenient proxy accepts it. It is
-    // refused anyway, because a half-filled credential is nearly always a
-    // half-typed one, and "both or neither" is one rule to hold across all three
-    // transports instead of "the pairing each transport happens to carry". The
-    // cost is real and documented in the README: a proxy whose credential truly
-    // has an empty password cannot be configured here.
-    if (route.protocol !== 'socks5' && route.username.length > 0 && route.password.length === 0) {
-      problems.set(
-        provider,
-        'dsh-provider-proxy: 配置了代理用户名但没有密码；请补全密码或清空用户名',
-      )
-      continue
-    }
-
-    const url = proxyUrl(route)
-    let dispatcher: DispatcherLike
-    try {
-      dispatcher = createDispatcher(route, url, route.password)
-    } catch (error) {
-      problems.set(provider, error instanceof Error ? error.message : String(error))
-      continue
-    }
-    entries.set(provider, {
-      provider,
-      proxyOrigin: displayOrigin(route, url),
-      dispatcher,
-      decide: buildDecide(route),
-      testTarget: route.testTarget,
-    })
+  for (const [provider, raw] of Object.entries(config ?? {})) {
+    if (raw?.enabled !== true) continue
+    const built = buildRouteEntry(provider, raw, shared, true)
+    if (!built.ok) problems.set(provider, built.problem)
+    else entries.set(provider, built.entry)
   }
 
   return { entries, problems }

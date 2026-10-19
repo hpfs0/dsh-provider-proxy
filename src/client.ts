@@ -953,7 +953,10 @@ function renderPage(ctx: any): unknown {
     : rows.map(row => {
         // The MERGED value, so a just-typed value shows immediately.
         const route = view({ ...configured[row.id], ...draft[row.id] })
-        const disabled = !route.enabled
+        // The endpoint controls are editable whether or not the route is on: the
+        // point of the self-check below is to verify a setting BEFORE switching
+        // it on, which is impossible if the fields can only be typed into while
+        // traffic is already flowing through them. `enabled` gates routing only.
         const result = tests[row.id]
         // Rule entries that can never match: flagged under the input instead of
         // failing silently — a dead `onlyHosts` entry means fail-closed sends
@@ -961,6 +964,16 @@ function renderPage(ctx: any): unknown {
         const onlyDead = deadRuleEntries(route.onlyHosts)
         const bypassDead = deadRuleEntries(route.bypassHosts)
         const useDefault = route.useDefault === true
+        // Whether this card has an endpoint worth checking: an inheriting card
+        // depends on the shared default being configured, an own-endpoint card on
+        // its host and port being complete. Mirrors the Host's own build gate.
+        const endpointStored = route.useDefault
+          ? defaultUsable
+          : route.host.trim().length > 0 &&
+            Number.isInteger(route.port) &&
+            route.port >= 1 &&
+            route.port <= 65535
+        const showTest = route.enabled || endpointStored
         // Built once and either rendered (this route carries its own address) or
         // replaced by a one-line note (it inherits the shared default), so a card
         // can never show an input that does not apply to it.
@@ -972,7 +985,6 @@ function renderPage(ctx: any): unknown {
               {
                 className: styles.input,
                 style: S.input,
-                disabled,
                 value: route.protocol,
                 onChange: (event: any) => bind(row.id, 'protocol')(event.target.value),
               },
@@ -987,7 +999,6 @@ function renderPage(ctx: any): unknown {
             h('input', {
               className: styles.input,
               style: S.input,
-              disabled,
               placeholder: '127.0.0.1',
               value: route.host,
               onChange: (event: any) => bind(row.id, 'host')(event.target.value),
@@ -999,7 +1010,6 @@ function renderPage(ctx: any): unknown {
             h('input', {
               className: styles.input,
               style: S.input,
-              disabled,
               type: 'number',
               min: 1,
               max: 65535,
@@ -1016,7 +1026,6 @@ function renderPage(ctx: any): unknown {
             h('input', {
               className: styles.input,
               style: S.input,
-              disabled,
               autocomplete: 'off',
               value: route.username,
               onChange: (event: any) => bind(row.id, 'username')(event.target.value),
@@ -1032,7 +1041,6 @@ function renderPage(ctx: any): unknown {
             h('input', {
               className: styles.input,
               style: S.input,
-              disabled,
               type: 'password',
               autocomplete: 'off',
               value: route.password,
@@ -1097,7 +1105,6 @@ function renderPage(ctx: any): unknown {
             { className: styles.toggle, style: S.toggle, key: `${row.id}:usedefault` },
             h('input', {
               type: 'checkbox',
-              disabled,
               checked: useDefault,
               onChange: (event: any) => bind(row.id, 'useDefault')(event.target.checked === true),
             }),
@@ -1115,12 +1122,18 @@ function renderPage(ctx: any): unknown {
                 ),
               ]
             : endpointFields),
-          // The self-check only makes sense for a route that is ON; a disabled
-          // route is not in the Host's table, so there is nothing to test.
-          route.enabled
+          // The self-check is offered whenever there is something to check: an
+          // enabled route (the Host's table carries it, and a rejected one still
+          // reports WHY), or a disabled one whose endpoint is already complete —
+          // the Host builds that one for the check alone. A disabled route with
+          // no endpoint has nothing to test and would only answer "not enabled".
+          showTest
             ? h(
                 'div',
                 { style: S.testRow, key: `${row.id}:test` },
+                // A check on a route that is still off is a trial run, and it says
+                // so — otherwise the result reads as though the route were live.
+                route.enabled ? null : h('span', { style: S.testResult }, t.testDisabledNote),
                 h(
                   'button',
                   {
@@ -1162,7 +1175,6 @@ function renderPage(ctx: any): unknown {
               h('input', {
                 className: styles.input,
                 style: S.input,
-                disabled,
                 placeholder: 'api.example.com',
                 value: route.onlyHosts,
                 onChange: (event: any) => bind(row.id, 'onlyHosts')(event.target.value),
@@ -1175,7 +1187,6 @@ function renderPage(ctx: any): unknown {
               h('input', {
                 className: styles.input,
                 style: S.input,
-                disabled,
                 placeholder: 'localhost',
                 value: route.bypassHosts,
                 onChange: (event: any) => bind(row.id, 'bypassHosts')(event.target.value),
@@ -1191,7 +1202,6 @@ function renderPage(ctx: any): unknown {
               h('input', {
                 className: styles.input,
                 style: S.input,
-                disabled,
                 placeholder: 'https://api.example.com',
                 value: route.testTarget,
                 onChange: (event: any) => bind(row.id, 'testTarget')(event.target.value),
@@ -1265,6 +1275,7 @@ const EN = {
   hitCountSuffix: ' proxied',
   testButton: 'Test',
   testRunning: 'Testing…',
+  testDisabledNote: 'Not enabled — test only: ',
   testFailed: 'Test failed',
   exitIpLabel: 'exit IP ',
   advanced: 'Advanced: target host rules',
@@ -1304,6 +1315,7 @@ const ZH = {
   hitCountSuffix: ' 次',
   testButton: '测试',
   testRunning: '测试中…',
+  testDisabledNote: '未启用，仅测试：',
   testFailed: '测试失败',
   exitIpLabel: '出口 IP ',
   advanced: '高级：目标域名规则',

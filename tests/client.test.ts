@@ -1391,3 +1391,92 @@ test('the use-default switch persists to the route it belongs to', async () => {
     restore()
   }
 })
+
+// ---- testing a route before it is switched on ----
+
+test('a configured but disabled provider can still be tested', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: {
+            enabled: false,
+            protocol: 'http',
+            host: '127.0.0.1',
+            port: 7890,
+            username: '',
+            password: '',
+          },
+        },
+      },
+    })
+    const [tree] = renderPage(mod, harness)
+    const card = cardFor(tree, 'sensenova')
+    assert.ok(findButton(card), 'a disabled route with a complete endpoint must offer the check')
+    assert.ok(
+      textsOf(card).some(text => text.includes('未启用，仅测试')),
+      'a check on a route that is off must say it is a trial run',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('a disabled provider with no endpoint offers no check', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: {
+            enabled: false,
+            protocol: 'http',
+            host: '',
+            port: 0,
+            username: '',
+            password: '',
+          },
+        },
+      },
+    })
+    const [tree] = renderPage(mod, harness)
+    const card = cardFor(tree, 'sensenova')
+    assert.equal(
+      findButton(card),
+      undefined,
+      'nothing to check: the Host would only answer "not enabled"',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('the endpoint fields stay editable while the route is off', async () => {
+  // Otherwise a proxy setting could only be typed in while traffic was ALREADY
+  // flowing through it, which defeats checking it before switching it on.
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: {
+            enabled: false,
+            protocol: 'http',
+            host: '',
+            port: 0,
+            username: '',
+            password: '',
+          },
+        },
+      },
+    })
+    const [tree] = renderPage(mod, harness)
+    const card = cardFor(tree, 'sensenova')
+    const host = findInputsByPlaceholder(card, '127.0.0.1')[0]
+    assert.ok(host, 'expected a host input on the disabled card')
+    assert.notEqual(host.props.disabled, true, 'a disabled route must still be configurable')
+  } finally {
+    restore()
+  }
+})

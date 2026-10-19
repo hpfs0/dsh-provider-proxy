@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { closeTable, createProxyTable, proxyUrl } from '../lib/index.js'
+import { buildRouteEntry, closeTable, createProxyTable, normalizeDefaultProxy, normalizeRoute, proxyUrl } from '../lib/index.js'
 
 test('proxyUrl assembles host, port and protocol', () => {
   assert.equal(
@@ -381,5 +381,60 @@ test('a complete shared credential builds the dispatcher', async () => {
     'the shared credential must still never appear in a route entry',
   )
   await closeTable(entries)
+})
+
+// ---- building a disabled route for the connection self-check ----
+
+test('normalizeRoute validates a disabled route only when explicitly asked', () => {
+  const incomplete = { enabled: false, protocol: 'http', host: '', port: 0 }
+  // Nothing was asked of a disabled route, so a half-typed endpoint is not a
+  // problem to report.
+  assert.doesNotThrow(() => normalizeRoute('p', incomplete))
+  // The self-check DOES ask: it applies exactly the validation routing would.
+  assert.throws(
+    () => normalizeRoute('p', incomplete, { requireEnabled: false }),
+    /未填写代理地址/,
+  )
+  assert.throws(
+    () => normalizeRoute('p', { enabled: false, host: '127.0.0.1', port: 0 }, { requireEnabled: false }),
+    /端口无效/,
+  )
+  assert.doesNotThrow(() =>
+    normalizeRoute('p', { enabled: false, host: '127.0.0.1', port: 7890 }, { requireEnabled: false }),
+  )
+})
+
+test('buildRouteEntry builds a disabled route the self-check can run', async () => {
+  const shared = normalizeDefaultProxy({ host: '', port: 0 })
+  const built = buildRouteEntry('p', { enabled: false, protocol: 'http', host: '127.0.0.1', port: 7890 }, shared, false)
+  assert.equal(built.ok, true)
+  if (!built.ok) return
+  assert.equal(built.entry.proxyOrigin, 'http://127.0.0.1:7890')
+  await built.entry.dispatcher.close()
+})
+
+test('buildRouteEntry reports the reason a disabled route cannot be built', () => {
+  const shared = normalizeDefaultProxy({ host: '', port: 0 })
+  // Half-filled credentials must be refused HERE too: the self-check runs the
+  // same guards as routing, so a setting that would be refused is not reported
+  // as checked-and-fine.
+  const refused = buildRouteEntry(
+    'p',
+    { enabled: false, protocol: 'http', host: 'proxy.test', port: 8080, password: 'secret' },
+    shared,
+    false,
+  )
+  assert.equal(refused.ok, false)
+  if (refused.ok) return
+  assert.match(refused.problem, /没有用户名/)
+})
+
+test('buildRouteEntry resolves the shared endpoint for a disabled route too', async () => {
+  const shared = normalizeDefaultProxy({ protocol: 'http', host: '127.0.0.1', port: 7890 })
+  const built = buildRouteEntry('p', { enabled: false, useDefault: true }, shared, false)
+  assert.equal(built.ok, true)
+  if (!built.ok) return
+  assert.equal(built.entry.proxyOrigin, 'http://127.0.0.1:7890')
+  await built.entry.dispatcher.close()
 })
 
