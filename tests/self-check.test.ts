@@ -650,3 +650,38 @@ test('a failed direct probe names the target, never a proxy it never used', asyn
   }
 })
 
+// ---- the cooldown caches a configuration, not a provider id ----
+
+test('a configuration change inside the cooldown is re-checked, not answered from the old result', async () => {
+  // Test -> see a failure -> fix the target -> test again must NOT return the
+  // pre-fix answer. The cooldown key includes the configuration, so an edit
+  // outside it produces a fresh outbound request.
+  const proxy = await startEchoProxy()
+  try {
+    const providers = {
+      p: {
+        enabled: false,
+        protocol: 'http',
+        host: '127.0.0.1',
+        port: proxy.port,
+        testTarget: 'http://echo.invalid/one',
+      },
+    }
+    // A mutable config: `get()` returns the live object, so flipping a field is
+    // exactly what a settings write does.
+    const { routes } = mountHost({ providers: { get: () => providers }, testUrl: 'http://echo.invalid/ip' })
+
+    const first = await selfCheck(routes, { provider: 'p' })
+    assert.equal(first.body.cached, undefined, 'the first check is fresh')
+    assert.equal(proxy.seen[0].url, 'http://echo.invalid/one')
+
+    providers.p.testTarget = 'http://echo.invalid/two'
+    const second = await selfCheck(routes, { provider: 'p' })
+    assert.notEqual(second.body.cached, true, 'a changed configuration must not be answered from the cooldown')
+    assert.equal(proxy.seen.length, 2, 'the new configuration got its own outbound request')
+    assert.equal(proxy.seen[1].url, 'http://echo.invalid/two')
+  } finally {
+    await proxy.close()
+  }
+})
+

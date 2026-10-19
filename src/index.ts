@@ -397,6 +397,32 @@ export function apply(ctx: any, config?: ProxyConfig): void {
   }
 
   /**
+   * A fingerprint of every input that can change one provider's check ANSWER.
+   *
+   * The cooldown is a cache, and a cache keyed only by provider would answer a
+   * question about a configuration the user has since edited. The route's own
+   * transport fields are used, plus `testTarget`; when the route opts into the
+   * shared endpoint, that endpoint's fields are what actually carry the request,
+   * so they are folded in instead. It is held in memory only and never logged.
+   */
+  const selfCheckKey = (provider: string): string => {
+    const raw = plainProviders(config)[provider] ?? {}
+    const endpoint =
+      raw.useDefault === true
+        ? (plainDefaultProxy(config) as Partial<ProviderProxyRouteValue>)
+        : raw
+    return JSON.stringify([
+      provider,
+      endpoint.protocol ?? 'http',
+      endpoint.host ?? '',
+      endpoint.port ?? 0,
+      endpoint.username ?? '',
+      endpoint.password ?? '',
+      raw.testTarget ?? '',
+    ])
+  }
+
+  /**
    * Run the connection self-check for one provider.
    *
    * A route the table carries is used directly — including one the guards
@@ -617,20 +643,26 @@ export function apply(ctx: any, config?: ProxyConfig): void {
                 send(400, { ok: false, kind: 'body', error: '缺少 provider' })
                 return
               }
-              let pending = selfChecks.get(provider)
+              // Every input the check's ANSWER depends on, so the cooldown below
+              // cannot hand back a result that belonged to a DIFFERENT
+              // configuration. Without this, a user who tests, sees a failure,
+              // fixes the port, and re-tests within the cooldown would be shown
+              // the pre-fix result and think the fix did nothing.
+              const key = selfCheckKey(provider)
+              let pending = selfChecks.get(key)
               if (pending === undefined) {
-                const last = lastChecks.get(provider)
+                const last = lastChecks.get(key)
                 if (last !== undefined && Date.now() - last.at < SELF_CHECK_COOLDOWN_MS) {
                   send(200, { ...last.result, cached: true })
                   return
                 }
                 pending = runSelfCheck(provider).then(result => {
-                  lastChecks.set(provider, { at: Date.now(), result })
+                  lastChecks.set(key, { at: Date.now(), result })
                   return result
                 })
-                selfChecks.set(provider, pending)
+                selfChecks.set(key, pending)
                 void pending.finally(() => {
-                  if (selfChecks.get(provider) === pending) selfChecks.delete(provider)
+                  if (selfChecks.get(key) === pending) selfChecks.delete(key)
                 })
               }
               send(200, await pending)
