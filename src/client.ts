@@ -26,6 +26,7 @@ type Protocol = 'http' | 'https' | 'socks5'
 
 type RouteValue = {
   enabled: boolean
+  useDefault: boolean
   protocol: Protocol
   host: string
   port: number
@@ -370,6 +371,7 @@ function deadRuleEntries(raw: string): string[] {
 function view(route: Partial<RouteValue> | undefined): RouteValue {
   return {
     enabled: route?.enabled === true,
+    useDefault: route?.useDefault === true,
     protocol: PROTOCOLS.includes(route?.protocol as Protocol) ? (route!.protocol as Protocol) : 'http',
     host: route?.host ?? '',
     port: route?.port ?? 0,
@@ -543,6 +545,40 @@ const S = {
     color: 'var(--dsw-alias-label-secondary)',
   },
   pillOff: { color: 'var(--dsw-alias-state-idle-primary)' },
+  /**
+   * The shared default endpoint sits on its own layer so it reads as global
+   * rather than as one more provider card — the mistake it exists to prevent is
+   * a user typing the same address into every card.
+   */
+  defaultCard: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '10px',
+    padding: '14px 16px',
+    border: '1px solid var(--dsw-alias-border-l2)',
+    borderRadius: '10px',
+    background: 'var(--dsw-alias-bg-layer-2)',
+  },
+  defaultLead: {
+    margin: '-2px 0 0',
+    fontSize: '11px',
+    lineHeight: '1.5',
+    color: 'var(--dsw-alias-label-secondary)',
+  },
+  inheritNote: {
+    margin: '0',
+    fontSize: '11px',
+    lineHeight: '1.5',
+    color: 'var(--dsw-alias-label-secondary)',
+  },
+  /** The default is not configured: an answer, so it takes the error colour. */
+  inheritWarning: {
+    margin: '0',
+    fontSize: '11px',
+    lineHeight: '1.5',
+    fontWeight: '500',
+    color: 'var(--dsw-alias-state-error-primary, #f85149)',
+  },
   toggle: {
     display: 'flex',
     alignItems: 'center',
@@ -646,6 +682,18 @@ function renderPage(ctx: any): unknown {
   const edit = (id: string, field: string, value: unknown) =>
     setDraft((current: any) => ({ ...current, [id]: { ...current[id], [field]: value } }))
 
+  /**
+   * The shared default endpoint gets its own draft for the same reason a card
+   * does: its controls must show an edit before the debounced write lands.
+   *
+   * It is deliberately NOT stored under a sentinel key inside `draft`:
+   * `knownProviders` unions the stored config with the draft to build the card
+   * list, so such a key would surface as a phantom provider with no name.
+   */
+  const [defaultDraft, setDefaultDraft] = (React.useState ?? ((v: any) => [v, () => {}]))({})
+  const editDefault = (field: string, value: unknown) =>
+    setDefaultDraft((current: any) => ({ ...current, [field]: value }))
+
   // Self-check outcomes keyed by provider id: `{ pending: true }` while the Host
   // is testing, then the normalized result the card renders.
   const [tests, setTests] = (React.useState ?? ((v: any) => [v, () => {}]))({})
@@ -679,47 +727,76 @@ function renderPage(ctx: any): unknown {
   const rows = knownProviders({ ...configured, ...draft }, published)
 
   /**
-   * Persist one field, debounced per provider+field: a burst of edits to the
-   * same field collapses into ONE write carrying the last value. The control is
-   * already showing the new value via the draft, so this only has to succeed
-   * quietly; a refusal is reported in the diagnostics.
+   * Persist one field, debounced per `key`: a burst of edits to the same control
+   * collapses into ONE write carrying the last value. The control already shows
+   * the new value via the draft, so this only has to succeed quietly; a refusal
+   * is reported in the diagnostics and undone by `onRefused`.
    */
-  const save = (id: string, field: string, value: unknown) => {
-    const key = `${id}\u0000${field}`
+  const save = (
+    key: string,
+    path: unknown[],
+    label: string,
+    value: unknown,
+    onRefused: () => void,
+  ) => {
     const pending = pendingWrites.get(key)
     if (pending !== undefined) clearTimeout(pending.timer)
     const timer = setTimeout(() => {
       pendingWrites.delete(key)
-      void writeConfig(ctx, [{ op: 'set', path: ['providers', id, field], value }])
+      void writeConfig(ctx, [{ op: 'set', path, value }])
         .then(() => {
-          note(`已保存 ${id}.${field} = ${JSON.stringify(value)}`)
+          note(`已保存 ${label} = ${JSON.stringify(value)}`)
         })
         .catch((error: any) => {
-          note(`保存失败 ${id}.${field}：${error?.message ?? error}`)
-          // Drop ONLY the field whose write was refused. Other fields of the
-          // same provider may hold edits that are still pending or already
-          // accepted — dropping the whole draft entry would throw away values
-          // the Host never objected to. An entry left empty by the removal is
-          // dropped entirely, so it cannot keep a phantom row alive.
-          setDraft((current: any) => {
-            const entry = current[id]
-            if (entry === undefined || entry[field] === undefined) return current
-            const nextEntry = { ...entry }
-            delete nextEntry[field]
-            const next = { ...current }
-            if (Object.keys(nextEntry).length === 0) delete next[id]
-            else next[id] = nextEntry
-            return next
-          })
+          note(`保存失败 ${label}：${error?.message ?? error}`)
+          onRefused()
         })
     }, WRITE_DELAY_MS)
     pendingWrites.set(key, { timer })
   }
 
-  /** One control: update the draft instantly, persist in the background. */
+  /**
+   * Undo ONE refused field in a card's draft.
+   *
+   * Only that field is dropped. Other fields of the same provider may hold edits
+   * that are still pending or already accepted — dropping the whole draft entry
+   * would throw away values the Host never objected to. An entry left empty by
+   * the removal is dropped entirely, so it cannot keep a phantom row alive.
+   */
+  const rollbackRouteField = (id: string, field: string): void => {
+    setDraft((current: any) => {
+      const entry = current[id]
+      if (entry === undefined || entry[field] === undefined) return current
+      const nextEntry = { ...entry }
+      delete nextEntry[field]
+      const next = { ...current }
+      if (Object.keys(nextEntry).length === 0) delete next[id]
+      else next[id] = nextEntry
+      return next
+    })
+  }
+
+  /** One card control: update the draft instantly, persist in the background. */
   const bind = (id: string, field: string) => (value: unknown) => {
     edit(id, field, value)
-    save(id, field, value)
+    save(`${id}\u0000${field}`, ['providers', id, field], `${id}.${field}`, value, () =>
+      rollbackRouteField(id, field),
+    )
+  }
+
+  /** One default-block control: same contract, addressed at `defaultProxy`. */
+  const bindDefault = (field: string) => (value: unknown) => {
+    editDefault(field, value)
+    save(`\u0000default\u0000${field}`, ['defaultProxy', field], `defaultProxy.${field}`, value, () => {
+      // Same rule as a card field: drop only this field, and only if the draft
+      // still holds it, so an already-accepted sibling edit is never discarded.
+      setDefaultDraft((current: any) => {
+        if (current[field] === undefined) return current
+        const next = { ...current }
+        delete next[field]
+        return next
+      })
+    })
   }
 
   const field = (label: string, control: unknown, hint?: string, hintError?: boolean): unknown =>
@@ -747,6 +824,109 @@ function renderPage(ctx: any): unknown {
             hint,
           ),
     )
+
+  /**
+   * The shared endpoint block, always rendered.
+   *
+   * It is the only place the address can be entered, so hiding it until some
+   * card opts in would leave no way to configure it in the first place.
+   */
+  const storedDefault = (snapshot.value?.defaultProxy ?? {}) as Partial<RouteValue>
+  const defaultView = view({ ...storedDefault, ...defaultDraft })
+  // The same predicate the Host uses to decide a route opted into a broken
+  // default; duplicated here because the browser has no access to the Host half.
+  const defaultUsable =
+    defaultView.host.length > 0 &&
+    Number.isInteger(defaultView.port) &&
+    defaultView.port >= 1 &&
+    defaultView.port <= 65535
+  const defaultOrigin = `${defaultView.protocol}://${defaultView.host}:${defaultView.port}`
+  const defaultBlock = h(
+    'div',
+    { className: styles.defaultCard, style: S.defaultCard, key: 'default-proxy' },
+    h(
+      'header',
+      { className: styles.cardHead, style: S.head },
+      h(
+        'div',
+        { className: styles.cardTitles, style: S.titles },
+        h('span', { className: styles.name, style: S.name }, t.defaultTitle),
+      ),
+      h(
+        'span',
+        {
+          className: defaultUsable ? styles.pillOn : styles.pillOff,
+          style: { ...S.pill, ...(defaultUsable ? S.pillOn : S.pillOff) },
+        },
+        defaultUsable ? t.on : t.off,
+      ),
+    ),
+    h('p', { className: styles.defaultLead, style: S.defaultLead }, t.defaultLead),
+    field(
+      t.protocol,
+      h(
+        'select',
+        {
+          className: styles.input,
+          style: S.input,
+          value: defaultView.protocol,
+          onChange: (event: any) => bindDefault('protocol')(event.target.value),
+        },
+        ...PROTOCOLS.map(protocol =>
+          h('option', { key: protocol, value: protocol }, protocol.toUpperCase()),
+        ),
+      ),
+    ),
+    field(
+      t.host,
+      h('input', {
+        className: styles.input,
+        style: S.input,
+        placeholder: '127.0.0.1',
+        value: defaultView.host,
+        onChange: (event: any) => bindDefault('host')(event.target.value),
+      }),
+      t.hostHint,
+    ),
+    field(
+      t.port,
+      h('input', {
+        className: styles.input,
+        style: S.input,
+        type: 'number',
+        min: 1,
+        max: 65535,
+        placeholder: '7890',
+        value: defaultView.port === 0 ? '' : String(defaultView.port),
+        onChange: (event: any) => {
+          const parsed = Number.parseInt(event.target.value, 10)
+          bindDefault('port')(Number.isNaN(parsed) ? 0 : parsed)
+        },
+      }),
+    ),
+    field(
+      t.username,
+      h('input', {
+        className: styles.input,
+        style: S.input,
+        autocomplete: 'off',
+        value: defaultView.username,
+        onChange: (event: any) => bindDefault('username')(event.target.value),
+      }),
+    ),
+    field(
+      t.password,
+      h('input', {
+        className: styles.input,
+        style: S.input,
+        type: 'password',
+        autocomplete: 'off',
+        value: defaultView.password,
+        onChange: (event: any) => bindDefault('password')(event.target.value),
+      }),
+      t.passwordHintProxy,
+    ),
+  )
 
   // ALWAYS an array: a single element is not iterable, and spreading one threw
   // "Spread syntax requires ...iterable[Symbol.iterator]" on an empty list.
@@ -780,53 +960,11 @@ function renderPage(ctx: any): unknown {
         // the traffic DIRECT while the user believes it is proxied.
         const onlyDead = deadRuleEntries(route.onlyHosts)
         const bypassDead = deadRuleEntries(route.bypassHosts)
-        return h(
-          'section',
-          {
-            className: route.enabled ? styles.cardActive : styles.card,
-            style: route.enabled ? { ...S.card, ...S.cardActive } : S.card,
-            key: row.id,
-          },
-          h(
-            'header',
-            { className: styles.cardHead, style: S.head },
-            h(
-              'div',
-              { className: styles.cardTitles, style: S.titles },
-              h('span', { className: styles.name, style: S.name }, row.name),
-              h('span', { className: styles.id, style: S.id }, row.id),
-              // A disabled route can never have hits, so "0" there would only add
-              // noise; the count shows once the route is on (or has counted).
-              route.enabled || (hits[row.id] ?? 0) > 0
-                ? h(
-                    'span',
-                    { style: S.hits },
-                    `${t.hitCountPrefix}${hits[row.id] ?? 0}${t.hitCountSuffix}`,
-                  )
-                : null,
-            ),
-            h(
-              'span',
-              {
-                className: route.enabled ? styles.pillOn : row.live ? styles.pillLive : styles.pillOff,
-                style: {
-                  ...S.pill,
-                  ...(route.enabled ? S.pillOn : row.live ? S.pillLive : S.pillOff),
-                },
-              },
-              route.enabled ? t.on : row.live ? t.live : t.off,
-            ),
-          ),
-          h(
-            'label',
-            { className: styles.toggle, style: S.toggle },
-            h('input', {
-              type: 'checkbox',
-              checked: route.enabled,
-              onChange: (event: any) => bind(row.id, 'enabled')(event.target.checked === true),
-            }),
-            h('span', null, t.useProxy),
-          ),
+        const useDefault = route.useDefault === true
+        // Built once and either rendered (this route carries its own address) or
+        // replaced by a one-line note (it inherits the shared default), so a card
+        // can never show an input that does not apply to it.
+        const endpointFields = [
           field(
             t.protocol,
             h(
@@ -884,7 +1022,7 @@ function renderPage(ctx: any): unknown {
               onChange: (event: any) => bind(row.id, 'username')(event.target.value),
             }),
           ),
-          // Every transport accepts a password now: SOCKS5 hands it to
+          // Every transport accepts a password: SOCKS5 hands it to
           // Socks5ProxyAgent as an option, HTTP/HTTPS embed it in the proxy URL
           // userinfo (undici turns that into Proxy-Authorization). It is stored on
           // the route, so it lands in the settings file with the rest of the
@@ -902,6 +1040,81 @@ function renderPage(ctx: any): unknown {
             }),
             route.protocol === 'socks5' ? t.passwordHint : t.passwordHintProxy,
           ),
+        ]
+        return h(
+          'section',
+          {
+            className: route.enabled ? styles.cardActive : styles.card,
+            style: route.enabled ? { ...S.card, ...S.cardActive } : S.card,
+            key: row.id,
+          },
+          h(
+            'header',
+            { className: styles.cardHead, style: S.head },
+            h(
+              'div',
+              { className: styles.cardTitles, style: S.titles },
+              h('span', { className: styles.name, style: S.name }, row.name),
+              h('span', { className: styles.id, style: S.id }, row.id),
+              // A disabled route can never have hits, so "0" there would only add
+              // noise; the count shows once the route is on (or has counted).
+              route.enabled || (hits[row.id] ?? 0) > 0
+                ? h(
+                    'span',
+                    { style: S.hits },
+                    `${t.hitCountPrefix}${hits[row.id] ?? 0}${t.hitCountSuffix}`,
+                  )
+                : null,
+            ),
+            h(
+              'span',
+              {
+                className: route.enabled ? styles.pillOn : row.live ? styles.pillLive : styles.pillOff,
+                style: {
+                  ...S.pill,
+                  ...(route.enabled ? S.pillOn : row.live ? S.pillLive : S.pillOff),
+                },
+              },
+              route.enabled ? t.on : row.live ? t.live : t.off,
+            ),
+          ),
+          h(
+            'label',
+            { className: styles.toggle, style: S.toggle },
+            h('input', {
+              type: 'checkbox',
+              checked: route.enabled,
+              onChange: (event: any) => bind(row.id, 'enabled')(event.target.checked === true),
+            }),
+            h('span', null, t.useProxy),
+          ),
+          // Opting into the shared endpoint. The card then shows the address it
+          // will actually use — or, when the default is not configured, why the
+          // route is refused — instead of a set of empty inputs the user never
+          // filled and cannot interpret.
+          h(
+            'label',
+            { className: styles.toggle, style: S.toggle, key: `${row.id}:usedefault` },
+            h('input', {
+              type: 'checkbox',
+              disabled,
+              checked: useDefault,
+              onChange: (event: any) => bind(row.id, 'useDefault')(event.target.checked === true),
+            }),
+            h('span', null, t.useDefault),
+          ),
+          ...(useDefault
+            ? [
+                h(
+                  'p',
+                  {
+                    key: `${row.id}:inherit`,
+                    style: defaultUsable ? S.inheritNote : S.inheritWarning,
+                  },
+                  defaultUsable ? `${t.inheritingDefault}${defaultOrigin}` : t.defaultMissing,
+                ),
+              ]
+            : endpointFields),
           // The self-check only makes sense for a route that is ON; a disabled
           // route is not in the Host's table, so there is nothing to test.
           route.enabled
@@ -993,6 +1206,7 @@ function renderPage(ctx: any): unknown {
     'div',
     { className: styles.root, style: S.root },
     h('p', { className: styles.lead, style: { margin: '0 0 4px', fontSize: '12px', lineHeight: '1.6', color: 'var(--dsw-alias-label-secondary)' } }, t.lead),
+    defaultBlock,
     ...body,
     h(
       'details',
@@ -1034,6 +1248,11 @@ const EN = {
   lead: 'Route selected model providers through your own forward proxy. Other providers stay direct.',
   empty: 'No providers found yet.',
   useProxy: 'Use a proxy for this provider',
+  useDefault: 'Use the default proxy',
+  defaultTitle: 'Default proxy',
+  defaultLead: 'One endpoint, reused by every provider that turns on "Use the default proxy".',
+  inheritingDefault: 'Using the default proxy: ',
+  defaultMissing: 'The default proxy is not configured (missing host or port), so this provider is not proxied.',
   protocol: 'Type',
   host: 'IP / host',
   port: 'Port',
@@ -1068,6 +1287,11 @@ const ZH = {
   lead: '让指定的 provider 走你自己的正向代理，其它 provider 保持直连。',
   empty: '没有检测到任何 provider。',
   useProxy: '为该 provider 启用代理',
+  useDefault: '使用默认代理',
+  defaultTitle: '默认代理',
+  defaultLead: '为勾选「使用默认代理」的 provider 复用的端点，只填一次。',
+  inheritingDefault: '使用默认代理：',
+  defaultMissing: '顶层默认代理未配置（缺主机或端口），该 provider 不会走代理。',
   protocol: '类型',
   host: 'IP / 主机',
   port: '端口',

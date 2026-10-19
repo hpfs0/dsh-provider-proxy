@@ -247,6 +247,26 @@ function findCheckboxes(node, out = []) {
   return out
 }
 
+/**
+ * The `<section>` card whose texts include one provider id.
+ *
+ * Needed because the page now renders a shared-default block ABOVE the cards,
+ * and that block carries host/port inputs with the same placeholders the cards
+ * use. A search by placeholder alone would land in the default block instead of
+ * the card under test.
+ */
+function cardFor(tree, id) {
+  const sections = []
+  const walk = node => {
+    if (node === null || typeof node !== 'object') return
+    if (Array.isArray(node)) return node.forEach(walk)
+    if (node.type === 'section') sections.push(node)
+    if (node.children) walk(node.children)
+  }
+  walk(tree)
+  return sections.find(section => textsOf(section).includes(id))
+}
+
 test('the bundle registers a settings section', () => {
   const { mod, restore } = loadBundle()
   try {
@@ -784,16 +804,24 @@ test('each provider is rendered as its own card section', async () => {
     walk(tree)
 
     // One section per provider, and each carries that provider's own controls.
+    // Two switches: the route's own on/off, and whether it uses the shared
+    // default endpoint.
     assert.equal(sections.length, 2, `expected 2 cards, got ${sections.length}`)
     for (const id of ['sensenova', 'openai']) {
       const card = sections.find(s => textsOf(s).includes(id))
       assert.ok(card, `no card for ${id}`)
       const controls = findCheckboxes(card)
-      assert.equal(controls.length, 1, `${id} must own exactly one switch`)
-      for (const label of ['为该 provider 启用代理', '类型', 'IP / 主机', '端口', '用户名']) {
+      assert.equal(controls.length, 2, `${id} must own two switches: enable, and use-default`)
+      for (const label of ['为该 provider 启用代理', '使用默认代理', '类型', 'IP / 主机', '端口', '用户名']) {
         assert.ok(textsOf(card).includes(label), `${id} is missing its ${label} field`)
       }
     }
+    // The shared endpoint block is a plain div, never a provider card: a
+    // `section` here would be counted as a third provider with no name.
+    assert.ok(
+      !sections.some(section => textsOf(section).includes('默认代理')),
+      'the shared default endpoint must not be rendered as a provider card',
+    )
   } finally {
     restore()
   }
@@ -876,9 +904,12 @@ test('a refused write rolls back only the failed field', async () => {
     await settle()
     const tree = render()
 
-    // The enabled card (`sensenova`): stored host 10.0.0.1, port 7890.
-    const hostInput = findInputsByPlaceholder(tree, '127.0.0.1').find(n => n.props.disabled !== true)
-    const portInput = findInputsByPlaceholder(tree, '7890').find(n => n.props.disabled !== true)
+    // The enabled card (`sensenova`): stored host 10.0.0.1, port 7890. Scoped to
+    // the card, because the shared-default block renders the same placeholders.
+    const card = cardFor(tree, 'sensenova')
+    assert.ok(card, 'expected the sensenova card')
+    const hostInput = findInputsByPlaceholder(card, '127.0.0.1').find(n => n.props.disabled !== true)
+    const portInput = findInputsByPlaceholder(card, '7890').find(n => n.props.disabled !== true)
     assert.ok(hostInput && portInput, 'expected the enabled card host and port inputs')
 
     // Edit host (write succeeds) and port (write is refused) in one burst.
@@ -887,8 +918,9 @@ test('a refused write rolls back only the failed field', async () => {
     await writeSettle()
 
     const after = render()
-    const hostAfter = findInputsByPlaceholder(after, '127.0.0.1').find(n => n.props.disabled !== true)
-    const portAfter = findInputsByPlaceholder(after, '7890').find(n => n.props.disabled !== true)
+    const cardAfter = cardFor(after, 'sensenova')
+    const hostAfter = findInputsByPlaceholder(cardAfter, '127.0.0.1').find(n => n.props.disabled !== true)
+    const portAfter = findInputsByPlaceholder(cardAfter, '7890').find(n => n.props.disabled !== true)
     assert.equal(hostAfter.props.value, '10.9.9.9', 'the accepted host edit must survive the rollback')
     assert.equal(portAfter.props.value, '7890', 'the refused port edit must revert to the stored value')
   } finally {
@@ -925,9 +957,11 @@ test('a burst of edits to one field collapses into a single write', async () => 
   try {
     const { registrations, writes } = mountPlugin(mod)
     await settle()
-    let tree = registrations[0].Component()
-    // Both cards render a host input; only `sensenova` is enabled (not disabled).
-    const hostInput = findInputsByPlaceholder(tree, '127.0.0.1').find(node => node.props.disabled !== true)
+    const tree = registrations[0].Component()
+    // The shared-default block renders a host input with the same placeholder,
+    // so scope the search to the card; only `sensenova` is enabled.
+    const hostInput = findInputsByPlaceholder(cardFor(tree, 'sensenova'), '127.0.0.1')
+      .find(node => node.props.disabled !== true)
     assert.ok(hostInput, 'expected an enabled host input')
     hostInput.props.onChange({ target: { value: '10.0.0.' } })
     hostInput.props.onChange({ target: { value: '10.0.0.2' } })
@@ -1206,6 +1240,154 @@ test('the catalogue is re-polled while the page is open and stops when it goes s
     globalThis.setInterval = real.setInterval
     globalThis.clearInterval = real.clearInterval
     Date.now = real.now
+    restore()
+  }
+})
+
+// ---- shared default endpoint ----
+
+/**
+ * Inputs carrying one placeholder that are NOT inside any `<section>` card.
+ *
+ * The shared-default block renders the same host/port placeholders the cards do,
+ * so "the card's input" and "the default block's input" can only be told apart
+ * by which of them sits outside a card.
+ */
+function findInputsOutsideSections(node, placeholder, out = [], inSection = false) {
+  if (node === null || typeof node !== 'object') return out
+  if (Array.isArray(node)) {
+    node.forEach(n => findInputsOutsideSections(n, placeholder, out, inSection))
+    return out
+  }
+  const nowInSection = inSection || node.type === 'section'
+  if (!nowInSection && node.type === 'input' && node.props?.placeholder === placeholder) out.push(node)
+  if (node.children) findInputsOutsideSections(node.children, placeholder, out, nowInSection)
+  return out
+}
+
+test('the shared default endpoint is its own block, not a provider card', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [tree] = renderPage(mod, harness)
+    const texts = textsOf(tree)
+    assert.ok(texts.includes('默认代理'), 'the shared endpoint must be rendered under its own title')
+    assert.ok(
+      texts.includes('使用默认代理'),
+      'every card must offer the opt-in switch for the shared endpoint',
+    )
+    // It is the only place the address can be typed, so it must exist even when
+    // no card has opted in yet.
+    assert.ok(
+      findInputsOutsideSections(tree, '127.0.0.1').length > 0,
+      'the default block must offer a host input',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('a card that uses the default names the address it will actually use', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        defaultProxy: { protocol: 'http', host: '127.0.0.1', port: 7890, username: '', password: '' },
+        providers: {
+          sensenova: {
+            enabled: true,
+            useDefault: true,
+            protocol: 'http',
+            host: '',
+            port: 0,
+            username: '',
+            password: '',
+          },
+        },
+      },
+    })
+    const [tree] = renderPage(mod, harness)
+    const card = cardFor(tree, 'sensenova')
+    assert.ok(card, 'expected the sensenova card')
+    assert.ok(
+      textsOf(card).includes('使用默认代理：http://127.0.0.1:7890'),
+      'an inheriting card must name the endpoint it will use',
+    )
+    assert.ok(
+      !textsOf(card).includes('IP / 主机'),
+      'an inheriting card must not render its own endpoint inputs — they do not apply',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('a card using an unconfigured default explains the refusal', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: {
+            enabled: true,
+            useDefault: true,
+            protocol: 'http',
+            host: '',
+            port: 0,
+            username: '',
+            password: '',
+          },
+        },
+      },
+    })
+    const [tree] = renderPage(mod, harness)
+    const card = cardFor(tree, 'sensenova')
+    assert.ok(
+      textsOf(card).some(text => text.includes('顶层默认代理未配置')),
+      'the card must say why it is not proxied instead of showing empty inputs',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('the shared default endpoint is written to its own settings path', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const { registrations, writes } = mountPlugin(mod)
+    registrations[0].Component()
+    await settle()
+    const tree = registrations[0].Component()
+    const host = findInputsOutsideSections(tree, '127.0.0.1')[0]
+    assert.ok(host, 'expected the default block host input')
+    host.props.onChange({ target: { value: '10.0.0.9' } })
+    await writeSettle()
+    assert.equal(writes.length, 1)
+    assert.deepEqual(writes[0].ops[0].path, ['defaultProxy', 'host'])
+    assert.equal(writes[0].ops[0].value, '10.0.0.9')
+  } finally {
+    restore()
+  }
+})
+
+test('the use-default switch persists to the route it belongs to', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const card = cardFor(render(), 'sensenova')
+    const [, useDefaultBox] = findCheckboxes(card)
+    assert.ok(useDefaultBox, 'expected the use-default switch on the card')
+    useDefaultBox.props.onChange({ target: { checked: true } })
+    await writeSettle()
+    assert.deepEqual(
+      harness.writes[0].ops[0].path,
+      ['providers', 'sensenova', 'useDefault'],
+      'the switch writes to the route, never to the shared block',
+    )
+    assert.equal(harness.writes[0].ops[0].value, true)
+  } finally {
     restore()
   }
 })

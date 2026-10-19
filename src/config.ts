@@ -82,6 +82,26 @@ export const PROTOCOLS = ['http', 'https', 'socks5'] as const
 export type Protocol = (typeof PROTOCOLS)[number]
 
 /**
+ * The shared endpoint a route may opt into with `useDefault`.
+ *
+ * There is deliberately NO `enabled` flag here: a default is "configured" when
+ * it has a host and an in-range port, and nothing else. A second switch would
+ * create the state "default configured but switched off", from which every route
+ * that opted in would silently lose its proxy — a failure mode with no upside,
+ * because a route opts in individually with `useDefault` and can be switched off
+ * on its own card.
+ */
+export const DefaultProxy = z.object({
+  protocol: z.union(PROTOCOLS).default('http'),
+  /** Proxy host or IP, without scheme, port, or path. */
+  host: z.string().default(''),
+  /** Proxy port. 0 means "not configured". */
+  port: z.number().default(0),
+  username: z.string().default(''),
+  password: z.string().default(''),
+})
+
+/**
  * One provider's proxy settings. Keyed by provider route id.
  *
  * `port` is deliberately NOT constrained by schemastery's min/max: an unset
@@ -93,6 +113,15 @@ export type Protocol = (typeof PROTOCOLS)[number]
 export const ProviderProxyRoute = z.object({
   /** Whether this provider's calls are routed through the proxy below. */
   enabled: z.boolean().default(false),
+  /**
+   * When true, this route's TRANSPORT fields (protocol/host/port/username/
+   * password) come from the top-level `defaultProxy` instead of its own, so the
+   * same endpoint is configured once for every provider that shares it. The
+   * target-host rules and the self-check target stay the route's own. There is
+   * no partial inheritance: to use a different endpoint, turn this off and fill
+   * the fields in.
+   */
+  useDefault: z.boolean().default(false),
   /** Proxy transport. `socks5` is accepted but only honoured when the socks helper loaded. */
   protocol: z.union(PROTOCOLS).default('http'),
   /** Proxy host or IP, without scheme, port, or path. */
@@ -122,6 +151,12 @@ export const Config = z.object({
   /** Per-provider proxy routes, keyed by provider route id (e.g. `sensenova`). */
   providers: vol(z.dict(ProviderProxyRoute).default({})),
   /**
+   * Shared endpoint for every route that sets `useDefault`. Volatile for the
+   * same reason as `providers`: a settings write is committed into the running
+   * fiber instead of remounting the plugin.
+   */
+  defaultProxy: vol(DefaultProxy.default({})),
+  /**
    * URL the per-provider connection self-check requests THROUGH the proxy.
    * Volatile, so a settings write does not remount the plugin; the default is an
    * IP echo service, which lets the check report the exit address.
@@ -131,6 +166,7 @@ export const Config = z.object({
 
 export interface ProviderProxyRouteValue {
   enabled: boolean
+  useDefault: boolean
   protocol: Protocol
   host: string
   port: number
@@ -141,9 +177,60 @@ export interface ProviderProxyRouteValue {
   testTarget: string
 }
 
+/** The normalized shared endpoint; see {@link DefaultProxy}. */
+export interface DefaultProxyValue {
+  protocol: Protocol
+  host: string
+  port: number
+  username: string
+  password: string
+}
+
 export interface ConfigShape {
   providers: { readonly [provider: string]: ProviderProxyRouteValue }
+  defaultProxy: DefaultProxyValue
   testUrl: string
+}
+
+/** Read a schemastery-parsed object's plain value, whichever shape it takes. */
+function plain<T>(parsed: unknown): T {
+  const get = (parsed as { get?: () => unknown }).get
+  return (typeof get === 'function' ? get.call(parsed) : parsed) as T
+}
+
+/**
+ * Normalize the shared default endpoint. Mirrors {@link normalizeRoute} so both
+ * the Host and a test can hand `createProxyTable` a raw object.
+ *
+ * Format is validated lazily, exactly like a route: a malformed default costs a
+ * `problems` entry naming each route that opted into it, never a crash.
+ */
+export function normalizeDefaultProxy(raw: Partial<DefaultProxyValue> | undefined): DefaultProxyValue {
+  const value = plain<DefaultProxyValue>(DefaultProxy(raw ?? {}))
+  return {
+    protocol: value.protocol,
+    host: value.host.trim(),
+    port: value.port,
+    username: value.username.trim(),
+    password: value.password,
+  }
+}
+
+/**
+ * Whether the shared endpoint can actually carry a request.
+ *
+ * A route that opts in while this is false is REFUSED with a message naming the
+ * default, rather than falling back to its own (empty) fields — otherwise the
+ * user would see the generic "no proxy address" on a card they never typed an
+ * address into, and blame the card.
+ */
+export function usableDefaultProxy(defaultProxy: DefaultProxyValue): boolean {
+  return (
+    defaultProxy.host.length > 0 &&
+    Number.isInteger(defaultProxy.port) &&
+    defaultProxy.port >= 1 &&
+    defaultProxy.port <= 65535
+  )
 }
 
 /**
@@ -156,10 +243,7 @@ export function normalizeRoute(
   provider: string,
   raw: Partial<ProviderProxyRouteValue> | undefined,
 ): ProviderProxyRouteValue {
-  const route = ProviderProxyRoute(raw ?? {})
-  const value = typeof (route as { get?: () => unknown }).get === 'function'
-    ? (route as unknown as { get: () => ProviderProxyRouteValue }).get()
-    : (route as ProviderProxyRouteValue)
+  const value = plain<ProviderProxyRouteValue>(ProviderProxyRoute(raw ?? {}))
 
   // Host rules are stored normalized (trimmed, lower-cased) so the matcher built
   // from them never re-parses on the hot path. WHATWG URL already lower-cases a

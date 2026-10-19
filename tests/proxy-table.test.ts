@@ -290,3 +290,96 @@ test('without rules every target is proxied', async () => {
   assert.equal(entries.get('p').decide(undefined), 'proxy')
   await closeTable(entries)
 })
+
+// ---- shared default endpoint (useDefault) ----
+
+test('a route that opts into the shared endpoint takes its address from it', async () => {
+  const { entries, problems } = await createProxyTable(
+    { p: { enabled: true, useDefault: true, onlyHosts: 'api.example.com' } },
+    { protocol: 'http', host: '127.0.0.1', port: 7890 },
+  )
+  assert.equal(problems.size, 0)
+  assert.equal(entries.get('p').proxyOrigin, 'http://127.0.0.1:7890')
+  // Only the TRANSPORT moves: the target-host rules stay the route's own.
+  assert.equal(entries.get('p').decide('api.example.com'), 'proxy')
+  assert.equal(entries.get('p').decide('other.test'), 'direct')
+  await closeTable(entries)
+})
+
+test('a route without useDefault keeps its own endpoint', async () => {
+  const { entries } = await createProxyTable(
+    { p: { enabled: true, protocol: 'socks5', host: '10.0.0.1', port: 1080 } },
+    { protocol: 'http', host: '127.0.0.1', port: 7890 },
+  )
+  assert.equal(entries.get('p').proxyOrigin, 'socks5://10.0.0.1:1080')
+  await closeTable(entries)
+})
+
+test('two providers sharing the shared endpoint still get their own dispatchers', async () => {
+  const shared = { protocol: 'http', host: '127.0.0.1', port: 7890 }
+  const { entries } = await createProxyTable(
+    { a: { enabled: true, useDefault: true }, b: { enabled: true, useDefault: true } },
+    shared,
+  )
+  assert.equal(entries.size, 2)
+  assert.equal(entries.get('a').proxyOrigin, entries.get('b').proxyOrigin)
+  // The endpoint is shared; the DISPATCHER instance never is — one provider's
+  // proxy must not be reachable from another provider's call.
+  assert.notEqual(entries.get('a').dispatcher, entries.get('b').dispatcher)
+  await closeTable(entries)
+})
+
+test('opting into an unconfigured shared endpoint is refused, naming the default', async () => {
+  const withoutEndpoint = await createProxyTable({ p: { enabled: true, useDefault: true } })
+  assert.equal(withoutEndpoint.entries.size, 0)
+  assert.match(withoutEndpoint.problems.get('p'), /默认代理/)
+
+  const blank = await createProxyTable(
+    { p: { enabled: true, useDefault: true } },
+    { protocol: 'http', host: '   ', port: 0 },
+  )
+  assert.equal(blank.entries.size, 0)
+  assert.match(blank.problems.get('p'), /默认代理/)
+})
+
+test('useDefault is irrelevant to a disabled route', async () => {
+  const { entries, problems } = await createProxyTable(
+    { p: { enabled: false, useDefault: true } },
+    { host: '', port: 0 },
+  )
+  assert.equal(entries.size, 0)
+  assert.equal(problems.size, 0, 'a disabled route is not refused for a default it never uses')
+})
+
+test('credentials from the shared endpoint reach the route, guards included', async () => {
+  // Half-filled credentials must be refused HERE too, which is only possible if
+  // the shared username/password actually flowed into the route's own guard.
+  const { entries, problems } = await createProxyTable(
+    { p: { enabled: true, useDefault: true } },
+    { protocol: 'http', host: 'proxy.test', port: 8080, username: 'alice' },
+  )
+  assert.equal(entries.size, 0)
+  assert.match(problems.get('p'), /用户名/)
+  assert.match(problems.get('p'), /密码/)
+})
+
+test('a complete shared credential builds the dispatcher', async () => {
+  const { entries, problems } = await createProxyTable(
+    { p: { enabled: true, useDefault: true } },
+    {
+      protocol: 'http',
+      host: 'proxy.test',
+      port: 8080,
+      username: 'alice',
+      password: 'hunter2',
+    },
+  )
+  assert.equal(problems.size, 0)
+  assert.equal(entries.get('p').proxyOrigin, 'http://proxy.test:8080')
+  assert.ok(
+    !JSON.stringify(entries.get('p')).includes('hunter2'),
+    'the shared credential must still never appear in a route entry',
+  )
+  await closeTable(entries)
+})
+

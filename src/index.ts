@@ -10,7 +10,7 @@ import { fetch as undiciFetch } from 'undici'
 
 import { acquireFetchRouter } from './fetch-router.js'
 import { closeTable, createProxyTable, type RouteEntry } from './proxy-table.js'
-import type { ProviderProxyRouteValue } from './config.js'
+import type { DefaultProxyValue, ProviderProxyRouteValue } from './config.js'
 
 export const name = 'dsh-provider-proxy'
 export const inject = ['llm']
@@ -36,6 +36,8 @@ export const WEB_SEARCH_KEY = 'web-search'
 interface ProxyConfig {
   /** The provider dictionary, or the Volatile wrapper around it. */
   readonly providers?: unknown
+  /** The shared default endpoint, or the Volatile wrapper around it. */
+  readonly defaultProxy?: unknown
   /** The self-check URL, or the Volatile wrapper around it. */
   readonly testUrl?: unknown
 }
@@ -50,6 +52,15 @@ function plainProviders(
   const snapshot = (raw as { get?: () => unknown }).get
   const value = typeof snapshot === 'function' ? snapshot.call(raw) : raw
   return (value ?? {}) as Record<string, Partial<ProviderProxyRouteValue>>
+}
+
+/** Read the shared default endpoint, which is Volatile under the Loader too. */
+function plainDefaultProxy(config: ProxyConfig | undefined): Partial<DefaultProxyValue> {
+  const raw = config?.defaultProxy
+  if (raw === undefined) return {}
+  const snapshot = (raw as { get?: () => unknown }).get
+  const value = typeof snapshot === 'function' ? snapshot.call(raw) : raw
+  return (value ?? {}) as Partial<DefaultProxyValue>
 }
 
 export function apply(ctx: any, config?: ProxyConfig): void {
@@ -222,7 +233,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
   }
 
   const rebuild = async (): Promise<void> => {
-    const next = createProxyTable(plainProviders(config))
+    const next = createProxyTable(plainProviders(config), plainDefaultProxy(config))
     const previous = current
     current = next.entries
     problems = next.problems
@@ -503,4 +514,4 @@ export function apply(ctx: any, config?: ProxyConfig): void {
 
 export { acquireFetchRouter } from './fetch-router.js'
 export { createProxyTable, closeTable, proxyUrl } from './proxy-table.js'
-export { Config, ProviderProxyRoute, normalizeRoute, PROTOCOLS } from './config.js'
+export { Config, ProviderProxyRoute, normalizeRoute, normalizeDefaultProxy, PROTOCOLS } from './config.js'

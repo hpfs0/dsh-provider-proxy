@@ -16,7 +16,13 @@
 
 import { ProxyAgent, Socks5ProxyAgent } from 'undici'
 
-import { normalizeRoute, type ProviderProxyRouteValue } from './config.js'
+import {
+  normalizeDefaultProxy,
+  normalizeRoute,
+  usableDefaultProxy,
+  type DefaultProxyValue,
+  type ProviderProxyRouteValue,
+} from './config.js'
 import type { DispatcherLike } from './fetch-router.js'
 
 export interface RouteEntry {
@@ -146,6 +152,29 @@ function buildDecide(route: ProviderProxyRouteValue): (host: string | undefined)
 }
 
 /**
+ * Apply the shared default endpoint to one route that opted into it.
+ *
+ * Only the TRANSPORT fields move; `onlyHosts`/`bypassHosts`/`testTarget` stay the
+ * route's own, because they describe that provider's traffic, not the proxy. The
+ * merge happens AFTER the endpoint is proven usable, so a route can never be
+ * silently downgraded to its own (empty) fields while the user believes it is
+ * using the default.
+ */
+function withDefaultProxy(
+  route: Partial<ProviderProxyRouteValue>,
+  defaultProxy: DefaultProxyValue,
+): Partial<ProviderProxyRouteValue> {
+  return {
+    ...route,
+    protocol: defaultProxy.protocol,
+    host: defaultProxy.host,
+    port: defaultProxy.port,
+    username: defaultProxy.username,
+    password: defaultProxy.password,
+  }
+}
+
+/**
  * Build the dispatchers for every enabled, valid route.
  *
  * Invalid routes are skipped rather than thrown: one mistyped provider must not
@@ -154,11 +183,28 @@ function buildDecide(route: ProviderProxyRouteValue): (host: string | undefined)
  */
 export function createProxyTable(
   config: { readonly [provider: string]: Partial<ProviderProxyRouteValue> } | undefined,
+  defaultProxy?: Partial<DefaultProxyValue>,
 ): { entries: Map<string, RouteEntry>; problems: Map<string, string> } {
   const entries = new Map<string, RouteEntry>()
   const problems = new Map<string, string>()
+  const shared = normalizeDefaultProxy(defaultProxy)
 
-  for (const [provider, raw] of Object.entries(config ?? {})) {
+  for (const [provider, rawConfig] of Object.entries(config ?? {})) {
+    let raw = rawConfig
+    // A route that opted into the shared endpoint takes the proxy address from
+    // it. That address is validated HERE rather than being merged and left to
+    // fail the route's own check, so the refusal names the setting the user
+    // actually has to fix (the default block, not the card).
+    if (raw?.enabled === true && raw?.useDefault === true) {
+      if (!usableDefaultProxy(shared)) {
+        problems.set(
+          provider,
+          `dsh-provider-proxy: provider "${provider}" 启用了「使用默认代理」，但顶层默认代理未配置（需填写主机与 1-65535 的端口）`,
+        )
+        continue
+      }
+      raw = withDefaultProxy(raw, shared)
+    }
     let route: ProviderProxyRouteValue
     try {
       route = normalizeRoute(provider, raw)
