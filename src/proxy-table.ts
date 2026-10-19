@@ -133,18 +133,52 @@ function hostMatches(host: string, rules: readonly string[]): boolean {
 }
 
 /**
+ * Whether a target host is loopback or on a private network.
+ *
+ * Such a target is almost always a relay running on the same machine (LiteLLM,
+ * Ollama, a local mock), which a forward proxy cannot reach at all — forcing it
+ * through one fails, and the failure reads as "the proxy is broken". Sending it
+ * direct is the only answer that can work.
+ *
+ * Matched by ADDRESS, not by the domain-suffix matcher above: `192.168.1.5` is
+ * not a suffix of anything, so `hostMatches` cannot express these rules.
+ */
+function isLocalHost(host: string): boolean {
+  // WHATWG URL keeps an IPv6 literal bracketed (`[::1]`), so strip first.
+  const bare = host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host
+  if (bare === 'localhost' || bare.endsWith('.localhost')) return true
+  if (bare === '::1') return true
+
+  const octets = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(bare)
+  if (octets === null) return false
+  const [a, b, c, d] = octets.slice(1).map(Number)
+  if (a > 255 || b > 255 || c > 255 || d > 255) return false
+  if (a === 127) return true // 127.0.0.0/8 — loopback
+  if (a === 10) return true // 10.0.0.0/8 — private
+  if (a === 192 && b === 168) return true // 192.168.0.0/16 — private
+  if (a === 169 && b === 254) return true // 169.254.0.0/16 — link-local
+  if (a === 172 && b >= 16 && b <= 31) return true // 172.16.0.0/12 — private
+  return false
+}
+
+/**
  * Build the proxy/direct decision for one route.
  *
- * FAIL-CLOSED: an enabled route proxies by default, and only two things send a
- * request direct — a `bypassHosts` match, and an `onlyHosts` list that does not
- * cover the target. A target whose host cannot be parsed (`undefined`) stays on
- * the proxy, so a malformed URL cannot quietly leak a credentialed request.
+ * FAIL-CLOSED: an enabled route proxies by default, and only explicit exceptions
+ * send a request direct — a loopback/private target (when `localDirect` is on),
+ * a `bypassHosts` match, and an `onlyHosts` list that does not cover the target.
+ * A target whose host cannot be parsed (`undefined`) stays on the proxy, so a
+ * malformed URL cannot quietly leak a credentialed request.
  */
-function buildDecide(route: ProviderProxyRouteValue): (host: string | undefined) => 'proxy' | 'direct' {
+function buildDecide(
+  route: ProviderProxyRouteValue,
+  localDirect: boolean,
+): (host: string | undefined) => 'proxy' | 'direct' {
   const only = parseHostList(route.onlyHosts)
   const bypass = parseHostList(route.bypassHosts)
   return host => {
     if (host === undefined) return 'proxy'
+    if (localDirect && isLocalHost(host)) return 'direct'
     if (hostMatches(host, bypass)) return 'direct'
     if (only.length > 0 && !hostMatches(host, only)) return 'direct'
     return 'proxy'
@@ -179,6 +213,20 @@ export type RouteBuildResult =
   | { ok: true; entry: RouteEntry }
   | { ok: false; problem: string }
 
+/** Everything one route's build needs beyond its own settings. */
+export interface RouteBuildOptions {
+  /** The shared endpoint, already normalized. */
+  defaultProxy: DefaultProxyValue
+  /**
+   * Forwarded to `normalizeRoute`. The table passes `true` — it skips a disabled
+   * route before building it — while the self-check passes `false` to get exactly
+   * the validation routing would apply once the route is switched on.
+   */
+  requireEnabled: boolean
+  /** Whether loopback/private targets are sent direct; see {@link buildDecide}. */
+  localDirect: boolean
+}
+
 /**
  * Build one route entry, or explain why it cannot be built.
  *
@@ -186,35 +234,29 @@ export type RouteBuildResult =
  * check must run the exact validations routing runs, or it would report a route
  * healthy that the table refuses — the false positive this whole feature exists
  * to eliminate.
- *
- * `requireEnabled` is forwarded to `normalizeRoute`. The table skips a disabled
- * route before it gets here (`requireEnabled` true is then never exercised on
- * one); the self-check builds a disabled route anyway (`false`), so a setting
- * can be verified BEFORE it is switched on.
  */
 export function buildRouteEntry(
   provider: string,
   raw: Partial<ProviderProxyRouteValue>,
-  shared: DefaultProxyValue,
-  requireEnabled: boolean,
+  options: RouteBuildOptions,
 ): RouteBuildResult {
   let effective = raw
   // A route that opted into the shared endpoint takes the proxy address from it.
   // Checked BEFORE the merge so the refusal names the setting the user actually
   // has to fix — the default block — instead of the card's empty fields.
   if (raw?.useDefault === true) {
-    if (!usableDefaultProxy(shared)) {
+    if (!usableDefaultProxy(options.defaultProxy)) {
       return {
         ok: false,
         problem: `dsh-provider-proxy: provider "${provider}" 启用了「使用默认代理」，但顶层默认代理未配置（需填写主机与 1-65535 的端口）`,
       }
     }
-    effective = withDefaultProxy(raw, shared)
+    effective = withDefaultProxy(raw, options.defaultProxy)
   }
 
   let route: ProviderProxyRouteValue
   try {
-    route = normalizeRoute(provider, effective, { requireEnabled })
+    route = normalizeRoute(provider, effective, { requireEnabled: options.requireEnabled })
   } catch (error) {
     return { ok: false, problem: error instanceof Error ? error.message : String(error) }
   }
@@ -285,10 +327,21 @@ export function buildRouteEntry(
       provider,
       proxyOrigin: displayOrigin(route, url),
       dispatcher,
-      decide: buildDecide(route),
+      decide: buildDecide(route, options.localDirect),
       testTarget: route.testTarget,
     },
   }
+}
+
+/** Everything the table build needs beyond the routes themselves. */
+export interface ProxyTableOptions {
+  /** The shared endpoint a route may opt into with `useDefault`. */
+  defaultProxy?: Partial<DefaultProxyValue>
+  /**
+   * Whether a loopback/private target is sent direct instead of through the
+   * proxy. Defaults to true; `undefined`/absent means "on".
+   */
+  localDirect?: boolean
 }
 
 /**
@@ -305,15 +358,19 @@ export function buildRouteEntry(
  */
 export function createProxyTable(
   config: { readonly [provider: string]: Partial<ProviderProxyRouteValue> } | undefined,
-  defaultProxy?: Partial<DefaultProxyValue>,
+  options: ProxyTableOptions = {},
 ): { entries: Map<string, RouteEntry>; problems: Map<string, string> } {
   const entries = new Map<string, RouteEntry>()
   const problems = new Map<string, string>()
-  const shared = normalizeDefaultProxy(defaultProxy)
+  const buildOptions: RouteBuildOptions = {
+    defaultProxy: normalizeDefaultProxy(options.defaultProxy),
+    requireEnabled: true,
+    localDirect: options.localDirect !== false,
+  }
 
   for (const [provider, raw] of Object.entries(config ?? {})) {
     if (raw?.enabled !== true) continue
-    const built = buildRouteEntry(provider, raw, shared, true)
+    const built = buildRouteEntry(provider, raw, buildOptions)
     if (!built.ok) problems.set(provider, built.problem)
     else entries.set(provider, built.entry)
   }

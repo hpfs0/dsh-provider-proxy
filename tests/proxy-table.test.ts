@@ -268,7 +268,9 @@ test('target-host rules decide proxy vs direct and fail closed', async () => {
       host: 'proxy.test',
       port: 8080,
       onlyHosts: 'Api.Example.COM, .internal.test',
-      bypassHosts: 'localhost, *.skip.test',
+      // Deliberately NOT `localhost`: the built-in loopback rule would make that
+      // assertion pass on its own, and this test is about the bypass list.
+      bypassHosts: 'bypass.test, *.skip.test',
     },
   })
   const decide = entries.get('p').decide
@@ -276,7 +278,7 @@ test('target-host rules decide proxy vs direct and fail closed', async () => {
   assert.equal(decide('sub.api.example.com'), 'proxy', 'a subdomain is covered by the rule')
   assert.equal(decide('internal.test'), 'proxy', 'a leading dot is accepted as a suffix rule')
   assert.equal(decide('other.test'), 'direct', 'onlyHosts set and not matched goes direct')
-  assert.equal(decide('localhost'), 'direct', 'bypass beats onlyHosts')
+  assert.equal(decide('bypass.test'), 'direct', 'bypass beats onlyHosts')
   assert.equal(decide('x.skip.test'), 'direct', 'a *. bypass rule is a suffix match')
   assert.equal(decide(undefined), 'proxy', 'an unparsable target stays proxied (fail-closed)')
   await closeTable(entries)
@@ -291,12 +293,81 @@ test('without rules every target is proxied', async () => {
   await closeTable(entries)
 })
 
+// ---- loopback and private targets ----
+
+test('a loopback or private target is sent direct', async () => {
+  // Forcing a local relay through a forward proxy cannot work — the proxy cannot
+  // reach the user's own machine — and the failure reads as "the proxy is
+  // broken". These are the addresses that must never be forced through it.
+  const { entries } = await createProxyTable({
+    p: { enabled: true, protocol: 'http', host: 'proxy.test', port: 8080 },
+  })
+  const decide = entries.get('p').decide
+  const local = [
+    'localhost',
+    'app.localhost',
+    '127.0.0.1',
+    '127.9.9.9',
+    '::1',
+    '[::1]', // what WHATWG URL actually yields for an IPv6 literal
+    '10.0.0.5',
+    '172.16.0.1',
+    '172.31.255.255',
+    '192.168.1.1',
+    '169.254.1.1',
+  ]
+  for (const host of local) {
+    assert.equal(decide(host), 'direct', `${host} is local and must not be forced through a proxy`)
+  }
+  await closeTable(entries)
+})
+
+test('a public target is still proxied', async () => {
+  const { entries } = await createProxyTable({
+    p: { enabled: true, protocol: 'http', host: 'proxy.test', port: 8080 },
+  })
+  const decide = entries.get('p').decide
+  // Boundary values around every private range, so an off-by-one cannot pass.
+  const publicHosts = [
+    'api.deepseek.com',
+    'example.com',
+    'not-an-ip',
+    '11.0.0.1',
+    '128.0.0.1',
+    '172.15.0.1',
+    '172.32.0.1',
+    '192.169.0.1',
+    '::2',
+  ]
+  for (const host of publicHosts) {
+    assert.equal(decide(host), 'proxy', `${host} must stay on the proxy`)
+  }
+  await closeTable(entries)
+})
+
+test('the loopback rule can be turned off', async () => {
+  const { entries } = await createProxyTable(
+    { p: { enabled: true, protocol: 'http', host: 'proxy.test', port: 8080 } },
+    { localDirect: false },
+  )
+  assert.equal(entries.get('p').decide('127.0.0.1'), 'proxy', 'turned off, the target goes through the proxy')
+  await closeTable(entries)
+})
+
+test('the loopback rule does not weaken fail-closed', async () => {
+  const { entries } = await createProxyTable({
+    p: { enabled: true, protocol: 'http', host: 'proxy.test', port: 8080 },
+  })
+  assert.equal(entries.get('p').decide(undefined), 'proxy', 'an unparsable target still stays proxied')
+  await closeTable(entries)
+})
+
 // ---- shared default endpoint (useDefault) ----
 
 test('a route that opts into the shared endpoint takes its address from it', async () => {
   const { entries, problems } = await createProxyTable(
     { p: { enabled: true, useDefault: true, onlyHosts: 'api.example.com' } },
-    { protocol: 'http', host: '127.0.0.1', port: 7890 },
+    { defaultProxy: { protocol: 'http', host: '127.0.0.1', port: 7890 } },
   )
   assert.equal(problems.size, 0)
   assert.equal(entries.get('p').proxyOrigin, 'http://127.0.0.1:7890')
@@ -309,7 +380,7 @@ test('a route that opts into the shared endpoint takes its address from it', asy
 test('a route without useDefault keeps its own endpoint', async () => {
   const { entries } = await createProxyTable(
     { p: { enabled: true, protocol: 'socks5', host: '10.0.0.1', port: 1080 } },
-    { protocol: 'http', host: '127.0.0.1', port: 7890 },
+    { defaultProxy: { protocol: 'http', host: '127.0.0.1', port: 7890 } },
   )
   assert.equal(entries.get('p').proxyOrigin, 'socks5://10.0.0.1:1080')
   await closeTable(entries)
@@ -319,7 +390,7 @@ test('two providers sharing the shared endpoint still get their own dispatchers'
   const shared = { protocol: 'http', host: '127.0.0.1', port: 7890 }
   const { entries } = await createProxyTable(
     { a: { enabled: true, useDefault: true }, b: { enabled: true, useDefault: true } },
-    shared,
+    { defaultProxy: shared },
   )
   assert.equal(entries.size, 2)
   assert.equal(entries.get('a').proxyOrigin, entries.get('b').proxyOrigin)
@@ -336,7 +407,7 @@ test('opting into an unconfigured shared endpoint is refused, naming the default
 
   const blank = await createProxyTable(
     { p: { enabled: true, useDefault: true } },
-    { protocol: 'http', host: '   ', port: 0 },
+    { defaultProxy: { protocol: 'http', host: '   ', port: 0 } },
   )
   assert.equal(blank.entries.size, 0)
   assert.match(blank.problems.get('p'), /默认代理/)
@@ -345,7 +416,7 @@ test('opting into an unconfigured shared endpoint is refused, naming the default
 test('useDefault is irrelevant to a disabled route', async () => {
   const { entries, problems } = await createProxyTable(
     { p: { enabled: false, useDefault: true } },
-    { host: '', port: 0 },
+    { defaultProxy: { host: '', port: 0 } },
   )
   assert.equal(entries.size, 0)
   assert.equal(problems.size, 0, 'a disabled route is not refused for a default it never uses')
@@ -356,7 +427,7 @@ test('credentials from the shared endpoint reach the route, guards included', as
   // the shared username/password actually flowed into the route's own guard.
   const { entries, problems } = await createProxyTable(
     { p: { enabled: true, useDefault: true } },
-    { protocol: 'http', host: 'proxy.test', port: 8080, username: 'alice' },
+    { defaultProxy: { protocol: 'http', host: 'proxy.test', port: 8080, username: 'alice' } },
   )
   assert.equal(entries.size, 0)
   assert.match(problems.get('p'), /用户名/)
@@ -367,11 +438,13 @@ test('a complete shared credential builds the dispatcher', async () => {
   const { entries, problems } = await createProxyTable(
     { p: { enabled: true, useDefault: true } },
     {
-      protocol: 'http',
-      host: 'proxy.test',
-      port: 8080,
-      username: 'alice',
-      password: 'hunter2',
+      defaultProxy: {
+        protocol: 'http',
+        host: 'proxy.test',
+        port: 8080,
+        username: 'alice',
+        password: 'hunter2',
+      },
     },
   )
   assert.equal(problems.size, 0)
@@ -405,8 +478,12 @@ test('normalizeRoute validates a disabled route only when explicitly asked', () 
 })
 
 test('buildRouteEntry builds a disabled route the self-check can run', async () => {
-  const shared = normalizeDefaultProxy({ host: '', port: 0 })
-  const built = buildRouteEntry('p', { enabled: false, protocol: 'http', host: '127.0.0.1', port: 7890 }, shared, false)
+  const defaultProxy = normalizeDefaultProxy({ host: '', port: 0 })
+  const built = buildRouteEntry(
+    'p',
+    { enabled: false, protocol: 'http', host: '127.0.0.1', port: 7890 },
+    { defaultProxy, requireEnabled: false, localDirect: true },
+  )
   assert.equal(built.ok, true)
   if (!built.ok) return
   assert.equal(built.entry.proxyOrigin, 'http://127.0.0.1:7890')
@@ -414,15 +491,14 @@ test('buildRouteEntry builds a disabled route the self-check can run', async () 
 })
 
 test('buildRouteEntry reports the reason a disabled route cannot be built', () => {
-  const shared = normalizeDefaultProxy({ host: '', port: 0 })
+  const defaultProxy = normalizeDefaultProxy({ host: '', port: 0 })
   // Half-filled credentials must be refused HERE too: the self-check runs the
   // same guards as routing, so a setting that would be refused is not reported
   // as checked-and-fine.
   const refused = buildRouteEntry(
     'p',
     { enabled: false, protocol: 'http', host: 'proxy.test', port: 8080, password: 'secret' },
-    shared,
-    false,
+    { defaultProxy, requireEnabled: false, localDirect: true },
   )
   assert.equal(refused.ok, false)
   if (refused.ok) return
@@ -430,8 +506,12 @@ test('buildRouteEntry reports the reason a disabled route cannot be built', () =
 })
 
 test('buildRouteEntry resolves the shared endpoint for a disabled route too', async () => {
-  const shared = normalizeDefaultProxy({ protocol: 'http', host: '127.0.0.1', port: 7890 })
-  const built = buildRouteEntry('p', { enabled: false, useDefault: true }, shared, false)
+  const defaultProxy = normalizeDefaultProxy({ protocol: 'http', host: '127.0.0.1', port: 7890 })
+  const built = buildRouteEntry(
+    'p',
+    { enabled: false, useDefault: true },
+    { defaultProxy, requireEnabled: false, localDirect: true },
+  )
   assert.equal(built.ok, true)
   if (!built.ok) return
   assert.equal(built.entry.proxyOrigin, 'http://127.0.0.1:7890')

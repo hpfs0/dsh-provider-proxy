@@ -1255,7 +1255,7 @@ function renderPage(ctx: any): unknown {
 }
 
 const EN = {
-  lead: 'Route selected model providers through your own forward proxy. Other providers stay direct.',
+  lead: 'Route selected model providers through your own forward proxy. Other providers stay direct. Requests to loopback or private addresses (localhost, 127.x, private ranges) always go direct — a forward proxy cannot reach your own machine.',
   empty: 'No providers found yet.',
   useProxy: 'Use a proxy for this provider',
   useDefault: 'Use the default proxy',
@@ -1295,7 +1295,7 @@ const EN = {
 }
 
 const ZH = {
-  lead: '让指定的 provider 走你自己的正向代理，其它 provider 保持直连。',
+  lead: '让指定的 provider 走你自己的正向代理，其它 provider 保持直连。指向本机或内网地址（localhost、127.x、私有网段）的请求始终直连——正向代理够不到你自己的机器。',
   empty: '没有检测到任何 provider。',
   useProxy: '为该 provider 启用代理',
   useDefault: '使用默认代理',

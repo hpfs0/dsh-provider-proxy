@@ -157,6 +157,14 @@ export const Config = z.object({
    */
   defaultProxy: vol(DefaultProxy.default({})),
   /**
+   * Whether a loopback/private-address target is sent DIRECT instead of through
+   * the proxy. On by default: such a target is normally a relay on this very
+   * machine (LiteLLM, Ollama, a local mock), which a forward proxy cannot reach
+   * at all — forcing it through one fails, and the failure reads as "the proxy
+   * is broken". Turn this off only when the proxy itself is the target.
+   */
+  localDirect: vol(z.boolean().default(true)),
+  /**
    * URL the per-provider connection self-check requests THROUGH the proxy.
    * Volatile, so a settings write does not remount the plugin; the default is an
    * IP echo service, which lets the check report the exit address.
@@ -189,6 +197,7 @@ export interface DefaultProxyValue {
 export interface ConfigShape {
   providers: { readonly [provider: string]: ProviderProxyRouteValue }
   defaultProxy: DefaultProxyValue
+  localDirect: boolean
   testUrl: string
 }
 

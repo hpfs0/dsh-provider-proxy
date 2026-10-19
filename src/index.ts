@@ -42,6 +42,8 @@ interface ProxyConfig {
   readonly providers?: unknown
   /** The shared default endpoint, or the Volatile wrapper around it. */
   readonly defaultProxy?: unknown
+  /** Whether loopback/private targets stay direct, or the Volatile wrapper. */
+  readonly localDirect?: unknown
   /** The self-check URL, or the Volatile wrapper around it. */
   readonly testUrl?: unknown
 }
@@ -65,6 +67,20 @@ function plainDefaultProxy(config: ProxyConfig | undefined): Partial<DefaultProx
   const snapshot = (raw as { get?: () => unknown }).get
   const value = typeof snapshot === 'function' ? snapshot.call(raw) : raw
   return (value ?? {}) as Partial<DefaultProxyValue>
+}
+
+/**
+ * Read `localDirect`, Volatile like everything else the settings page writes.
+ *
+ * Absent or malformed means ON: the default is what keeps a loopback relay from
+ * being forced through a proxy that cannot reach it.
+ */
+function plainLocalDirect(config: ProxyConfig | undefined): boolean {
+  const raw = config?.localDirect
+  if (raw === undefined) return true
+  const snapshot = (raw as { get?: () => unknown }).get
+  const value = typeof snapshot === 'function' ? snapshot.call(raw) : raw
+  return value !== false
 }
 
 export function apply(ctx: any, config?: ProxyConfig): void {
@@ -194,12 +210,11 @@ export function apply(ctx: any, config?: ProxyConfig): void {
       if (configured === undefined || configured.enabled === true) {
         return { ok: false, kind: 'no-route', error: `provider "${provider}" 未启用代理` }
       }
-      const built = buildRouteEntry(
-        provider,
-        configured,
-        normalizeDefaultProxy(plainDefaultProxy(config)),
-        false,
-      )
+      const built = buildRouteEntry(provider, configured, {
+        defaultProxy: normalizeDefaultProxy(plainDefaultProxy(config)),
+        requireEnabled: false,
+        localDirect: plainLocalDirect(config),
+      })
       if (!built.ok) {
         return { ok: false, kind: 'route-rejected', error: bareMessage(built.problem) }
       }
@@ -261,7 +276,10 @@ export function apply(ctx: any, config?: ProxyConfig): void {
   }
 
   const rebuild = async (): Promise<void> => {
-    const next = createProxyTable(plainProviders(config), plainDefaultProxy(config))
+    const next = createProxyTable(plainProviders(config), {
+      defaultProxy: plainDefaultProxy(config),
+      localDirect: plainLocalDirect(config),
+    })
     const previous = current
     current = next.entries
     problems = next.problems

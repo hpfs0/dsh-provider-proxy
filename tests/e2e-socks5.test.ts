@@ -439,7 +439,11 @@ test('https survives the socks5 tunnel with end-to-end TLS', { skip: false }, as
     // negotiating CONNECT.
     let body: any
     async function* adapter() {
-      const res = await fetch(`https://localhost:${originPort}/v1/chat/completions`)
+      // A NON-local name on purpose: a `localhost` target is now sent direct by
+      // the built-in loopback rule, so it would never reach the tunnel this test
+      // exists to exercise. The fake proxy ignores the name and connects to
+      // 127.0.0.1 regardless, so the real origin still answers.
+      const res = await fetch(`https://origin.test:${originPort}/v1/chat/completions`)
       body = await res.json()
       yield { type: 'finish' }
     }
@@ -456,7 +460,7 @@ test('https survives the socks5 tunnel with end-to-end TLS', { skip: false }, as
       }
     })()
 
-    assert.equal(proxySeen.target, 'localhost', 'the proxy resolved the https target')
+    assert.equal(proxySeen.target, 'origin.test', 'the proxy resolved the https target')
     assert.equal(proxySeen.port, originPort, 'and CONNECTed to the origin port')
 
     if (failure !== null) {
