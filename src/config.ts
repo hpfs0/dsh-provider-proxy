@@ -19,6 +19,8 @@
 
 import { createRequire } from 'node:module'
 
+import { proxyHostProblem } from './proxy-address.js'
+
 // Imported statically so the bundler inlines it, making the package
 // self-contained. `loadSchemastery` below still PREFERS the profile's own copy
 // when one is reachable, so a DSH-provided instance stays authoritative; this
@@ -255,11 +257,13 @@ export function normalizeRoute(
   }
 
   const host = value.host.trim()
-  if (host.length === 0) {
-    throw new TypeError(`dsh-provider-proxy: provider "${provider}" 启用了代理，但未填写代理地址`)
-  }
-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(host) || host.includes('/')) {
-    throw new TypeError(`dsh-provider-proxy: provider "${provider}" 的代理地址只填主机名或 IP，不要带协议前缀或路径`)
+  const hostProblem = proxyHostProblem(host)
+  if (hostProblem !== undefined) {
+    throw new TypeError(
+      hostProblem === '未填写代理地址'
+        ? `dsh-provider-proxy: provider "${provider}" 启用了代理，但未填写代理地址`
+        : `dsh-provider-proxy: provider "${provider}" 的${hostProblem}`,
+    )
   }
   if (!Number.isInteger(value.port) || value.port < 1 || value.port > 65535) {
     throw new TypeError(

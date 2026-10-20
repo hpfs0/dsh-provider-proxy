@@ -53,8 +53,14 @@ test('rejects an enabled route with no host', () => {
 })
 
 test('rejects a host carrying a scheme or path', () => {
-  assert.throws(() => normalizeRoute('p', { ...base, host: 'http://10.0.0.1' }), /不要带协议前缀或路径/)
-  assert.throws(() => normalizeRoute('p', { ...base, host: '10.0.0.1/proxy' }), /不要带协议前缀或路径/)
+  assert.throws(() => normalizeRoute('p', { ...base, host: 'http://10.0.0.1' }), /只能填 IPv4、IPv6 或域名/)
+  assert.throws(() => normalizeRoute('p', { ...base, host: '10.0.0.1/proxy' }), /只能填 IPv4、IPv6 或域名/)
+})
+
+test('rejects a malformed proxy host', () => {
+  assert.throws(() => normalizeRoute('p', { ...base, host: 'bad host' }), /只能填 IPv4、IPv6 或域名/)
+  assert.throws(() => normalizeRoute('p', { ...base, host: 'alice@proxy.test' }), /只能填 IPv4、IPv6 或域名/)
+  assert.throws(() => normalizeRoute('p', { ...base, host: '127.0.0.1:7890' }), /只能填 IPv4、IPv6 或域名/)
 })
 
 test('rejects an out-of-range or fractional port', () => {

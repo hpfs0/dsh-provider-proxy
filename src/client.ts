@@ -21,7 +21,7 @@
 // at materialization. The binding is what the component reads; importing it for
 // side effects only would leave `styles` undefined at render time.
 import styles from './client.css'
-import { defaultProxyProblem } from './proxy-address.js'
+import { defaultProxyProblem, proxyHostProblem } from './proxy-address.js'
 
 type Protocol = 'http' | 'https' | 'socks5'
 
@@ -210,12 +210,19 @@ async function writeConfig(ctx: any, ops: readonly unknown[]): Promise<void> {
  */
 function knownProviders(configured: Record<string, RouteValue>, published: ProviderRow[]): ProviderRow[] {
   const rows = new Map<string, ProviderRow>()
+  const byId = new Map<string, ProviderRow>()
   for (const row of published) {
+    byId.set(row.id, row)
     if (row.live) rows.set(row.id, row)
   }
-  for (const [id, route] of Object.entries(configured)) {
+  for (const id of Object.keys(configured)) {
     if (rows.has(id)) continue
-    rows.set(id, { id, name: id, live: route?.enabled === true })
+    // A saved route must stay visible, but switching the proxy ON does not make
+    // its provider live. `live` comes from the Host catalogue exclusively; using
+    // `route.enabled` here made a card flip between "offline" and "proxied" as
+    // the user toggled the switch, while no provider became available at all.
+    const known = byId.get(id)
+    rows.set(id, { id, name: known?.name ?? id, live: known?.live === true })
   }
   return [...rows.values()].sort(byName)
 }
@@ -561,6 +568,11 @@ const S = {
     borderColor: 'var(--dsw-alias-state-success-primary)',
     background: 'var(--dsw-alias-bg-layer-2)',
   },
+  /** An enabled route the Host refused: active-looking styling would be a lie. */
+  cardRejected: {
+    borderColor: 'var(--dsw-alias-state-error-primary, #f85149)',
+    background: 'var(--dsw-alias-bg-layer-2)',
+  },
   head: {
     display: 'flex',
     alignItems: 'center',
@@ -651,6 +663,10 @@ const S = {
     color: 'var(--dsw-alias-label-secondary)',
   },
   pillOff: { color: 'var(--dsw-alias-state-idle-primary)' },
+  pillRejected: {
+    border: '1px solid var(--dsw-alias-state-error-primary, #f85149)',
+    color: 'var(--dsw-alias-state-error-primary, #f85149)',
+  },
   /**
    * The shared default endpoint sits on its own layer so it reads as global
    * rather than as one more provider card — the mistake it exists to prevent is
@@ -1106,7 +1122,7 @@ function renderPage(ctx: any): unknown {
   const defaultView = view({ ...storedDefault, ...defaultDraft })
   // The SAME predicate the Host applies, imported rather than re-written: a
   // browser copy that only checked "host non-empty and port in range" called
-  // `https://1.2.3.4` usable and enabled the bulk button, while the Host refused
+  // `https://1.2.3.4` complete and enabled the bulk button, while the Host refused
   // every route pointed at it.
   //
   // The REASON is kept as well as the verdict: the block refuses for several
@@ -1114,7 +1130,12 @@ function renderPage(ctx: any): unknown {
   // credential), and a card that said "missing host or port" for all of them sent
   // the user to the one field that was already correct.
   const defaultWhy = defaultProxyProblem(defaultView)
-  const defaultUsable = defaultWhy === undefined
+  // An empty optional block is "not configured", not a typed mistake. Only an
+  // invalid NON-empty host gets the error colour under the input.
+  const defaultHostWhy = defaultView.host.trim().length === 0
+    ? undefined
+    : proxyHostProblem(defaultView.host)
+  const defaultComplete = defaultWhy === undefined
   const defaultOrigin = `${defaultView.protocol}://${defaultView.host}:${defaultView.port}`
   const defaultBlock = h(
     'div',
@@ -1130,10 +1151,10 @@ function renderPage(ctx: any): unknown {
       h(
         'span',
         {
-          className: defaultUsable ? styles.pillOn : styles.pillOff,
-          style: { ...S.pill, ...(defaultUsable ? S.pillOn : S.pillOff) },
+          className: defaultComplete ? styles.pillOn : styles.pillOff,
+          style: { ...S.pill, ...(defaultComplete ? S.pillOn : S.pillOff) },
         },
-        defaultUsable ? t.on : t.off,
+        defaultComplete ? t.complete : t.notConfigured,
       ),
     ),
     h('p', { className: styles.defaultLead, style: S.defaultLead }, t.defaultLead),
@@ -1163,7 +1184,8 @@ function renderPage(ctx: any): unknown {
         // Same convenience as the cards: a full URL fills the whole block.
         onPaste: onProxyUrlPaste(applyDefaultUrl),
       }),
-      t.hostHint,
+      defaultHostWhy ?? t.hostHint,
+      defaultHostWhy !== undefined,
     ),
     field(
       t.port,
@@ -1204,7 +1226,7 @@ function renderPage(ctx: any): unknown {
       t.passwordHintProxy,
     ),
     // Bulk opt-in, in ONE write: a per-card walk would rebuild the table N times.
-    // Disabled while the default is unusable, because pointing every card at an
+    // Disabled while the default configuration is incomplete, because pointing every card at an
     // empty endpoint would just refuse them all.
     h(
       'div',
@@ -1215,7 +1237,7 @@ function renderPage(ctx: any): unknown {
           className: styles.testButton,
           style: S.testButton,
           type: 'button',
-          disabled: !defaultUsable || rows.length === 0,
+          disabled: !defaultComplete || rows.length === 0,
           onClick: applyDefaultToAll,
         },
         t.applyDefaultAll,
@@ -1287,12 +1309,23 @@ function renderPage(ctx: any): unknown {
         // depends on the shared default being configured, an own-endpoint card on
         // its host and port being complete. Mirrors the Host's own build gate.
         const endpointStored = route.useDefault
-          ? defaultUsable
+          ? defaultComplete
           : route.host.trim().length > 0 &&
             Number.isInteger(route.port) &&
             route.port >= 1 &&
             route.port <= 65535
         const showTest = route.enabled || endpointStored
+        // The Host's recorded problem is authoritative (it also covers dispatcher
+        // construction); until the next catalogue poll, the shared predicate can
+        // already prove the common endpoint mistakes. An unused route is never
+        // "rejected" — it has not asked for anything yet.
+        const problemText = ((): string | undefined => {
+          const recorded = problems[row.id]
+          if (recorded !== undefined) return recorded
+          if (useDefault) return defaultComplete ? undefined : `${t.defaultMissing}${defaultWhy}`
+          return route.enabled ? defaultProxyProblem(route) : undefined
+        })()
+        const rejected = route.enabled && problemText !== undefined
         // Built once and either rendered (this route carries its own address) or
         // replaced by a one-line note (it inherits the shared default), so a card
         // can never show an input that does not apply to it.
@@ -1370,11 +1403,23 @@ function renderPage(ctx: any): unknown {
             route.protocol === 'socks5' ? t.passwordHint : t.passwordHintProxy,
           ),
         ]
+        // The pill describes the ROUTE, never provider availability: a saved
+        // route can outlive the Host directory, and whether that directory lists
+        // it must not make the proxy switch read as "offline" or "proxied".
+        const pill = rejected
+          ? { className: styles.pillRejected, style: { ...S.pill, ...S.pillRejected }, text: t.rejected }
+          : route.enabled
+            ? { className: styles.pillOn, style: { ...S.pill, ...S.pillOn }, text: t.on }
+            : { className: styles.pillLive, style: { ...S.pill, ...S.pillLive }, text: t.off }
         return h(
           'section',
           {
-            className: route.enabled ? styles.cardActive : styles.card,
-            style: route.enabled ? { ...S.card, ...S.cardActive } : S.card,
+            className: rejected ? styles.cardRejected : route.enabled ? styles.cardActive : styles.card,
+            style: rejected
+              ? { ...S.card, ...S.cardRejected }
+              : route.enabled
+                ? { ...S.card, ...S.cardActive }
+                : S.card,
             key: row.id,
           },
           h(
@@ -1409,17 +1454,7 @@ function renderPage(ctx: any): unknown {
                     lastText,
                   ),
             ),
-            h(
-              'span',
-              {
-                className: route.enabled ? styles.pillOn : row.live ? styles.pillLive : styles.pillOff,
-                style: {
-                  ...S.pill,
-                  ...(route.enabled ? S.pillOn : row.live ? S.pillLive : S.pillOff),
-                },
-              },
-              route.enabled ? t.on : row.live ? t.live : t.off,
-            ),
+            h('span', { className: pill.className, style: pill.style }, pill.text),
           ),
           h(
             'label',
@@ -1445,18 +1480,16 @@ function renderPage(ctx: any): unknown {
             }),
             h('span', null, t.useDefault),
           ),
-          ...(useDefault
-            ? [
-                h(
+          problemText !== undefined
+            ? h('p', { key: `${row.id}:problem`, style: S.inheritWarning }, problemText)
+            : useDefault
+              ? h(
                   'p',
-                  {
-                    key: `${row.id}:inherit`,
-                    style: defaultUsable ? S.inheritNote : S.inheritWarning,
-                  },
-                  defaultUsable ? `${t.inheritingDefault}${defaultOrigin}` : `${t.defaultMissing}${defaultWhy}`,
-                ),
-              ]
-            : endpointFields),
+                  { key: `${row.id}:inherit`, style: S.inheritNote },
+                  `${t.inheritingDefault}${defaultOrigin}`,
+                )
+              : null,
+          ...(useDefault ? [] : endpointFields),
           // The self-check is offered whenever there is something to check: an
           // enabled route (the Host's table carries it, and a rejected one still
           // reports WHY), or a disabled one whose endpoint is already complete —
@@ -1607,14 +1640,14 @@ function renderPage(ctx: any): unknown {
 }
 
 const EN = {
-  lead: 'Route selected model providers through your own forward proxy. Other providers stay direct. Requests to loopback or private addresses (localhost, 127.x, private ranges) always go direct — a forward proxy cannot reach your own machine.',
+  lead: 'Route selected model providers through your own forward proxy. Other providers stay direct. Requests to loopback or private addresses (localhost, 127.x, private ranges) go direct by default; set the top-level localDirect to false to proxy them instead — a forward proxy normally cannot reach your own machine.',
   empty: 'No providers found yet.',
   useProxy: 'Use a proxy for this provider',
   useDefault: 'Use the default proxy',
   defaultTitle: 'Default proxy',
-  defaultLead: 'One endpoint, reused by every provider that turns on "Use the default proxy".',
+  defaultLead: 'One endpoint, reused by every provider that turns on "Use the default proxy". The status only reports configuration completeness; use the Test button on a card to verify reachability.',
   inheritingDefault: 'Using the default proxy: ',
-  defaultMissing: 'The default proxy cannot be used, so this provider is not proxied: ',
+  defaultMissing: 'The default proxy configuration is incomplete, so this provider is not proxied: ',
   filterLabel: 'Filter',
   filterPlaceholder: 'Filter by name or id…',
   noMatch: 'No provider matches the filter.',
@@ -1625,7 +1658,7 @@ const EN = {
   port: 'Port',
   username: 'Username',
   password: 'Password',
-  hostHint: 'Host or IP only, without scheme or path. A full proxy URL (socks5://user:pass@host:1080) can be pasted instead — it is split into the fields.',
+  hostHint: 'Only an IPv4, IPv6, or domain name is allowed. A full proxy URL (socks5://user:pass@host:1080) can be pasted instead — it is split into the fields.',
   passwordHint: 'Sent to the SOCKS5 proxy for authentication; stored with this setting.',
   passwordHintProxy: 'Sent to the proxy as an authentication password; stored with this setting.',
   hitCountPrefix: '',
@@ -1654,21 +1687,23 @@ const EN = {
   testTargetHint: 'Empty uses the top-level testUrl; when set, this card\'s Test requests this URL instead — point it at a real upstream to verify the end-to-end path.',
   socks5Hint: 'SOCKS5 tunnels the connection; the proxy resolves the target host name.',
   on: 'proxied',
-  live: 'active',
+  rejected: 'config rejected',
   off: 'direct',
+  complete: 'complete',
+  notConfigured: 'not configured',
   diagnostics: 'Connection diagnostics',
   diagPending: '(collecting…)',
 }
 
 const ZH = {
-  lead: '让指定的 provider 走你自己的正向代理，其它 provider 保持直连。指向本机或内网地址（localhost、127.x、私有网段）的请求始终直连——正向代理够不到你自己的机器。',
+  lead: '让指定的 provider 走你自己的正向代理，其它 provider 保持直连。指向本机或内网地址（localhost、127.x、私有网段）的请求默认直连，顶层 localDirect 设为 false 时恢复走代理——正向代理通常够不到你自己的机器。',
   empty: '没有检测到任何 provider。',
   useProxy: '为该 provider 启用代理',
   useDefault: '使用默认代理',
   defaultTitle: '默认代理',
-  defaultLead: '为勾选「使用默认代理」的 provider 复用的端点，只填一次。',
+  defaultLead: '为勾选「使用默认代理」的 provider 复用的端点，只填一次。状态只表示配置是否完整；代理是否可达请用卡片上的「测试」验证。',
   inheritingDefault: '使用默认代理：',
-  defaultMissing: '顶层默认代理不可用，该 provider 不会走代理：',
+  defaultMissing: '顶层默认代理配置不完整，该 provider 不会走代理：',
   filterLabel: '过滤',
   filterPlaceholder: '按名称或 id 过滤…',
   noMatch: '没有匹配的 provider。',
@@ -1679,7 +1714,7 @@ const ZH = {
   port: '端口',
   username: '用户名',
   password: '密码',
-  hostHint: '只填主机名或 IP，不要带协议前缀或路径；也可以直接粘贴完整代理 URL（如 socks5://user:pass@host:1080），会自动拆分到各字段。',
+  hostHint: '只允许填写 IPv4、IPv6 或域名；也可以直接粘贴完整代理 URL（如 socks5://user:pass@host:1080），会自动拆分到各字段。',
   passwordHint: '仅作为 SOCKS5 认证口令发送给代理；随该设置一起保存。',
   passwordHintProxy: '作为代理认证口令发送给代理；随该设置一起保存。',
   hitCountPrefix: '已代理 ',
@@ -1708,8 +1743,10 @@ const ZH = {
   testTargetHint: '留空用顶层 testUrl；填写后该卡片的「测试」改为请求这个地址，可拿真实上游验证端到端路径。',
   socks5Hint: 'SOCKS5 会建立隧道，目标域名由代理端解析。',
   on: '走代理',
-  live: '启用中',
+  rejected: '配置被拒',
   off: '直连',
+  complete: '配置完整',
+  notConfigured: '未配置',
   diagnostics: '连接诊断',
   diagPending: '（正在收集…）',
 }

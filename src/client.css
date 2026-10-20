@@ -28,7 +28,8 @@
 /* ---- provider card ---- */
 
 .card,
-.cardActive {
+.cardActive,
+.cardRejected {
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -40,6 +41,12 @@
 
 .cardActive {
   border-color: var(--dsw-alias-state-success-primary);
+  background: var(--dsw-alias-bg-layer-2);
+}
+
+/* An enabled route the Host refused: never dress it as active. */
+.cardRejected {
+  border-color: var(--dsw-alias-state-error-primary, #f85149);
   background: var(--dsw-alias-bg-layer-2);
 }
 
@@ -101,7 +108,8 @@
 
 .pillOn,
 .pillLive,
-.pillOff {
+.pillOff,
+.pillRejected {
   flex: none;
   padding: 2px 8px;
   border-radius: 999px;
@@ -122,6 +130,11 @@
 
 .pillOff {
   color: var(--dsw-alias-state-idle-primary);
+}
+
+.pillRejected {
+  border: 1px solid var(--dsw-alias-state-error-primary, #f85149);
+  color: var(--dsw-alias-state-error-primary, #f85149);
 }
 
 /* ---- toggle ---- */

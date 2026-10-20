@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { buildRouteEntry, closeTable, createProxyTable, defaultProxyProblem, normalizeDefaultProxy, normalizeRoute, proxyUrl } from '../lib/index.js'
+import { buildRouteEntry, closeTable, createProxyTable, defaultProxyProblem, normalizeDefaultProxy, normalizeRoute, proxyHostProblem, proxyUrl } from '../lib/index.js'
 
 test('proxyUrl assembles host, port and protocol', () => {
   assert.equal(
@@ -418,10 +418,51 @@ test('the shared-endpoint predicate is the SAME record the Host and browser appl
   // scheme or path, and an out-of-range port are each reported with the reason;
   // a populated endpoint is fine.
   assert.equal(defaultProxyProblem({ host: '', port: 0 }), '未填写代理地址')
-  assert.match(defaultProxyProblem({ host: 'https://1.2.3.4', port: 8080 }) ?? '', /只填主机名或 IP/)
-  assert.match(defaultProxyProblem({ host: 'proxy.test/path', port: 8080 }) ?? '', /只填主机名或 IP/)
+  assert.match(defaultProxyProblem({ host: 'https://1.2.3.4', port: 8080 }) ?? '', /只能填 IPv4、IPv6 或域名/)
+  assert.match(defaultProxyProblem({ host: 'proxy.test/path', port: 8080 }) ?? '', /只能填 IPv4、IPv6 或域名/)
   assert.match(defaultProxyProblem({ host: 'proxy.test', port: 0 }) ?? '', /端口/)
+  assert.match(defaultProxyProblem({ host: 'bad host', port: 8080 }) ?? '', /只能填 IPv4、IPv6 或域名/)
   assert.equal(defaultProxyProblem({ host: 'proxy.test', port: 8080 }), undefined)
+})
+
+test('the shared host rule accepts only IPv4, IPv6, or a domain name', () => {
+  const rejected = [
+    'https://1.2.3.4',
+    'proxy.test/path',
+    'bad host',
+    'alice@proxy.test',
+    'proxy.test?x=1',
+    'proxy.test#frag',
+    'proxy,test',
+    '127.0.0.1:7890',
+    '256.256.256.256',
+    '127',
+    '127.',
+    'proxy..test',
+    '_dmarc.proxy.test',
+    '例え.テスト',
+    '1.2.3.4.5',
+  ]
+  for (const host of rejected) {
+    assert.match(proxyHostProblem(host) ?? '', /只能填 IPv4、IPv6 或域名/, host)
+  }
+
+  const accepted = [
+    '127.0.0.1',
+    '255.255.255.255',
+    'proxy.test',
+    'proxy-1.test',
+    'localhost',
+    'LOCALHOST.',
+    '[::1]',
+    '::1',
+    '2001:db8::1',
+    '::ffff:127.0.0.1',
+    '[::ffff:127.0.0.1]',
+  ]
+  for (const host of accepted) {
+    assert.equal(proxyHostProblem(host), undefined, host)
+  }
 })
 
 test('a half-filled default credential is not usable — the guards would refuse the route', async () => {
@@ -465,7 +506,7 @@ test('a shared endpoint carrying a scheme is refused, naming the default block',
   )
   assert.equal(entries.size, 0)
   assert.match(problems.get('p'), /使用默认代理/)
-  assert.match(problems.get('p'), /只填主机名或 IP/)
+  assert.match(problems.get('p'), /只能填 IPv4、IPv6 或域名/)
 })
 
 test('useDefault is irrelevant to a disabled route', async () => {

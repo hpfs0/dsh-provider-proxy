@@ -267,6 +267,12 @@ function cardFor(tree, id) {
   return sections.find(section => textsOf(section).includes(id))
 }
 
+/** The status pill sits at the end of the card header. */
+function pillTextOf(card) {
+  const header = card?.children?.find?.(child => child?.type === 'header')
+  return textsOf(header?.children?.[1]).join('')
+}
+
 test('the bundle registers a settings section', () => {
   const { mod, restore } = loadBundle()
   try {
@@ -530,6 +536,263 @@ test('a route the Host refused is reported in the connection diagnostics', async
   }
 })
 
+test('an enabled route with an incomplete endpoint is rejected on its own card', async () => {
+  // The Host skips a refused route, so its requests go direct. Leaving the card
+  // green and "proxied" is the one lie this page must never tell.
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: {
+            enabled: true,
+            protocol: 'http',
+            host: '',
+            port: 0,
+            username: '',
+            password: '',
+          },
+        },
+      },
+    })
+    const [tree] = renderPage(mod, harness)
+    const card = cardFor(tree, 'sensenova')
+    assert.ok(card, 'expected the sensenova card')
+    const texts = textsOf(card)
+    assert.ok(
+      texts.includes('未填写代理地址'),
+      'the refusal reason must be inside the card, not only in the collapsed panel',
+    )
+    assert.ok(texts.includes('配置被拒'), 'the pill must not claim a refused route is proxied')
+    assert.ok(!texts.includes('走代理'), 'a refused route must not read as proxied')
+    assert.ok(
+      JSON.stringify(card).includes('dsw-alias-state-error-primary'),
+      'a refused route takes the error colour',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('a recorded Host refusal wins over a locally valid endpoint', async () => {
+  // The local predicate only covers endpoint formatting. A dispatcher that
+  // cannot be constructed is known to the Host alone, and its reason must win.
+  const { mod, restore } = loadBundle(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      providers: [{ id: 'sensenova', name: 'SenseNova', live: true }],
+      problems: { sensenova: '代理端口无效（需为 1-65535 的整数）' },
+    }),
+  }))
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const card = cardFor(render(), 'sensenova')
+    assert.ok(card, 'expected the sensenova card')
+    const texts = textsOf(card)
+    assert.ok(texts.includes('代理端口无效（需为 1-65535 的整数）'))
+    assert.ok(texts.includes('配置被拒'))
+    assert.ok(!texts.includes('走代理'))
+  } finally {
+    restore()
+  }
+})
+
+test('an inheriting card with an unusable default shows one refusal, not two', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: {
+            enabled: true,
+            useDefault: true,
+            protocol: 'http',
+            host: '',
+            port: 0,
+            username: '',
+            password: '',
+          },
+        },
+      },
+    })
+    const [tree] = renderPage(mod, harness)
+    const card = cardFor(tree, 'sensenova')
+    assert.ok(card, 'expected the sensenova card')
+    const texts = textsOf(card)
+    assert.equal(
+      texts.filter(text => text.includes('顶层默认代理配置不完整')).length,
+      1,
+      'the inherit note and the rejection line must not say the same thing twice',
+    )
+    assert.ok(texts.includes('配置被拒'))
+    assert.ok(!texts.includes('使用默认代理：'), 'the origin note must yield to the refusal')
+  } finally {
+    restore()
+  }
+})
+
+test('a disabled route with an incomplete own endpoint is not marked rejected', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: {
+            enabled: false,
+            protocol: 'http',
+            host: '',
+            port: 0,
+            username: '',
+            password: '',
+          },
+        },
+      },
+    })
+    const [tree] = renderPage(mod, harness)
+    const card = cardFor(tree, 'sensenova')
+    assert.ok(card, 'expected the sensenova card')
+    const texts = textsOf(card)
+    assert.ok(!texts.includes('未填写代理地址'), 'an unused route has not asked for anything yet')
+    assert.ok(!texts.includes('配置被拒'))
+  } finally {
+    restore()
+  }
+})
+
+test('a configured route the Host does not list keeps its own switch state', async () => {
+  // The Host catalogue is not the route switch. A saved route can outlive the
+  // directory entry; the pill must follow the switch, not the catalogue.
+  const { mod, restore } = loadBundle(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ providers: [] }),
+  }))
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: {
+            enabled: false,
+            protocol: 'http',
+            host: '127.0.0.1',
+            port: 7890,
+            username: '',
+            password: '',
+          },
+        },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const card = cardFor(render(), 'sensenova')
+    assert.ok(card, 'a saved route must stay visible even when the provider is gone')
+    assert.equal(pillTextOf(card), '直连', 'the proxy switch is off, so the route is direct')
+    assert.ok(!textsOf(card).includes('provider 已下线'))
+  } finally {
+    restore()
+  }
+})
+
+test('a saved route follows its switch even when the Host does not list the provider', async () => {
+  // Enabling a proxy is a route decision. The Host directory's live flag is
+  // orthogonal and must not turn the same switch into "offline" or "proxied".
+  const { mod, restore } = loadBundle(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      providers: [{ id: 'sensenova', name: 'SenseNova', live: false }],
+    }),
+  }))
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: {
+            enabled: true,
+            protocol: 'http',
+            host: '127.0.0.1',
+            port: 7890,
+            username: '',
+            password: '',
+          },
+        },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const card = cardFor(render(), 'sensenova')
+    assert.ok(card, 'a saved route must stay visible even when the provider is gone')
+    const texts = textsOf(card)
+    assert.ok(texts.includes('SenseNova'), 'the published display name must be preserved')
+    assert.equal(pillTextOf(card), '走代理', 'the switch is on and the endpoint is complete')
+    assert.ok(!texts.includes('已启用'), 'there is no separate availability state in the pill')
+    assert.ok(!texts.includes('provider 已下线'), 'the catalogue must not drive the switch state')
+  } finally {
+    restore()
+  }
+})
+
+test('the shared default reports configured state, not proxying state', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [tree] = renderPage(mod, harness)
+    const texts = textsOf(tree)
+    assert.ok(
+      texts.includes('未配置'),
+      'an empty default is "not configured", not "direct"',
+    )
+    assert.ok(
+      !texts.includes('未填写代理地址'),
+      'the optional default block being empty is not a typed input error',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('the default pill reports completeness, not proxy reachability', async () => {
+  // Port 1 is syntactically complete but very unlikely to be listening. The pill
+  // must still say "complete": only a Test run or a last-use record can speak
+  // about reachability, and editing a port must not turn this into a health claim.
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        defaultProxy: { protocol: 'http', host: '127.0.0.1', port: 1, username: '', password: '' },
+      },
+    })
+    const [tree] = renderPage(mod, harness)
+    const texts = textsOf(tree)
+    assert.ok(texts.includes('配置完整'))
+    assert.ok(
+      texts.some(text => text.includes('可达') && text.includes('测试')),
+      'the default block must point reachability at the Test button',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('the lead describes loopback/private routing as the default, not an absolute', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [tree] = renderPage(mod, harness)
+    const texts = textsOf(tree)
+    assert.ok(
+      texts.some(text => text.includes('默认直连') && text.includes('localDirect')),
+      'the lead must name the escape hatch instead of claiming "always direct"',
+    )
+    assert.ok(!texts.some(text => text.includes('始终直连')))
+  } finally {
+    restore()
+  }
+})
+
 test('the page shows how many requests crossed the proxy', async () => {
   const { mod, restore } = loadBundle(async () => ({
     ok: true,
@@ -744,12 +1007,16 @@ test('a failing catalogue endpoint does not break the page', async () => {
 test('an enabled provider is marked proxied, an unconfigured one direct', async () => {
   const { mod, restore } = loadBundle()
   try {
-    const { registrations } = mountPlugin(mod)
-    registrations[0].Component()
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
     await settle()
-    const texts = textsOf(registrations[0].Component())
-    assert.ok(texts.includes('走代理'), 'sensenova is enabled in config')
-    assert.ok(texts.includes('直连'), 'openai has no route yet')
+    const tree = render()
+    assert.equal(
+      pillTextOf(cardFor(tree, 'sensenova')),
+      '走代理',
+      'sensenova is enabled in config',
+    )
+    assert.equal(pillTextOf(cardFor(tree, 'openai')), '直连', 'openai has no route yet')
   } finally {
     restore()
   }
@@ -1347,6 +1614,7 @@ test('a card that uses the default names the address it will actually use', asyn
     const [tree] = renderPage(mod, harness)
     const card = cardFor(tree, 'sensenova')
     assert.ok(card, 'expected the sensenova card')
+    assert.ok(textsOf(tree).includes('配置完整'), 'a configured default reads as complete')
     assert.ok(
       textsOf(card).includes('使用默认代理：http://127.0.0.1:7890'),
       'an inheriting card must name the endpoint it will use',
@@ -1381,7 +1649,7 @@ test('a card using an unconfigured default explains the refusal', async () => {
     const [tree] = renderPage(mod, harness)
     const card = cardFor(tree, 'sensenova')
     assert.ok(
-      textsOf(card).some(text => text.includes('顶层默认代理不可用')),
+      textsOf(card).some(text => text.includes('顶层默认代理配置不完整')),
       'the card must say why it is not proxied instead of showing empty inputs',
     )
     assert.ok(
@@ -1419,7 +1687,7 @@ test('a scheme-carrying default explains THAT, not a missing host or port', asyn
     const [tree] = renderPage(mod, harness)
     const card = cardFor(tree, 'sensenova')
     assert.ok(
-      textsOf(card).some(text => text.includes('只填主机名或 IP')),
+      textsOf(card).some(text => text.includes('只能填 IPv4、IPv6 或域名')),
       'the card must name the scheme/path rule the host actually breaks',
     )
   } finally {
@@ -1465,6 +1733,30 @@ test('a half-filled default credential disables the bulk button and explains why
       textsOf(card).some(text => text.includes('配置了代理用户名但没有密码')),
       'the card must name the half-filled credential, not a missing address',
     )
+  } finally {
+    restore()
+  }
+})
+
+test('the default proxy host field flags an invalid host where it is typed', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        defaultProxy: { protocol: 'http', host: 'bad host', port: 7890, username: '', password: '' },
+      },
+    })
+    const [tree] = renderPage(mod, harness)
+    const texts = textsOf(tree)
+    assert.ok(
+      texts.some(text => text.includes('代理地址只能填 IPv4、IPv6 或域名')),
+      'the reason belongs under the host input, not only on the block pill',
+    )
+    assert.ok(
+      JSON.stringify(tree).includes('dsw-alias-state-error-primary'),
+      'the invalid host takes the error colour',
+    )
+    assert.ok(texts.includes('未配置'), 'the default block itself remains unusable')
   } finally {
     restore()
   }
