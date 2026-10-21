@@ -462,9 +462,19 @@ function unbracket(hostname: string): string {
  * port (verified), but three quirks are handled here:
  *  - the userinfo is NOT percent-decoded by the parser, so it is decoded here;
  *  - an IPv6 literal comes back bracketed, and the host field wants it bare;
- *  - a DEFAULT port is normalized away by the parser, so a missing port stays 0
- *    ("not configured") instead of being invented.
+ *  - a DEFAULT port is stripped by WHATWG for http/https; the original text is
+ *    consulted so an explicitly written :80/:443 is preserved, while an absent
+ *    port still stays 0 ("not configured") instead of being invented.
  */
+function explicitPortOf(text: string): number {
+  const authority = text.slice(text.indexOf('://') + 3).split(/[/?#]/, 1)[0]
+  const hostPort = authority.slice(authority.lastIndexOf('@') + 1)
+  const match = /^\[[^\]]+\]:(\d+)$/.exec(hostPort) ?? /^[^:]+:(\d+)$/.exec(hostPort)
+  if (match === null) return 0
+  const port = Number.parseInt(match[1], 10)
+  return Number.isNaN(port) ? 0 : port
+}
+
 function splitProxyUrl(text: string): Partial<RouteValue> | undefined {
   const trimmed = text.trim()
   if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) return undefined
@@ -488,7 +498,9 @@ function splitProxyUrl(text: string): Partial<RouteValue> | undefined {
       return value
     }
   }
-  const parsedPort = url.port.length > 0 ? Number.parseInt(url.port, 10) : 0
+  const parsedPort = url.port.length > 0
+    ? Number.parseInt(url.port, 10)
+    : explicitPortOf(trimmed)
   return {
     protocol: protocol as Protocol,
     host: unbracket(url.hostname),

@@ -2172,6 +2172,40 @@ test('pasting a full proxy URL fills the card fields in ONE write', async () => 
   }
 })
 
+test('pasting a URL keeps an explicitly written :80 / :443', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const { registrations, writes } = mountPlugin(mod)
+    await settle()
+    const card = cardFor(registrations[0].Component(), 'sensenova')
+    const host = findInputsByPlaceholder(card, '127.0.0.1')[0]
+    const fieldsOf = ops => Object.fromEntries(ops.map(op => [op.path[2], op.value]))
+
+    paste(host, 'http://proxy.test:80')
+    await writeSettle()
+    assert.equal(
+      fieldsOf(writes[0].ops).port,
+      80,
+      'WHATWG strips :80 for http; the port the user wrote must survive',
+    )
+
+    paste(host, 'https://proxy.test:443')
+    await writeSettle()
+    assert.equal(fieldsOf(writes[1].ops).port, 443)
+
+    paste(host, 'http://[::1]:80')
+    await writeSettle()
+    assert.equal(fieldsOf(writes[2].ops).host, '::1')
+    assert.equal(fieldsOf(writes[2].ops).port, 80)
+
+    paste(host, 'http://proxy.test')
+    await writeSettle()
+    assert.equal(fieldsOf(writes[3].ops).port, 0, 'an omitted port is still not invented')
+  } finally {
+    restore()
+  }
+})
+
 test('pasted credentials are percent-decoded and an IPv6 host is unbracketed', async () => {
   const { mod, restore } = loadBundle()
   try {
