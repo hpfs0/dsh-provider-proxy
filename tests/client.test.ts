@@ -380,7 +380,10 @@ test('the page still renders when no settings service exists at all', () => {
     const out = registrations[0].Component()
     assert.notEqual(out, null, 'the page must still render with no settings service')
     assert.equal(out.type, 'div')
-    assert.ok(textsOf(out).includes('没有检测到任何 provider。'))
+    assert.ok(
+      textsOf(out).includes('正在读取 provider 列表…'),
+      'the first render is the loading state, not a false empty result',
+    )
   } finally {
     restore()
   }
@@ -983,22 +986,73 @@ test('a Host that reports no providers degrades to the empty message', async () 
     json: async () => ({ providers: [] }),
   }))
   try {
-    const { registrations } = mountPlugin(mod, { value: { providers: {} } })
-    registrations[0].Component()
+    const harness = mountPlugin(mod, { value: { providers: {} } })
+    const [, render] = renderPage(mod, harness)
     await settle()
-    assert.ok(textsOf(registrations[0].Component()).includes('没有检测到任何 provider。'))
+    assert.ok(textsOf(render()).includes('没有检测到任何 provider。'))
   } finally {
     restore()
   }
 })
 
-test('a failing catalogue endpoint does not break the page', async () => {
+test('the page says it is loading instead of claiming there are no providers', async () => {
+  let release
+  const { mod, restore } = loadBundle(async () => {
+    await new Promise(resolve => { release = resolve })
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ providers: [{ id: 'sensenova', name: 'SenseNova', live: true }] }),
+    }
+  })
+  try {
+    const harness = mountPlugin(mod, { value: { providers: {} } })
+    const [first, render] = renderPage(mod, harness)
+    const loading = textsOf(first)
+    assert.ok(
+      loading.includes('正在读取 provider 列表…'),
+      'an in-flight first read is a loading state, not an empty result',
+    )
+    assert.ok(!loading.includes('没有检测到任何 provider。'))
+
+    release()
+    await settle()
+    const loaded = textsOf(render())
+    assert.ok(loaded.includes('sensenova'), 'the catalogue arrives after the read')
+    assert.ok(!loaded.includes('正在读取 provider 列表…'), 'the loading message goes away')
+  } finally {
+    restore()
+  }
+})
+
+test('a failing catalogue endpoint is shown as an error, not an empty list', async () => {
   const { mod, restore } = loadBundle(async () => ({ ok: false, status: 500, json: async () => ({}) }))
   try {
-    const { registrations } = mountPlugin(mod, { value: { providers: {} } })
-    assert.doesNotThrow(() => registrations[0].Component())
+    const harness = mountPlugin(mod, { value: { providers: {} } })
+    const [, render] = renderPage(mod, harness)
     await settle()
-    assert.doesNotThrow(() => registrations[0].Component())
+    const texts = textsOf(render())
+    assert.ok(texts.some(text => text.includes('读取 provider 列表失败')))
+    assert.ok(texts.some(text => text.includes('Host answered 500')))
+    assert.ok(!texts.includes('没有检测到任何 provider。'))
+  } finally {
+    restore()
+  }
+})
+
+test('a failed catalogue keeps saved cards visible and says the list is stale', async () => {
+  const { mod, restore } = loadBundle(async () => ({ ok: false, status: 500, json: async () => ({}) }))
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const texts = textsOf(render())
+    assert.ok(
+      texts.some(text => text.includes('provider 列表读取失败，下面显示的是已保存的配置')),
+      'the failure must be visible even when configured cards can still be rendered',
+    )
+    assert.ok(texts.includes('sensenova'))
+    assert.ok(texts.includes('openai'))
   } finally {
     restore()
   }
@@ -1288,10 +1342,10 @@ test('the page still renders when no providers are known', async () => {
   }))
   try {
     // No configured provider and none published: the page still renders.
-    const { registrations } = mountPlugin(mod, { value: { providers: {} } })
-    registrations[0].Component()
+    const harness = mountPlugin(mod, { value: { providers: {} } })
+    const [, render] = renderPage(mod, harness)
     await settle()
-    const out = registrations[0].Component()
+    const out = render()
     assert.notEqual(out, null)
     assert.ok(textsOf(out).includes('没有检测到任何 provider。'))
   } finally {

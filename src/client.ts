@@ -297,6 +297,8 @@ type Catalog = {
   hits: Record<string, number>
   problems: Record<string, string>
   lastUse: Record<string, LastUse>
+  /** Set when the FIRST read failed; a later successful poll clears it. */
+  error?: string
 }
 
 /**
@@ -763,14 +765,20 @@ function renderPage(ctx: any): unknown {
     void fetchCatalog()
       .then(catalog => catalogueSetter?.(catalog))
       .catch((error: any) => {
-        note(`provider 列表获取失败：${error?.message ?? error}`)
-        catalogueSetter?.({ rows: [], hits: {}, problems: {}, lastUse: {} })
+        catalogueSetter?.({
+          rows: [],
+          hits: {},
+          problems: {},
+          lastUse: {},
+          error: String(error?.message ?? error),
+        })
       })
     return {
       rows: undefined as ProviderRow[] | undefined,
       hits: {} as Record<string, number>,
       problems: {} as Record<string, string>,
       lastUse: {} as Record<string, LastUse>,
+      error: undefined as string | undefined,
       pending: true,
     }
   })
@@ -782,6 +790,7 @@ function renderPage(ctx: any): unknown {
       hits: catalog.hits,
       problems: catalog.problems,
       lastUse: catalog.lastUse,
+      error: catalog.error,
       pending: false,
     })
   // Keeps the catalogue (rows, hit counts, rejected routes) current while the
@@ -1264,6 +1273,25 @@ function renderPage(ctx: any): unknown {
           }),
         )
 
+  // The empty slot answers three different questions: still loading, the read
+  // failed, or truly nothing to show. Only the last is the empty message.
+  // With saved cards present, a failed first read is reported above them instead.
+  const catalogueStatus = rows.length === 0
+    ? state.pending
+      ? { text: t.catalogueLoading, error: false }
+      : state.error !== undefined
+        ? { text: `${t.catalogueError}${state.error}`, error: true }
+        : undefined
+    : undefined
+  const catalogueNotice =
+    state.error !== undefined && rows.length > 0
+      ? h(
+          'p',
+          { key: 'catalogue-error', style: S.inheritWarning },
+          `${t.catalogueStale}${state.error}`,
+        )
+      : null
+
   // ALWAYS an array: a single element is not iterable, and spreading one threw
   // "Spread syntax requires ...iterable[Symbol.iterator]" on an empty list.
   const body: unknown[] = shown.length === 0
@@ -1280,10 +1308,13 @@ function renderPage(ctx: any): unknown {
               borderRadius: '8px',
               fontSize: '12px',
               textAlign: 'center',
-              color: 'var(--dsw-alias-state-idle-primary)',
+              color: catalogueStatus?.error === true
+                ? 'var(--dsw-alias-state-error-primary, #f85149)'
+                : 'var(--dsw-alias-state-idle-primary)',
+              ...(catalogueStatus?.error === true ? { fontWeight: '500' } : {}),
             },
           },
-          query.length > 0 ? t.noMatch : t.empty,
+          catalogueStatus?.text ?? (query.length > 0 ? t.noMatch : t.empty),
         ),
       ]
     : shown.map(row => {
@@ -1601,6 +1632,7 @@ function renderPage(ctx: any): unknown {
     { className: styles.root, style: S.root },
     h('p', { className: styles.lead, style: { margin: '0 0 4px', fontSize: '12px', lineHeight: '1.6', color: 'var(--dsw-alias-label-secondary)' } }, t.lead),
     defaultBlock,
+    catalogueNotice,
     filterRow,
     ...body,
     h(
@@ -1642,6 +1674,9 @@ function renderPage(ctx: any): unknown {
 const EN = {
   lead: 'Route selected model providers through your own forward proxy. Other providers stay direct. Requests to loopback or private addresses (localhost, 127.x, private ranges) go direct by default; set the top-level localDirect to false to proxy them instead — a forward proxy normally cannot reach your own machine.',
   empty: 'No providers found yet.',
+  catalogueLoading: 'Loading providers…',
+  catalogueError: 'Could not load the provider list: ',
+  catalogueStale: 'Could not load the provider list; showing the saved configuration: ',
   useProxy: 'Use a proxy for this provider',
   useDefault: 'Use the default proxy',
   defaultTitle: 'Default proxy',
@@ -1698,6 +1733,9 @@ const EN = {
 const ZH = {
   lead: '让指定的 provider 走你自己的正向代理，其它 provider 保持直连。指向本机或内网地址（localhost、127.x、私有网段）的请求默认直连，顶层 localDirect 设为 false 时恢复走代理——正向代理通常够不到你自己的机器。',
   empty: '没有检测到任何 provider。',
+  catalogueLoading: '正在读取 provider 列表…',
+  catalogueError: '读取 provider 列表失败：',
+  catalogueStale: 'provider 列表读取失败，下面显示的是已保存的配置：',
   useProxy: '为该 provider 启用代理',
   useDefault: '使用默认代理',
   defaultTitle: '默认代理',
