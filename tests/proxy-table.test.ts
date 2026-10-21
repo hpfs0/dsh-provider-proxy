@@ -472,12 +472,17 @@ test('a half-filled default credential is not usable — the guards would refuse
   const endpoint = (username: string, password: string) => ({ host: 'proxy.test', port: 8080, username, password })
   assert.match(defaultProxyProblem(endpoint('alice', '')) ?? '', /用户名.*密码/)
   assert.match(defaultProxyProblem(endpoint('', 'hunter2')) ?? '', /密码.*用户名/)
+  // The Host trims the username before its guards: whitespace alone is absent,
+  // and a padded name is present. The predicate must give the same verdict.
+  assert.match(defaultProxyProblem(endpoint('   ', 'hunter2')) ?? '', /密码.*用户名/)
+  assert.equal(defaultProxyProblem(endpoint('   ', '')), undefined)
+  assert.equal(defaultProxyProblem(endpoint(' alice ', 'hunter2')), undefined)
   // A paired credential — including the empty pair — is fine.
   assert.equal(defaultProxyProblem(endpoint('', '')), undefined)
   assert.equal(defaultProxyProblem(endpoint('alice', 'hunter2')), undefined)
 
   // And the build agrees: each half-filled pair is refused, each complete one is not.
-  for (const [username, password] of [['alice', ''], ['', 'hunter2']]) {
+  for (const [username, password] of [['alice', ''], ['', 'hunter2'], ['   ', 'hunter2']]) {
     const { entries, problems } = await createProxyTable(
       { p: { enabled: true, useDefault: true } },
       { defaultProxy: { protocol: 'http', host: 'proxy.test', port: 8080, username, password } },
@@ -485,6 +490,12 @@ test('a half-filled default credential is not usable — the guards would refuse
     assert.equal(entries.size, 0, `"${username}"/"${password}" must build no route`)
     assert.notEqual(problems.get('p'), undefined)
   }
+
+  const paired = await createProxyTable(
+    { p: { enabled: true, useDefault: true } },
+    { defaultProxy: { protocol: 'http', host: 'proxy.test', port: 8080, username: ' alice ', password: 'hunter2' } },
+  )
+  assert.equal(paired.entries.size, 1, 'a padded username is still a complete pair')
 })
 
 test('the shared predicate tolerates a partial or empty endpoint instead of throwing', async () => {

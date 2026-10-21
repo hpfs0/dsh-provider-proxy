@@ -86,8 +86,10 @@ export function defaultProxyProblem(endpoint: ProxyEndpoint): string | undefined
   // "Both or neither", exactly as `buildRouteEntry` enforces per transport. The
   // wording stays transport-neutral here because the default block carries a
   // protocol the user may still change; the route-level guards spell out the
-  // protocol-specific reason once it is pinned.
-  const hasUser = (endpoint.username ?? '').length > 0
+  // protocol-specific reason once it is pinned. The Host trims the username
+  // before its guards, so this predicate must trim it too; the password is not
+  // trimmed by either side.
+  const hasUser = (endpoint.username ?? '').trim().length > 0
   const hasPassword = (endpoint.password ?? '').length > 0
   if (hasUser !== hasPassword) {
     return hasUser
