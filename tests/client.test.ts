@@ -796,6 +796,253 @@ test('the lead describes loopback/private routing as the default, not an absolut
   }
 })
 
+// ---- N1: advanced global settings ----
+
+/** The `<details>` block whose summary names the global section. */
+function globalBlockOf(tree) {
+  let found
+  const walk = node => {
+    if (found !== undefined || node === null || typeof node !== 'object') return
+    if (Array.isArray(node)) return node.forEach(walk)
+    if (node.type === 'details' && textsOf(node).includes('全局设置（高级）')) found = node
+    if (node.children) walk(node.children)
+  }
+  walk(tree)
+  return found
+}
+
+/** An input inside the global block by its current value. */
+function globalInput(tree, value) {
+  const inputs = []
+  const walk = node => {
+    if (node === null || typeof node !== 'object') return
+    if (Array.isArray(node)) return node.forEach(walk)
+    if (node.type === 'input' && node.props?.value === value) inputs.push(node)
+    if (node.children) walk(node.children)
+  }
+  walk(globalBlockOf(tree))
+  return inputs[0]
+}
+
+test('N1 spike: settings snapshot exposes schema defaults and accepts top-level set paths', async () => {
+  // Verified against the shipped settings implementation: `getSnapshot().value`
+  // is the schema-resolved section, and SettingsScopeController.set(field)
+  // writes {op:'set', path:[field]}. These are the two assumptions the global
+  // block depends on.
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {},
+        testUrl: 'https://api.ipify.org?format=json',
+        localDirect: true,
+      },
+    })
+    const [tree] = renderPage(mod, harness)
+    const block = globalBlockOf(tree)
+    assert.ok(block, 'the global settings block must render')
+    assert.ok(globalInput(tree, 'https://api.ipify.org?format=json'), 'the schema default is shown')
+    const localDirect = findCheckboxes(block).find(box => box.props.checked === true)
+    assert.ok(localDirect, 'localDirect defaults to checked')
+
+    localDirect.props.onChange({ target: { checked: false } })
+    await writeSettle()
+    assert.deepEqual(harness.writes[0].ops, [
+      { op: 'set', path: ['localDirect'], value: false },
+    ])
+  } finally {
+    restore()
+  }
+})
+
+test('the global settings block is a details element, not another provider card', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: { providers: { sensenova: { enabled: true, protocol: 'http', host: '10.0.0.1', port: 7890 } } },
+    })
+    const [tree] = renderPage(mod, harness)
+    const block = globalBlockOf(tree)
+    assert.ok(block, 'the global block must be present')
+    assert.equal(block.type, 'details')
+    assert.ok(
+      !block.children.some(child => child?.type === 'section'),
+      'the global block must not add a provider <section>',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('both global fields write their top-level paths', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const tree = render()
+
+    globalInput(tree, 'https://api.ipify.org?format=json').props.onChange({
+      target: { value: 'https://echo.example/ip https://backup.example/ip' },
+    })
+    await writeSettle()
+    findCheckboxes(globalBlockOf(render())).find(box => box.props.checked === true)
+      .props.onChange({ target: { checked: false } })
+    await writeSettle()
+
+    assert.deepEqual(
+      harness.writes.map(write => write.ops[0]),
+      [
+        {
+          op: 'set',
+          path: ['testUrl'],
+          value: 'https://echo.example/ip https://backup.example/ip',
+        },
+        { op: 'set', path: ['localDirect'], value: false },
+      ],
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('restore default writes the explicit default test URL', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: { providers: {}, testUrl: 'https://custom.example/ip' },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const restoreButton = findButtons(globalBlockOf(render())).find(button =>
+      textsOf(button).includes('恢复默认'),
+    )
+    assert.ok(restoreButton, 'the global block offers a restore-default button')
+    restoreButton.props.onClick()
+    await writeSettle()
+    assert.deepEqual(harness.writes[0].ops, [
+      { op: 'set', path: ['testUrl'], value: 'https://api.ipify.org?format=json' },
+    ])
+  } finally {
+    restore()
+  }
+})
+
+test('testUrl validation warns but still writes', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const invalid = globalInput(globalBlockOf(render()), 'https://api.ipify.org?format=json')
+    invalid.props.onChange({ target: { value: 'not-a-url' } })
+    let texts = textsOf(render())
+    assert.ok(
+      texts.some(text => text.includes('部分候选不是绝对的 http(s) URL')),
+      'an invalid candidate is called out',
+    )
+    await writeSettle()
+    assert.equal(harness.writes.length, 1, 'the warning must not block the write')
+    assert.equal(harness.writes[0].ops[0].value, 'not-a-url')
+
+    globalInput(globalBlockOf(render()), 'not-a-url').props.onChange({
+      target: { value: 'https://a.example https://b.example https://c.example https://d.example https://e.example https://f.example' },
+    })
+    texts = textsOf(render())
+    assert.ok(
+      texts.some(text => text.includes('候选超过 5 个')),
+      'the 5-candidate cap is explained',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('editing any global field clears every provider result', async () => {
+  const { mod, restore } = loadBundle(async url => ({
+    ok: true,
+    status: 200,
+    json: async () =>
+      String(url).includes('/test')
+        ? { ok: true, ms: 120, status: 200 }
+        : {
+            providers: [
+              { id: 'sensenova', name: 'SenseNova', live: true },
+              { id: 'openai', name: 'OpenAI', live: true },
+            ],
+          },
+  }))
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: { enabled: true, protocol: 'http', host: '10.0.0.1', port: 7890 },
+          openai: { enabled: true, protocol: 'http', host: '10.0.0.2', port: 7890 },
+        },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    for (const id of ['sensenova', 'openai']) findButton(cardFor(render(), id)).props.onClick()
+    await settle()
+    assert.ok(JSON.stringify(render()).includes('120 ms'))
+
+    globalInput(globalBlockOf(render()), 'https://api.ipify.org?format=json').props.onChange({
+      target: { value: 'https://changed.example/ip' },
+    })
+    assert.ok(!JSON.stringify(render()).includes('120 ms'), 'all results are invalidated')
+    await writeSettle()
+  } finally {
+    restore()
+  }
+})
+
+test('a global edit is flushed before testing immediately', async () => {
+  const { mod, restore } = loadBundle(async url => ({
+    ok: true,
+    status: 200,
+    json: async () =>
+      String(url).includes('/test')
+        ? { ok: true, ms: 10, status: 200 }
+        : { providers: [{ id: 'sensenova', name: 'SenseNova', live: true }] },
+  }))
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    globalInput(globalBlockOf(render()), 'https://api.ipify.org?format=json').props.onChange({
+      target: { value: 'https://changed.example/ip' },
+    })
+    findButton(cardFor(render(), 'sensenova')).props.onClick()
+    await settle()
+    assert.equal(harness.writes.length, 1, 'the pending global write landed before the test')
+    assert.deepEqual(harness.writes[0].ops[0].path, ['testUrl'])
+    assert.ok(JSON.stringify(render()).includes('10 ms'), 'the test result arrived')
+  } finally {
+    restore()
+  }
+})
+
+test('a refused global write rolls the field back', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    harness.form.mutate = async () => { throw new Error('settings/conflict') }
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    globalInput(globalBlockOf(render()), 'https://api.ipify.org?format=json').props.onChange({
+      target: { value: 'https://changed.example/ip' },
+    })
+    await writeSettle()
+    assert.ok(
+      globalInput(globalBlockOf(render()), 'https://api.ipify.org?format=json'),
+      'the refused edit reverts to the stored value',
+    )
+  } finally {
+    restore()
+  }
+})
+
 test('the page shows how many requests crossed the proxy', async () => {
   const { mod, restore } = loadBundle(async () => ({
     ok: true,
@@ -1478,8 +1725,9 @@ test('a write goes through the settings form, fenced by the read revision', asyn
     const { registrations, writes } = mountPlugin(mod)
     registrations[0].Component()
     await settle()
-    // Rows sort by id, so `openai` precedes `sensenova`; the first toggle is openai's.
-    const toggle = findCheckbox(registrations[0].Component())
+    // The global settings block now also renders a checkbox above the cards, so
+    // the provider toggle must be looked up inside its own card.
+    const toggle = findCheckbox(cardFor(registrations[0].Component(), 'openai'))
     assert.ok(toggle, 'expected a checkbox')
     toggle.props.onChange({ target: { checked: true } })
     await writeSettle()

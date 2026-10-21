@@ -245,6 +245,9 @@ const TEST_PATH = '/dsh-provider-proxy/test'
  */
 const LATENCY_FAST_MS = 500
 const LATENCY_SLOW_MS = 1500
+/** The schema default for `testUrl`; also what "Restore default" writes. */
+const DEFAULT_TEST_URL = 'https://api.ipify.org?format=json'
+const MAX_TEST_URLS = 5
 
 function latencyColor(ms: unknown): string {
   if (typeof ms !== 'number' || !Number.isFinite(ms)) return 'var(--dsw-alias-label-secondary)'
@@ -270,6 +273,40 @@ function testResultFrom(body: any, strings: Record<string, string>): Record<stri
       : typeof body?.error === 'string' && body.error.length > 0
         ? body.error
         : strings.testFailed,
+  }
+}
+
+/** Split `testUrl` the same way the Host does: commas or whitespace. */
+function splitTestUrls(raw: string): string[] {
+  return raw
+    .split(/[,\s]+/)
+    .map(entry => entry.trim())
+    .filter(entry => entry.length > 0)
+}
+
+/**
+ * Hint-only validation for `testUrl`.
+ *
+ * The Host does not refuse malformed candidates; it simply fails that check.
+ * The page therefore warns without blocking the write, so a user can still save
+ * a value the Host accepts (including an empty string, which means "use the
+ * built-in default").
+ */
+function testUrlHint(raw: string, t: Record<string, string>): string | undefined {
+  const entries = splitTestUrls(raw)
+  if (entries.length === 0) return t.testUrlEmptyHint
+  const invalid = entries.filter(entry => !isAbsoluteHttpUrl(entry))
+  if (invalid.length > 0) return t.testUrlInvalidHint
+  if (entries.length > MAX_TEST_URLS) return t.testUrlTooManyHint
+  return undefined
+}
+
+function isAbsoluteHttpUrl(value: string): boolean {
+  try {
+    const url = new URL(value)
+    return (url.protocol === 'http:' || url.protocol === 'https:') && url.hostname.length > 0
+  } catch {
+    return false
   }
 }
 
@@ -789,6 +826,19 @@ const S = {
     font: 'inherit',
     fontSize: '12px',
   },
+  diag: {
+    marginTop: '4px',
+    padding: '8px 10px',
+    border: '1px solid var(--dsw-alias-border-l1)',
+    borderRadius: '8px',
+    fontSize: '11px',
+    color: 'var(--dsw-alias-label-secondary)',
+  },
+  hint: {
+    gridColumn: '2',
+    fontSize: '11px',
+    color: 'var(--dsw-alias-label-secondary)',
+  },
 } as const
 
 function renderPage(ctx: any): unknown {
@@ -909,6 +959,14 @@ function renderPage(ctx: any): unknown {
   const editDefault = (field: string, value: unknown) =>
     setDefaultDraft((current: any) => ({ ...current, [field]: value }))
 
+  /**
+   * The advanced global fields live outside `draft` on purpose: `draft` is keyed
+   * by provider id, and a sentinel would surface as a phantom provider row.
+   */
+  const [globalDraft, setGlobalDraft] = (React.useState ?? ((v: any) => [v, () => {}]))({})
+  const editGlobal = (field: string, value: unknown) =>
+    setGlobalDraft((current: any) => ({ ...current, [field]: value }))
+
   // Self-check outcomes keyed by provider id: `{ pending: true }` while the Host
   // is testing, then the normalized result the card renders.
   const [tests, setTests] = (React.useState ?? ((v: any) => [v, () => {}]))({})
@@ -954,7 +1012,11 @@ function renderPage(ctx: any): unknown {
     void (async () => {
       try {
         for (const [key, entry] of [...pendingWrites]) {
-          if (key.startsWith(`${id}\u0000`) || key.startsWith('\u0000default\u0000')) {
+          if (
+            key.startsWith(`${id}\u0000`) ||
+            key.startsWith('\u0000default\u0000') ||
+            key.startsWith('\u0000global\u0000')
+          ) {
             void entry.flush()
           }
         }
@@ -1049,6 +1111,20 @@ function renderPage(ctx: any): unknown {
       // Same rule as a card field: drop only this field, and only if the draft
       // still holds it, so an already-accepted sibling edit is never discarded.
       setDefaultDraft((current: any) => {
+        if (current[field] === undefined) return current
+        const next = { ...current }
+        delete next[field]
+        return next
+      })
+    })
+  }
+
+  /** One advanced global control: draft, invalidate every check, persist. */
+  const bindGlobal = (field: 'testUrl' | 'localDirect') => (value: unknown) => {
+    editGlobal(field, value)
+    invalidateTests(rows.map(row => row.id))
+    save(`\u0000global\u0000${field}`, [field], field, value, () => {
+      setGlobalDraft((current: any) => {
         if (current[field] === undefined) return current
         const next = { ...current }
         delete next[field]
@@ -1345,6 +1421,80 @@ function renderPage(ctx: any): unknown {
         },
         t.applyDefaultAll,
       ),
+    ),
+  )
+
+  const storedTestUrl =
+    typeof snapshot.value?.testUrl === 'string' ? snapshot.value.testUrl : DEFAULT_TEST_URL
+  const storedLocalDirect = snapshot.value?.localDirect !== false
+  const globalTestUrl = typeof globalDraft.testUrl === 'string' ? globalDraft.testUrl : storedTestUrl
+  const globalLocalDirect =
+    typeof globalDraft.localDirect === 'boolean' ? globalDraft.localDirect : storedLocalDirect
+  const globalTestUrlHint = testUrlHint(globalTestUrl, t)
+  const globalBlock = h(
+    'details',
+    {
+      className: styles.diag,
+      style: {
+        ...S.diag,
+        marginTop: '0',
+      },
+      key: 'global-settings',
+    },
+    h('summary', { className: styles.diagSummary }, t.globalTitle),
+    h('p', { className: styles.defaultLead, style: S.defaultLead }, t.globalLead),
+    h(
+      'label',
+      { className: styles.field, style: S.field },
+      h('span', { className: styles.label, style: S.label }, t.testUrl),
+      h('input', {
+        className: styles.input,
+        style: S.input,
+        value: globalTestUrl,
+        onChange: (event: any) => bindGlobal('testUrl')(event.target.value),
+      }),
+      globalTestUrlHint === undefined
+        ? h('span', { style: S.hint }, t.testUrlHint)
+        : h(
+            'span',
+            {
+              className: styles.hint,
+              style: {
+                ...S.hint,
+                color: 'var(--dsw-alias-state-error-primary, #f85149)',
+              },
+            },
+            globalTestUrlHint,
+          ),
+    ),
+    h(
+      'div',
+      { style: S.testRow },
+      h(
+        'button',
+        {
+          className: styles.testButton,
+          style: S.testButton,
+          type: 'button',
+          onClick: () => bindGlobal('testUrl')(DEFAULT_TEST_URL),
+        },
+        t.restoreDefaultTestUrl,
+      ),
+    ),
+    h(
+      'label',
+      { className: styles.toggle, style: S.toggle },
+      h('input', {
+        type: 'checkbox',
+        checked: globalLocalDirect,
+        onChange: (event: any) => bindGlobal('localDirect')(event.target.checked === true),
+      }),
+      h('span', null, t.localDirect),
+    ),
+    h(
+      'p',
+      { style: S.hint },
+      globalLocalDirect ? t.localDirectOnHint : t.localDirectOffHint,
     ),
   )
 
@@ -1726,6 +1876,7 @@ function renderPage(ctx: any): unknown {
     { className: styles.root, style: S.root },
     h('p', { className: styles.lead, style: { margin: '0 0 4px', fontSize: '12px', lineHeight: '1.6', color: 'var(--dsw-alias-label-secondary)' } }, t.lead),
     defaultBlock,
+    globalBlock,
     catalogueNotice,
     filterRow,
     ...body,
@@ -1806,6 +1957,17 @@ const EN = {
   testFailed: 'Test failed',
   exitIpLabel: 'exit IP ',
   directLabel: 'direct (not through the proxy)',
+  globalTitle: 'Global settings (advanced)',
+  globalLead: 'These fields are saved with the plugin rather than per provider. Leave testUrl empty to use the built-in default; comma/space separated candidates are tried in order and only the first 5 are used. localDirect is on by default; turn it off only when the proxy itself is a loopback or private target.',
+  testUrl: 'Self-check URL',
+  testUrlHint: 'Comma/space separated; http(s) URLs in the order they should be tried.',
+  testUrlEmptyHint: 'Empty means the Host uses its built-in default URL.',
+  testUrlInvalidHint: 'Some candidates are not absolute http(s) URLs. They are saved, but those checks will fail.',
+  testUrlTooManyHint: 'More than 5 candidates are listed; only the first 5 take effect.',
+  restoreDefaultTestUrl: 'Restore default',
+  localDirect: 'Loopback / private targets go direct',
+  localDirectOnHint: 'On: localhost, 127.x and private ranges bypass the proxy.',
+  localDirectOffHint: 'Off: loopback/private targets also use the proxy. Enable only when the proxy itself is the target.',
   advanced: 'Advanced: target host rules',
   onlyHosts: 'Proxy only',
   onlyHostsHint: 'Comma/space separated; when set, only requests to these hosts are proxied (suffix match, * for all).',
@@ -1865,6 +2027,17 @@ const ZH = {
   testFailed: '测试失败',
   exitIpLabel: '出口 IP ',
   directLabel: '直连（未经过代理）',
+  globalTitle: '全局设置（高级）',
+  globalLead: '这里的两项属于插件全局设置。testUrl 留空时 Host 使用内置默认值；多个候选用逗号或空格分隔，按顺序回退，只有前 5 个生效。localDirect 默认开启；只有代理本身就是本机或内网目标时才需要关闭。',
+  testUrl: '自检地址',
+  testUrlHint: '逗号或空格分隔；按顺序尝试的 http(s) URL。',
+  testUrlEmptyHint: '留空时 Host 使用内置默认地址。',
+  testUrlInvalidHint: '部分候选不是绝对的 http(s) URL。仍会保存，但这些候选会测试失败。',
+  testUrlTooManyHint: '候选超过 5 个，只有前 5 个生效。',
+  restoreDefaultTestUrl: '恢复默认',
+  localDirect: '本机 / 内网目标直连',
+  localDirectOnHint: '开启：localhost、127.x 与私有网段绕过代理。',
+  localDirectOffHint: '关闭：本机 / 内网目标也走代理；仅在代理本身就是目标时使用。',
   advanced: '高级：目标域名规则',
   onlyHosts: '仅走代理',
   onlyHostsHint: '逗号或空格分隔；非空时只有匹配这些主机的请求走代理（后缀匹配，* 表示全部）。',
