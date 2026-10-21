@@ -918,6 +918,191 @@ test('a failed self-check is rendered in the error colour, without the Host-log 
   }
 })
 
+test('editing a relevant field clears the self-check result', async () => {
+  const { mod, restore } = loadBundle(async url => ({
+    ok: true,
+    status: 200,
+    json: async () =>
+      String(url).includes('/test')
+        ? { ok: true, ms: 120, status: 200 }
+        : { providers: [{ id: 'sensenova', name: 'SenseNova', live: true }] },
+  }))
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    findButton(cardFor(render(), 'sensenova')).props.onClick()
+    await settle()
+    assert.ok(JSON.stringify(cardFor(render(), 'sensenova')).includes('120 ms'))
+
+    const host = findInputsByPlaceholder(cardFor(render(), 'sensenova'), '127.0.0.1')[0]
+    assert.ok(host, 'the card must expose its host input')
+    host.props.onChange({ target: { value: '10.0.0.2' } })
+    const after = cardFor(render(), 'sensenova')
+    assert.ok(
+      !JSON.stringify(after).includes('120 ms'),
+      'a result measured against the old endpoint must not survive the edit',
+    )
+    assert.ok(!textsOf(after).includes('测试中…'), 'the result is cleared, not left pending')
+    await writeSettle()
+  } finally {
+    restore()
+  }
+})
+
+test('editing the shared default clears only the cards that inherit it', async () => {
+  const { mod, restore } = loadBundle(async url => ({
+    ok: true,
+    status: 200,
+    json: async () =>
+      String(url).includes('/test')
+        ? { ok: true, ms: 120, status: 200 }
+        : {
+            providers: [
+              { id: 'sensenova', name: 'SenseNova', live: true },
+              { id: 'openai', name: 'OpenAI', live: true },
+            ],
+          },
+  }))
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        defaultProxy: { protocol: 'http', host: '127.0.0.1', port: 7890, username: '', password: '' },
+        providers: {
+          sensenova: {
+            enabled: true,
+            useDefault: true,
+            protocol: 'http',
+            host: '',
+            port: 0,
+            username: '',
+            password: '',
+          },
+          openai: {
+            enabled: true,
+            useDefault: false,
+            protocol: 'http',
+            host: '10.0.0.1',
+            port: 7890,
+            username: '',
+            password: '',
+          },
+        },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    for (const id of ['sensenova', 'openai']) {
+      findButton(cardFor(render(), id)).props.onClick()
+    }
+    await settle()
+    assert.ok(JSON.stringify(cardFor(render(), 'sensenova')).includes('120 ms'))
+    assert.ok(JSON.stringify(cardFor(render(), 'openai')).includes('120 ms'))
+
+    const defaultHost = findInputsOutsideSections(render(), '127.0.0.1')[0]
+    assert.ok(defaultHost, 'the default block must expose its host input')
+    defaultHost.props.onChange({ target: { value: '10.0.0.2' } })
+    const tree = render()
+    assert.ok(
+      !JSON.stringify(cardFor(tree, 'sensenova')).includes('120 ms'),
+      'an inheriting card must lose a result tied to the old default',
+    )
+    assert.ok(
+      JSON.stringify(cardFor(tree, 'openai')).includes('120 ms'),
+      'a card with its own endpoint is unaffected by the shared default',
+    )
+    await writeSettle()
+  } finally {
+    restore()
+  }
+})
+
+test('editing and testing immediately flushes the write before the self-check', async () => {
+  const order = []
+  const { mod, restore } = loadBundle(async url => {
+    if (String(url).includes('/test')) {
+      order.push('test')
+      return { ok: true, status: 200, json: async () => ({ ok: true, ms: 120, status: 200 }) }
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ providers: [{ id: 'sensenova', name: 'SenseNova', live: true }] }),
+    }
+  })
+  try {
+    const harness = mountPlugin(mod)
+    const mutate = harness.form.mutate
+    harness.form.mutate = async (ops, revision) => {
+      order.push('write')
+      return mutate(ops, revision)
+    }
+    const [, render] = renderPage(mod, harness)
+    await settle()
+
+    const host = findInputsByPlaceholder(cardFor(render(), 'sensenova'), '127.0.0.1')[0]
+    host.props.onChange({ target: { value: '10.0.0.2' } })
+    findButton(cardFor(render(), 'sensenova')).props.onClick()
+    await settle()
+
+    assert.deepEqual(
+      order,
+      ['write', 'test'],
+      'the Host must see the latest setting before it is asked to test it',
+    )
+    assert.equal(
+      harness.writes[0]?.ops[0]?.value,
+      '10.0.0.2',
+      'the flushed write must carry the value from the draft',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('a self-check that started before an edit is discarded when it settles', async () => {
+  let releaseTest
+  const { mod, restore } = loadBundle(async url => {
+    if (String(url).includes('/test')) {
+      await new Promise(resolve => { releaseTest = resolve })
+      return { ok: true, status: 200, json: async () => ({ ok: true, ms: 120, status: 200 }) }
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ providers: [{ id: 'sensenova', name: 'SenseNova', live: true }] }),
+    }
+  })
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    findButton(cardFor(render(), 'sensenova')).props.onClick()
+    await settle()
+    assert.ok(releaseTest, 'the self-check request must be in flight')
+
+    const host = findInputsByPlaceholder(cardFor(render(), 'sensenova'), '127.0.0.1')[0]
+    host.props.onChange({ target: { value: '10.0.0.2' } })
+    const afterEdit = cardFor(render(), 'sensenova')
+    assert.ok(!textsOf(afterEdit).includes('测试中…'), 'the edit clears the pending state')
+    assert.notEqual(
+      findButton(afterEdit).props.disabled,
+      true,
+      'the Test button is available again after the edit',
+    )
+
+    releaseTest()
+    await settle()
+    assert.ok(
+      !JSON.stringify(cardFor(render(), 'sensenova')).includes('120 ms'),
+      'a response for the pre-edit configuration must not be rendered',
+    )
+    await writeSettle()
+  } finally {
+    restore()
+  }
+})
+
 test('the cards expose the advanced target-host rules', async () => {
   const { mod, restore } = loadBundle()
   try {

@@ -513,7 +513,53 @@ function splitProxyUrl(text: string): Partial<RouteValue> | undefined {
  * and a page unmount: a write that was already promised still lands.
  */
 const WRITE_DELAY_MS = 300
-const pendingWrites = new Map<string, { timer: ReturnType<typeof setTimeout> }>()
+type PendingWrite = { timer?: ReturnType<typeof setTimeout>; flush: () => Promise<void> }
+const pendingWrites = new Map<string, PendingWrite>()
+
+/**
+ * Writes are serialized so a test can await every write it flushed without
+ * racing the settings revision fence. A run handles its own failures, so the
+ * tail never rejects the next write.
+ */
+let writeQueue: Promise<void> = Promise.resolve()
+function enqueueWrite(run: () => Promise<void>): Promise<void> {
+  const next = writeQueue.then(run, run)
+  writeQueue = next.catch(() => undefined)
+  return next
+}
+
+/** Schedule one debounced write; `flush` runs it immediately and only once. */
+function scheduleWrite(key: string, run: () => Promise<void>): void {
+  const pending = pendingWrites.get(key)
+  if (pending?.timer !== undefined) clearTimeout(pending.timer)
+  const entry: PendingWrite = {
+    flush: () => {
+      if (entry.timer !== undefined) clearTimeout(entry.timer)
+      pendingWrites.delete(key)
+      return enqueueWrite(run)
+    },
+  }
+  entry.timer = setTimeout(() => { void entry.flush() }, WRITE_DELAY_MS)
+  pendingWrites.set(key, entry)
+}
+
+/**
+ * A self-check result belongs to the configuration it was measured against.
+ * Every relevant edit bumps this counter; a response that started under an older
+ * generation is discarded instead of being pasted onto the new settings.
+ */
+const testGeneration = new Map<string, number>()
+const TEST_RELEVANT_FIELDS = new Set([
+  'protocol',
+  'host',
+  'port',
+  'username',
+  'password',
+  'onlyHosts',
+  'bypassHosts',
+  'testTarget',
+  'useDefault',
+])
 
 /** The provider directory, cached module-side. See renderPage. */
 let directoryCache: ProviderRow[] | undefined
@@ -855,6 +901,24 @@ function renderPage(ctx: any): unknown {
   // is testing, then the normalized result the card renders.
   const [tests, setTests] = (React.useState ?? ((v: any) => [v, () => {}]))({})
 
+  /** Drop results for these providers and invalidate any response in flight. */
+  const invalidateTests = (ids: readonly string[]): void => {
+    if (ids.length === 0) return
+    for (const id of ids) {
+      testGeneration.set(id, (testGeneration.get(id) ?? 0) + 1)
+    }
+    setTests((current: any) => {
+      let changed = false
+      const next = { ...current }
+      for (const id of ids) {
+        if (next[id] === undefined) continue
+        delete next[id]
+        changed = true
+      }
+      return changed ? next : current
+    })
+  }
+
   /**
    * The list filter. Purely a view concern: it hides cards, it never touches a
    * saved setting, so a page with no filter one day still shows every route.
@@ -866,19 +930,34 @@ function renderPage(ctx: any): unknown {
    *
    * The check is not routed traffic, so it never changes the hit count; the count
    * on the card is read at mount and stays put until the page reloads.
+   *
+   * Pending writes for this provider (and the shared default it may inherit) are
+   * flushed before the request: the Host reads the saved settings, not the draft,
+   * so testing inside the 300 ms debounce would otherwise test the old endpoint.
    */
   const runTest = (id: string): void => {
+    const generation = (testGeneration.get(id) ?? 0) + 1
+    testGeneration.set(id, generation)
     setTests((current: any) => ({ ...current, [id]: { pending: true } }))
     void (async () => {
       try {
+        for (const [key, entry] of [...pendingWrites]) {
+          if (key.startsWith(`${id}\u0000`) || key.startsWith('\u0000default\u0000')) {
+            void entry.flush()
+          }
+        }
+        await writeQueue
+        if (testGeneration.get(id) !== generation) return
         const response = await globalThis.fetch(TEST_PATH, {
           method: 'POST',
           headers: { 'content-type': 'application/json', accept: 'application/json' },
           body: JSON.stringify({ provider: id }),
         })
         const body = await response.json()
+        if (testGeneration.get(id) !== generation) return
         setTests((current: any) => ({ ...current, [id]: testResultFrom(body, t) }))
       } catch (error: any) {
+        if (testGeneration.get(id) !== generation) return
         setTests((current: any) => ({
           ...current,
           [id]: { pending: false, ok: false, error: String(error?.message ?? error) },
@@ -888,6 +967,12 @@ function renderPage(ctx: any): unknown {
   }
 
   const rows = knownProviders({ ...configured, ...draft }, published)
+
+  /** Cards whose effective endpoint comes from the shared default. */
+  const inheritingIds = (): string[] =>
+    rows
+      .filter(row => view({ ...configured[row.id], ...draft[row.id] }).useDefault === true)
+      .map(row => row.id)
 
   /**
    * Persist one field, debounced per `key`: a burst of edits to the same control
@@ -902,20 +987,16 @@ function renderPage(ctx: any): unknown {
     value: unknown,
     onRefused: () => void,
   ) => {
-    const pending = pendingWrites.get(key)
-    if (pending !== undefined) clearTimeout(pending.timer)
-    const timer = setTimeout(() => {
-      pendingWrites.delete(key)
-      void writeConfig(ctx, [{ op: 'set', path, value }])
+    scheduleWrite(key, () =>
+      writeConfig(ctx, [{ op: 'set', path, value }])
         .then(() => {
           note(`已保存 ${label} = ${JSON.stringify(value)}`)
         })
         .catch((error: any) => {
           note(`保存失败 ${label}：${error?.message ?? error}`)
           onRefused()
-        })
-    }, WRITE_DELAY_MS)
-    pendingWrites.set(key, { timer })
+        }),
+    )
   }
 
   /**
@@ -942,6 +1023,7 @@ function renderPage(ctx: any): unknown {
   /** One card control: update the draft instantly, persist in the background. */
   const bind = (id: string, field: string) => (value: unknown) => {
     edit(id, field, value)
+    if (TEST_RELEVANT_FIELDS.has(field)) invalidateTests([id])
     save(`${id}\u0000${field}`, ['providers', id, field], `${id}.${field}`, value, () =>
       rollbackRouteField(id, field),
     )
@@ -950,6 +1032,7 @@ function renderPage(ctx: any): unknown {
   /** One default-block control: same contract, addressed at `defaultProxy`. */
   const bindDefault = (field: string) => (value: unknown) => {
     editDefault(field, value)
+    invalidateTests(inheritingIds())
     save(`\u0000default\u0000${field}`, ['defaultProxy', field], `defaultProxy.${field}`, value, () => {
       // Same rule as a card field: drop only this field, and only if the draft
       // still holds it, so an already-accepted sibling edit is never discarded.
@@ -971,20 +1054,16 @@ function renderPage(ctx: any): unknown {
    * per-field debounce exists to avoid.
    */
   const saveMany = (key: string, ops: unknown[], label: string, onRefused: () => void) => {
-    const pending = pendingWrites.get(key)
-    if (pending !== undefined) clearTimeout(pending.timer)
-    const timer = setTimeout(() => {
-      pendingWrites.delete(key)
-      void writeConfig(ctx, ops)
+    scheduleWrite(key, () =>
+      writeConfig(ctx, ops)
         .then(() => {
           note(`已保存 ${label}`)
         })
         .catch((error: any) => {
           note(`保存失败 ${label}：${error?.message ?? error}`)
           onRefused()
-        })
-    }, WRITE_DELAY_MS)
-    pendingWrites.set(key, { timer })
+        }),
+    )
   }
 
   /** Undo one set of pasted fields in a card's draft. */
@@ -1004,6 +1083,7 @@ function renderPage(ctx: any): unknown {
   /** Apply a parsed proxy URL to one card: one draft update, one write. */
   const applyCardUrl = (id: string, parts: Record<string, unknown>): void => {
     setDraft((current: any) => ({ ...current, [id]: { ...current[id], ...parts } }))
+    invalidateTests([id])
     const fields = Object.keys(parts)
     saveMany(
       `${id}\u0000*paste`,
@@ -1016,6 +1096,7 @@ function renderPage(ctx: any): unknown {
   /** Apply a parsed proxy URL to the shared default endpoint. */
   const applyDefaultUrl = (parts: Record<string, unknown>): void => {
     setDefaultDraft((current: any) => ({ ...current, ...parts }))
+    invalidateTests(inheritingIds())
     const fields = Object.keys(parts)
     saveMany(
       '\u0000default\u0000*paste',
@@ -1058,6 +1139,7 @@ function renderPage(ctx: any): unknown {
       for (const id of ids) next[id] = { ...next[id], useDefault: true }
       return next
     })
+    invalidateTests(ids)
     saveMany(
       '\u0000default\u0000applyAll',
       ids.map(id => ({ op: 'set', path: ['providers', id, 'useDefault'], value: true })),
