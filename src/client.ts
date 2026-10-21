@@ -265,6 +265,10 @@ function testResultFrom(body: any, strings: Record<string, string>): Record<stri
     ok,
     ms: typeof body?.ms === 'number' && Number.isFinite(body.ms) ? body.ms : undefined,
     ip: typeof body?.exitIp === 'string' && body.exitIp.length > 0 ? body.exitIp : undefined,
+    status:
+      typeof body?.status === 'number' && Number.isInteger(body.status) ? body.status : undefined,
+    target: typeof body?.target === 'string' && body.target.length > 0 ? body.target : undefined,
+    cached: body?.cached === true,
     // The Host probes a target the way routing would: a loopback/private upstream
     // (or a bypassHosts match) is reached DIRECT, not through the proxy. The card
     // says so, so a green check is not read as "the proxy works".
@@ -1833,12 +1837,49 @@ function renderPage(ctx: any): unknown {
                             h(
                               'span',
                               { key: 'lat', style: { color: latencyColor(result.ms) } },
-                              `✓ ${typeof result.ms === 'number' ? result.ms : '—'} ms`,
+                              `✓${
+                                typeof result.status === 'number'
+                                  ? ` HTTP ${result.status}`
+                                  : ''
+                              } · ${typeof result.ms === 'number' ? result.ms : '—'} ms`,
                             ),
                             result.ip === undefined ? null : ` · ${t.exitIpLabel}${result.ip}`,
                             result.direct === true ? ` · ${t.directLabel}` : null,
+                            result.cached === true ? ` · ${t.cachedLabel}` : null,
+                            result.target === undefined
+                              ? null
+                              : h(
+                                  'span',
+                                  {
+                                    key: 'target',
+                                    style: {
+                                      flexBasis: '100%',
+                                      fontSize: '11px',
+                                      color: 'var(--dsw-alias-label-secondary)',
+                                      wordBreak: 'break-all',
+                                    },
+                                  },
+                                  `${t.testTargetLabel}${result.target}`,
+                                ),
                           ]
-                        : h('span', { key: 'err', style: S.testFailure }, `✗ ${result.error}`),
+                        : [
+                            h('span', { key: 'err', style: S.testFailure }, `✗ ${result.error}`),
+                            result.target === undefined
+                              ? null
+                              : h(
+                                  'span',
+                                  {
+                                    key: 'target',
+                                    style: {
+                                      flexBasis: '100%',
+                                      fontSize: '11px',
+                                      color: 'var(--dsw-alias-label-secondary)',
+                                      wordBreak: 'break-all',
+                                    },
+                                  },
+                                  `${t.testTargetLabel}${result.target}`,
+                                ),
+                          ],
                     )
                   : null,
                 // Promote this card's endpoint to the shared default. Offered only
@@ -2026,6 +2067,8 @@ const EN = {
   testFailed: 'Test failed',
   exitIpLabel: 'exit IP ',
   directLabel: 'direct (not through the proxy)',
+  cachedLabel: 'cached',
+  testTargetLabel: 'Target: ',
   globalTitle: 'Global settings (advanced)',
   globalLead: 'These fields are saved with the plugin rather than per provider. Leave testUrl empty to use the built-in default; comma/space separated candidates are tried in order and only the first 5 are used. localDirect is on by default; turn it off only when the proxy itself is a loopback or private target.',
   testUrl: 'Self-check URL',
@@ -2098,6 +2141,8 @@ const ZH = {
   testFailed: '测试失败',
   exitIpLabel: '出口 IP ',
   directLabel: '直连（未经过代理）',
+  cachedLabel: '缓存',
+  testTargetLabel: '目标 ',
   globalTitle: '全局设置（高级）',
   globalLead: '这里的两项属于插件全局设置。testUrl 留空时 Host 使用内置默认值；多个候选用逗号或空格分隔，按顺序回退，只有前 5 个生效。localDirect 默认开启；只有代理本身就是本机或内网目标时才需要关闭。',
   testUrl: '自检地址',

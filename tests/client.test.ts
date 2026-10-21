@@ -1106,6 +1106,96 @@ test('a fast self-check latency is rendered in the success colour', async () => 
   }
 })
 
+test('N2: a check names its HTTP status, target and cached state', async () => {
+  const { mod, restore } = loadBundle(async url => ({
+    ok: true,
+    status: 200,
+    json: async () =>
+      String(url).includes('/test')
+        ? {
+            ok: true,
+            ms: 120,
+            status: 401,
+            target: 'https://api.example.com/v1',
+            cached: true,
+          }
+        : { providers: [{ id: 'sensenova', name: 'SenseNova', live: true }] },
+  }))
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    findButton(cardFor(render(), 'sensenova')).props.onClick()
+    await settle()
+    const texts = textsOf(cardFor(render(), 'sensenova'))
+    assert.ok(texts.includes('✓ HTTP 401 · 120 ms'), 'the status explains where the check reached')
+    assert.ok(
+      texts.some(text => text.includes('缓存')),
+      'a cached answer is labelled',
+    )
+    assert.ok(
+      texts.some(text => text.includes('目标 https://api.example.com/v1')),
+      'the sanitized target is visible',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('N2: a failed check keeps its target visible', async () => {
+  const { mod, restore } = loadBundle(async url => ({
+    ok: true,
+    status: 200,
+    json: async () =>
+      String(url).includes('/test')
+        ? {
+            ok: false,
+            kind: 'target',
+            error: '目标不可达（ECONNREFUSED）：connect failed',
+            target: 'http://127.0.0.1:65533/upstream',
+          }
+        : { providers: [{ id: 'sensenova', name: 'SenseNova', live: true }] },
+  }))
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    findButton(cardFor(render(), 'sensenova')).props.onClick()
+    await settle()
+    const tree = JSON.stringify(cardFor(render(), 'sensenova'))
+    assert.ok(tree.includes('✗ 目标不可达'), 'the failure reason is still shown')
+    assert.ok(
+      tree.includes('目标 http://127.0.0.1:65533/upstream'),
+      'the target remains visible when the check fails',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('an old payload without status or target still renders', async () => {
+  const { mod, restore } = loadBundle(async url => ({
+    ok: true,
+    status: 200,
+    json: async () =>
+      String(url).includes('/test')
+        ? { ok: true, ms: 50 }
+        : { providers: [{ id: 'sensenova', name: 'SenseNova', live: true }] },
+  }))
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    findButton(cardFor(render(), 'sensenova')).props.onClick()
+    await settle()
+    const tree = JSON.stringify(cardFor(render(), 'sensenova'))
+    assert.ok(tree.includes('✓ · 50 ms'), 'legacy payloads omit status without breaking')
+    assert.ok(!tree.includes('目标 undefined'), 'a missing target is not rendered')
+  } finally {
+    restore()
+  }
+})
+
 test('a self-check that went direct says so, instead of reading as a proxy success', async () => {
   const { mod, restore } = loadBundle(async url => ({
     ok: true,

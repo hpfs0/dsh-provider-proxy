@@ -254,7 +254,11 @@ export function apply(ctx: any, config?: ProxyConfig): void {
    * direct one. Naming the proxy for a direct probe would send the operator after
    * a hop the check never used.
    */
-  const classifyTestError = (error: unknown, viaProxy: boolean): { kind: string; error: string } => {
+  const classifyTestError = (
+    error: unknown,
+    viaProxy: boolean,
+    rawTarget: string,
+  ): { kind: string; error: string } => {
     const chain = causesOf(error)
     const names = chain
       .map(node => (node as { name?: unknown }).name)
@@ -269,7 +273,13 @@ export function apply(ctx: any, config?: ProxyConfig): void {
     const messages = chain
       .map(node => (node as { message?: unknown }).message)
       .filter((text): text is string => typeof text === 'string')
-    const message = error instanceof Error ? error.message : String(error)
+    // The thrown message may quote the raw target, including userinfo or a
+    // query token. Keep the useful classification but never pass that message
+    // through verbatim.
+    const message = redactTargetFromText(
+      error instanceof Error ? error.message : String(error),
+      rawTarget,
+    )
     if (names.includes('TimeoutError') || names.includes('AbortError')) {
       return { kind: 'timeout', error: `超时（${TEST_TIMEOUT_MS / 1000}s）：代理或目标无响应` }
     }
@@ -284,6 +294,40 @@ export function apply(ctx: any, config?: ProxyConfig): void {
       return { kind: 'proxy-auth', error: `代理要求认证（HTTP 407）：${message}` }
     }
     return { kind: 'target', error: `请求失败：${message}` }
+  }
+
+  /**
+   * Collapse a target to the origin and pathname for display.
+   *
+   * Userinfo, query values and fragments are removed before the value is
+   * returned to the page. Invalid targets lose a `scheme://userinfo@` prefix and
+   * everything from the first query/fragment marker, then are bounded in length.
+   */
+  const sanitizeTargetForDisplay = (target: string): string => {
+    const raw = String(target ?? '')
+    try {
+      const url = new URL(raw)
+      return `${url.protocol}//${url.host}${url.pathname}`
+    } catch {
+      const withoutUserinfo = raw.replace(
+        /^([a-z][a-z0-9+.-]*:\/\/)[^/@\s]+@/i,
+        '$1',
+      )
+      const withoutQuery = withoutUserinfo.split(/[?#]/, 1)[0] ?? ''
+      const bounded = withoutQuery.length > 160 ? `${withoutQuery.slice(0, 160)}…` : withoutQuery
+      return bounded
+    }
+  }
+
+  /** Remove a raw target (and URL secrets) from a Host-generated error. */
+  const redactTargetFromText = (text: string, rawTarget: string): string => {
+    let safe = text
+    if (rawTarget.length > 0) safe = safe.split(rawTarget).join('[目标已脱敏]')
+    // The error chain may contain the target in a re-serialized form, so strip
+    // every URLs credentials and query/fragment tail, not only the exact input.
+    safe = safe.replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^/@\s]+@/gi, '$1')
+    safe = safe.replace(/([?&#])[^\s"'<>]*/g, '$1')
+    return safe.length > 500 ? `${safe.slice(0, 500)}…` : safe
   }
 
   /**
@@ -329,26 +373,50 @@ export function apply(ctx: any, config?: ProxyConfig): void {
     target: string,
     route: RouteEntry,
   ): Promise<Record<string, unknown>> => {
+    const displayTarget = sanitizeTargetForDisplay(target)
     let host: string | undefined
     try {
       host = new URL(target).hostname
     } catch {
-      return { ok: false, kind: 'target', error: `自检目标不是合法 URL：${target}` }
+      return {
+        ok: false,
+        kind: 'target',
+        target: displayTarget,
+        error: `自检目标不是合法 URL：${displayTarget}`,
+      }
     }
     const viaProxy = route.decide(host) === 'proxy'
     const started = performance.now()
     try {
-      const response = await undiciFetch(target, {
+      // WHATWG URL keeps userinfo out of `origin`, but the request URL still
+      // carries it. The self-check never needs embedded credentials, so remove
+      // them from the request too rather than merely hiding them on display.
+      const requestTarget = ((): string => {
+        const url = new URL(target)
+        url.username = ''
+        url.password = ''
+        return url.toString()
+      })()
+      const response = await undiciFetch(requestTarget, {
         // A direct probe must NOT carry the dispatcher, or undici would force it
         // through the proxy anyway.
         ...(viaProxy ? { dispatcher: route.dispatcher } : {}),
         signal: AbortSignal.timeout(TEST_TIMEOUT_MS),
       } as never)
       const ms = Math.round(performance.now() - started)
+      const targetField = { target: displayTarget }
       // 407 is the proxy demanding credentials: a RESULT, not a throw. Only a
       // proxied request can be answered by a proxy this way.
       if (viaProxy && response.status === 407) {
-        return { ok: false, ms, status: 407, kind: 'proxy-auth', viaProxy, error: '代理要求认证（HTTP 407）' }
+        return {
+          ok: false,
+          ms,
+          status: 407,
+          kind: 'proxy-auth',
+          viaProxy,
+          ...targetField,
+          error: `代理要求认证（HTTP 407）：${displayTarget}`,
+        }
       }
       let exitIp: string | undefined
       try {
@@ -370,6 +438,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
           ms,
           status: response.status,
           viaProxy,
+          ...targetField,
           ...(exitIp === undefined ? {} : { exitIp }),
           kind: 'ok',
         }
@@ -379,15 +448,17 @@ export function apply(ctx: any, config?: ProxyConfig): void {
         ms,
         status: response.status,
         viaProxy,
+        ...targetField,
         kind: 'target',
-        error: `目标返回 HTTP ${response.status}（5xx，上游或链路异常）`,
+        error: `目标返回 HTTP ${response.status}（5xx，上游或链路异常）：${displayTarget}`,
       }
     } catch (error) {
       return {
         ok: false,
         ms: Math.round(performance.now() - started),
         viaProxy,
-        ...classifyTestError(error, viaProxy),
+        ...classifyTestError(error, viaProxy, target),
+        target: displayTarget,
       }
     }
   }
@@ -495,7 +566,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
         // same question and get the same answer.
         if (outcome.kind === 'proxy-auth') break
       }
-      return last ?? { ok: false, kind: 'target', error: '没有可用的自检目标' }
+      return last ?? { ok: false, kind: 'target', target: '', error: '没有可用的自检目标' }
     } finally {
       // A dispatcher built for one check must not outlive it: the table owns the
       // long-lived ones, and this one was never in the table to begin with.

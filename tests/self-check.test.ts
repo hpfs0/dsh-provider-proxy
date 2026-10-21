@@ -102,6 +102,7 @@ test('a reachable proxy reports ok with latency and the exit IP', async () => {
     assert.equal(body.ok, true, 'the proxy carried the request')
     assert.equal(body.exitIp, '203.0.113.9')
     assert.equal(body.viaProxy, true, 'a non-local target is probed through the proxy')
+    assert.equal(body.target, 'http://echo.invalid/ip', 'the result names the sanitized target')
     assert.equal(typeof body.ms, 'number')
     assert.equal(proxy.seen.length, 1, 'the request really crossed the proxy')
     assert.equal(proxy.seen[0].url, 'http://echo.invalid/ip', 'the proxy saw the absolute-form target')
@@ -116,6 +117,7 @@ test('an unreachable proxy FAILS instead of reporting a false success', async ()
   const { body } = await selfCheck(routes, { provider: 'p' })
   assert.equal(body.ok, false)
   assert.equal(body.kind, 'proxy-unreachable')
+  assert.equal(body.target, 'http://echo.invalid/ip')
 })
 
 test('a provider with no live route is reported, not tested', async () => {
@@ -202,6 +204,7 @@ test('a completed check is answered from the cooldown without a new outbound req
     assert.equal(second.body.cached, true, 'a click inside the cooldown is answered from memory')
     assert.equal(second.body.ok, true)
     assert.equal(second.body.exitIp, '203.0.113.9')
+    assert.equal(second.body.target, first.body.target, 'a cached reply still names its target')
     assert.equal(proxy.seen.length, 1, 'no second outbound request was made')
   } finally {
     await proxy.close()
@@ -259,6 +262,7 @@ test('an unparsable testTarget fails the check without rejecting the route', asy
     assert.equal(body.ok, false)
     assert.equal(body.kind, 'target')
     assert.match(body.error, /自检目标/, 'the report must name the misconfigured field')
+  assert.equal(body.target, 'not a url', 'an invalid target is still reported, bounded')
     assert.equal(proxy.seen.length, 0, 'nothing was sent for an unparsable target')
   } finally {
     await proxy.close()
@@ -351,6 +355,89 @@ test('a provider with no config at all is still reported as not enabled', async 
 })
 
 // ---- the provider's real upstream as the default check target ----
+
+test('the reported target removes userinfo, query and fragment', async () => {
+  const proxy = await startEchoProxy()
+  try {
+    const target =
+      'http://alice:hunter2-secret@eval.invalid/deep/path?token=top-secret#fragment-secret'
+    const { routes } = mountHost({
+      providers: {
+        get: () => ({
+          p: {
+            enabled: true,
+            protocol: 'http',
+            host: '127.0.0.1',
+            port: proxy.port,
+            testTarget: target,
+          },
+        }),
+      },
+    })
+    const { body } = await selfCheck(routes, { provider: 'p' })
+    assert.equal(body.target, 'http://eval.invalid/deep/path')
+    const serialized = JSON.stringify(body)
+    assert.ok(!serialized.includes('hunter2-secret'), 'userinfo never reaches the page')
+    assert.ok(!serialized.includes('top-secret'), 'query tokens never reach the page')
+    assert.ok(!serialized.includes('fragment-secret'), 'fragments never reach the page')
+  } finally {
+    await proxy.close()
+  }
+})
+
+test('an invalid target is sanitized and bounded before it is reported', async () => {
+  const target = `x://alice:hunter2-secret@bad?token=top-secret#frag ${'x'.repeat(400)}`
+  const { routes } = mountHost({
+    providers: {
+      get: () => ({
+        p: {
+          enabled: false,
+          protocol: 'http',
+          host: '127.0.0.1',
+          port: 7890,
+          testTarget: target,
+        },
+      }),
+    },
+  })
+  const { body } = await selfCheck(routes, { provider: 'p' })
+  assert.equal(body.ok, false)
+  assert.equal(typeof body.target, 'string')
+  assert.ok(body.target.length <= 161, 'the display target is bounded')
+  const serialized = JSON.stringify(body)
+  assert.ok(!serialized.includes('hunter2-secret'), 'userinfo is stripped even from an invalid URL')
+  assert.ok(!serialized.includes('top-secret'), 'query is stripped even from an invalid URL')
+  assert.ok(!serialized.includes('frag'), 'fragment is stripped even from an invalid URL')
+  assert.match(body.target, /^x:\/\/bad/)
+})
+
+test('a network failure never echoes the raw target', async () => {
+  // The target is loopback and nothing listens on this port, so the probe goes
+  // DIRECT and fails at the target hop. The thrown message can contain the URL;
+  // the response must not hand that back verbatim.
+  const target =
+    'http://alice:hunter2-secret@127.0.0.1:65533/upstream?token=top-secret#fragment-secret'
+  const { routes } = mountHost({
+    providers: {
+      get: () => ({
+        p: {
+          enabled: true,
+          protocol: 'http',
+          host: '127.0.0.1',
+          port: 1,
+          testTarget: target,
+        },
+      }),
+    },
+  })
+  const { body } = await selfCheck(routes, { provider: 'p' })
+  assert.equal(body.ok, false)
+  assert.equal(body.target, 'http://127.0.0.1:65533/upstream')
+  const serialized = JSON.stringify(body)
+  assert.ok(!serialized.includes('hunter2-secret'), 'the network error does not echo userinfo')
+  assert.ok(!serialized.includes('top-secret'), 'the network error does not echo the query')
+  assert.ok(!serialized.includes('fragment-secret'), 'the network error does not echo the fragment')
+})
 
 /** A directory entry plus the settings section an llm-pi-ai route would publish. */
 const publishedUpstream = () => ({
@@ -481,6 +568,7 @@ test('a 5xx reads as a broken path, not a success', async () => {
     assert.equal(body.ok, false)
     assert.equal(body.status, 502)
     assert.match(body.error, /502/, 'a bare "测试失败" points at nothing; the status must be named')
+    assert.equal(body.target, 'http://echo.invalid/ip')
   } finally {
     await proxy.close()
   }
@@ -526,6 +614,7 @@ test('testUrl may name several echo hosts, tried in order', async () => {
     const { body } = await selfCheck(routes, { provider: 'p' })
     assert.equal(body.ok, true, 'the second candidate answered, so the setting is fine')
     assert.equal(body.exitIp, '203.0.113.9')
+    assert.equal(body.target, 'http://second.invalid/ip', 'the result names the target that answered')
     assert.deepEqual(
       proxy.seen,
       ['http://first.invalid/ip', 'http://second.invalid/ip'],
@@ -643,6 +732,7 @@ test('a failed direct probe names the target, never a proxy it never used', asyn
     assert.equal(body.ok, false)
     assert.equal(body.viaProxy, false)
     assert.equal(body.kind, 'target', 'a direct failure is about the target, not the proxy')
+    assert.equal(body.target, 'http://127.0.0.1:65533/upstream')
     assert.match(body.error, /目标不可达/, 'the report must name the hop that actually failed')
     assert.ok(!body.error.includes('代理'), 'a direct probe must never blame a proxy it did not use')
     assert.equal(proxy.seen.length, 0, 'the proxy was never contacted')
