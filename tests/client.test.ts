@@ -1719,6 +1719,189 @@ test('a refused write rolls back only the failed field', async () => {
   }
 })
 
+// ---- N5: a save failure is visible, and diagnostics never echo a secret ----
+
+test('a refused write shows a page-level reason and still rolls back', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    harness.form.mutate = async () => { throw new Error('settings/conflict') }
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const card = cardFor(render(), 'sensenova')
+    findInputsByPlaceholder(card, '127.0.0.1')[0].props.onChange({
+      target: { value: '10.9.9.9' },
+    })
+    await writeSettle()
+    const tree = render()
+    const texts = textsOf(tree)
+    assert.ok(
+      texts.some(text => text.includes('保存失败：sensenova.host — settings/conflict')),
+      'the failure is visible without opening diagnostics',
+    )
+    assert.equal(
+      findInputsByPlaceholder(cardFor(tree, 'sensenova'), '127.0.0.1')[0].props.value,
+      '10.0.0.1',
+      'the refused draft still rolls back',
+    )
+    assert.ok(
+      texts.includes('读取 provider 列表失败') === false,
+      'a save failure must not be mixed with a catalogue failure',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('a later successful write clears the save failure', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    let fail = true
+    harness.form.mutate = async ops => {
+      if (fail && ops.some(op => op.path[op.path.length - 1] === 'host')) {
+        throw new Error('settings/conflict')
+      }
+    }
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const card = cardFor(render(), 'sensenova')
+    findInputsByPlaceholder(card, '127.0.0.1')[0].props.onChange({
+      target: { value: '10.9.9.9' },
+    })
+    await writeSettle()
+    assert.ok(textsOf(render()).some(text => text.includes('保存失败：')))
+
+    fail = false
+    findCheckboxes(cardFor(render(), 'sensenova')).find(box => box.props.checked === true)
+      .props.onChange({ target: { checked: false } })
+    await writeSettle()
+    assert.ok(
+      !textsOf(render()).some(text => text.includes('保存失败：')),
+      'the ordered write queue lets the later success clear the earlier failure',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('the save-failure banner can be dismissed', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    harness.form.mutate = async () => { throw new Error('settings/conflict') }
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    findCheckboxes(cardFor(render(), 'sensenova')).find(box => box.props.checked === true)
+      .props.onChange({ target: { checked: false } })
+    await writeSettle()
+    const close = findButtons(render()).find(button => textsOf(button).includes('关闭'))
+    assert.ok(close, 'the banner offers a close button')
+    close.props.onClick()
+    assert.ok(!textsOf(render()).some(text => text.includes('保存失败：')))
+  } finally {
+    restore()
+  }
+})
+
+test('multiple failures keep only the latest one', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    harness.form.mutate = async ops => {
+      throw new Error(`refused ${ops[0].path[ops[0].path.length - 1]}`)
+    }
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const card = cardFor(render(), 'sensenova')
+    findInputsByPlaceholder(card, '127.0.0.1')[0].props.onChange({
+      target: { value: '10.9.9.9' },
+    })
+    await writeSettle()
+    findInputsByPlaceholder(cardFor(render(), 'sensenova'), '7890')[0].props.onChange({
+      target: { value: '1234' },
+    })
+    await writeSettle()
+    const alerts = []
+    const walk = node => {
+      if (node === null || typeof node !== 'object') return
+      if (Array.isArray(node)) return node.forEach(walk)
+      if (node.props?.role === 'alert') alerts.push(node)
+      if (node.children) walk(node.children)
+    }
+    walk(render())
+    assert.equal(alerts.length, 1, 'there is one page-level banner, not a stack')
+    assert.ok(textsOf(alerts[0]).some(text => text.includes('sensenova.port')))
+    assert.ok(!textsOf(alerts[0]).some(text => text.includes('sensenova.host')))
+  } finally {
+    restore()
+  }
+})
+
+test('a saved password is hidden from the diagnostics', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const card = cardFor(render(), 'sensenova')
+    assert.ok(card, 'expected the sensenova card')
+    const inputs = []
+    const walk = node => {
+      if (node === null || typeof node !== 'object') return
+      if (Array.isArray(node)) return node.forEach(walk)
+      if (node.type === 'input' && node.props?.type === 'password') inputs.push(node)
+      if (node.children) walk(node.children)
+    }
+    walk(card)
+    const password = inputs[0]
+    assert.ok(password, 'the card exposes a password input')
+    password.props.onChange({ target: { value: 'hunter2-secret' } })
+    await writeSettle()
+    const next = render()
+    const texts = textsOf(next)
+    assert.ok(
+      texts.some(text => text.includes('已保存 sensenova.password')),
+      'the diagnostic names the saved field',
+    )
+    assert.ok(
+      texts.some(text => text.includes('值已隐藏')),
+      'the diagnostic never includes the saved value',
+    )
+    assert.ok(!texts.some(text => text.includes('hunter2-secret')), 'the password never reaches diagnostics')
+  } finally {
+    restore()
+  }
+})
+
+test('a failed password write never echoes the password', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    harness.form.mutate = async ops => {
+      throw new Error(`rejected value ${ops[0].value}`)
+    }
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const card = cardFor(render(), 'sensenova')
+    const inputs = []
+    const walk = node => {
+      if (node === null || typeof node !== 'object') return
+      if (Array.isArray(node)) return node.forEach(walk)
+      if (node.type === 'input' && node.props?.type === 'password') inputs.push(node)
+      if (node.children) walk(node.children)
+    }
+    walk(card)
+    inputs[0].props.onChange({ target: { value: 'hunter2-secret' } })
+    await writeSettle()
+    const tree = JSON.stringify(render())
+    assert.ok(!tree.includes('hunter2-secret'), 'neither the banner nor diagnostics echo the secret')
+    assert.ok(textsOf(render()).some(text => text.includes('保存失败：sensenova.password（值已隐藏）')))
+  } finally {
+    restore()
+  }
+})
+
 test('a write goes through the settings form, fenced by the read revision', async () => {
   const { mod, restore } = loadBundle()
   try {

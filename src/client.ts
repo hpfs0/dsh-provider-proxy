@@ -311,6 +311,39 @@ function isAbsoluteHttpUrl(value: string): boolean {
 }
 
 /**
+ * Remove values and URL credentials from text that will be shown to the user.
+ *
+ * Settings errors may quote the rejected value. A password field must never
+ * echo that value, even inside an otherwise useful error message, so exact
+ * known secrets are replaced before anything is rendered or written to the
+ * diagnostics panel.
+ */
+function redactSensitiveText(text: string, secrets: readonly unknown[] = []): string {
+  let safe = text
+  for (const secret of secrets) {
+    if (typeof secret !== 'string' || secret.length === 0) continue
+    safe = safe.split(secret).join('***')
+  }
+  // A URL in an error may carry userinfo and query/fragment values even when
+  // the individual secret is not known to this call.
+  safe = safe.replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^/@\s]+@/gi, '$1')
+  safe = safe.replace(/([?&#])[^\s"'<>]*/g, '$1')
+  return safe.length > 500 ? `${safe.slice(0, 500)}…` : safe
+}
+
+/** Values that may be echoed by a failed multi-field write. */
+function secretsFromOps(ops: readonly any[]): string[] {
+  const out: string[] = []
+  for (const op of ops) {
+    const field = op?.path?.[op.path.length - 1]
+    if (field === 'password' && typeof op?.value === 'string' && op.value.length > 0) {
+      out.push(op.value)
+    }
+  }
+  return out
+}
+
+/**
  * The setter the lazy catalogue initializer resolves through.
  *
  * It is republished after every render, so the newest one always wins, and a
@@ -967,6 +1000,11 @@ function renderPage(ctx: any): unknown {
   const editGlobal = (field: string, value: unknown) =>
     setGlobalDraft((current: any) => ({ ...current, [field]: value }))
 
+  /** The latest refused write, shown above the cards instead of in the fold. */
+  const [saveError, setSaveError] = (React.useState ?? ((v: any) => [v, () => {}]))(undefined)
+  /** The latest accepted write, rendered in the diagnostics on the next pass. */
+  const [savedNote, setSavedNote] = (React.useState ?? ((v: any) => [v, () => {}]))(undefined)
+
   // Self-check outcomes keyed by provider id: `{ pending: true }` while the Host
   // is testing, then the normalized result the card renders.
   const [tests, setTests] = (React.useState ?? ((v: any) => [v, () => {}]))({})
@@ -1061,13 +1099,21 @@ function renderPage(ctx: any): unknown {
     value: unknown,
     onRefused: () => void,
   ) => {
+    const field = path[path.length - 1]
+    const secret = field === 'password' && typeof value === 'string' ? value : undefined
+    const safeLabel = secret === undefined ? label : `${label}（值已隐藏）`
     scheduleWrite(key, () =>
       writeConfig(ctx, [{ op: 'set', path, value }])
         .then(() => {
-          note(`已保存 ${label} = ${JSON.stringify(value)}`)
+          setSaveError(undefined)
+          setSavedNote(secret === undefined ? `已保存 ${label}` : `已保存 ${safeLabel}`)
         })
         .catch((error: any) => {
-          note(`保存失败 ${label}：${error?.message ?? error}`)
+          const message = redactSensitiveText(String(error?.message ?? error), [
+            ...(secret === undefined ? [] : [secret]),
+          ])
+          setSavedNote(undefined)
+          setSaveError({ label: safeLabel, message })
           onRefused()
         }),
     )
@@ -1142,13 +1188,19 @@ function renderPage(ctx: any): unknown {
    * per-field debounce exists to avoid.
    */
   const saveMany = (key: string, ops: unknown[], label: string, onRefused: () => void) => {
+    const secrets = secretsFromOps(ops as any[])
+    const hidesValues = (ops as any[]).some(op => op?.path?.[op.path.length - 1] === 'password')
+    const safeLabel = hidesValues ? `${label}（值已隐藏）` : label
     scheduleWrite(key, () =>
       writeConfig(ctx, ops)
         .then(() => {
-          note(`已保存 ${label}`)
+          setSaveError(undefined)
+          setSavedNote(`已保存 ${safeLabel}`)
         })
         .catch((error: any) => {
-          note(`保存失败 ${label}：${error?.message ?? error}`)
+          const message = redactSensitiveText(String(error?.message ?? error), secrets)
+          setSavedNote(undefined)
+          setSaveError({ label: safeLabel, message })
           onRefused()
         }),
     )
@@ -1875,6 +1927,40 @@ function renderPage(ctx: any): unknown {
     'div',
     { className: styles.root, style: S.root },
     h('p', { className: styles.lead, style: { margin: '0 0 4px', fontSize: '12px', lineHeight: '1.6', color: 'var(--dsw-alias-label-secondary)' } }, t.lead),
+    saveError === undefined
+      ? null
+      : h(
+          'div',
+          {
+            role: 'alert',
+            key: 'save-error',
+            style: {
+              display: 'flex',
+              alignItems: 'flex-start',
+              justifyContent: 'space-between',
+              gap: '10px',
+              padding: '8px 10px',
+              border: '1px solid var(--dsw-alias-state-error-primary, #f85149)',
+              borderRadius: '8px',
+              background: 'var(--dsw-alias-bg-layer-1)',
+              color: 'var(--dsw-alias-state-error-primary, #f85149)',
+              fontSize: '12px',
+              fontWeight: '500',
+              wordBreak: 'break-all',
+            },
+          },
+          h('span', null, `${t.saveFailedPrefix}${saveError.label} — ${saveError.message}`),
+          h(
+            'button',
+            {
+              className: styles.testButton,
+              style: { ...S.testButton, flex: 'none' },
+              type: 'button',
+              onClick: () => setSaveError(undefined),
+            },
+            t.close,
+          ),
+        ),
     defaultBlock,
     globalBlock,
     catalogueNotice,
@@ -1905,10 +1991,11 @@ function renderPage(ctx: any): unknown {
       h(
         'ul',
         { className: styles.diagList, style: { margin: '6px 0 0', paddingLeft: '18px' } },
-        ...(problemCount === 0 && diagnostics.length === 0
+        ...(problemCount === 0 && diagnostics.length === 0 && savedNote === undefined
           ? [h('li', { key: 'none' }, t.diagPending)]
           : [
               ...problemLines,
+              ...(savedNote === undefined ? [] : [h('li', { key: 'saved' }, savedNote)]),
               ...diagnostics.map((line, index) => h('li', { key: `d${index}` }, line)),
             ]),
       ),
@@ -1984,6 +2071,8 @@ const EN = {
   notConfigured: 'not configured',
   diagnostics: 'Connection diagnostics',
   diagPending: '(collecting…)',
+  saveFailedPrefix: 'Save failed: ',
+  close: 'Close',
 }
 
 const ZH = {
@@ -2054,6 +2143,8 @@ const ZH = {
   notConfigured: '未配置',
   diagnostics: '连接诊断',
   diagPending: '（正在收集…）',
+  saveFailedPrefix: '保存失败：',
+  close: '关闭',
 }
 
 /**
