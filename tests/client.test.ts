@@ -1411,6 +1411,62 @@ test('a target-host rule entry that can never match is flagged where it is typed
   }
 })
 
+test('the N4 host-rule matrix flags the new dead forms but keeps valid rules', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: {
+            enabled: true,
+            protocol: 'http',
+            host: '10.0.0.1',
+            port: 7890,
+            onlyHosts: 'example.com:443, *foo, foo*, https://x, x/path, [::1]:443, *., valid.example, *.ok.example, *, [::1]',
+            bypassHosts: '',
+          },
+        },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const warning = textsOf(render()).find(text => text.includes('永远匹配不上'))
+    assert.ok(warning, 'the dead entries are listed together')
+    for (const token of ['example.com:443', '*foo', 'foo*', 'https://x', 'x/path', '[::1]:443', '*.']) {
+      assert.ok(warning.includes(token), `${token} is reported`)
+    }
+    assert.ok(!warning.includes('valid.example'), 'a bare host stays unflagged')
+    assert.ok(!warning.includes('*.ok.example'), 'a leading *. rule stays unflagged')
+    assert.ok(!/(^|、)\*(、|$)/.test(warning), 'the standalone * rule stays unflagged')
+    const listed = warning.slice(warning.lastIndexOf('：') + 1).split('、')
+    assert.ok(!listed.includes('[::1]'), 'a bracketed IPv6 literal stays unflagged')
+    assert.ok(
+      warning.includes('不要带端口') && warning.includes('以 *. 开头'),
+      'the hint names ports and the allowed wildcard form',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('a dead rule is flagged but the edit still saves', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const card = cardFor(render(), 'sensenova')
+    const onlyHosts = findInputsByPlaceholder(card, 'api.example.com')[0]
+    onlyHosts.props.onChange({ target: { value: 'example.com:443 *foo' } })
+    assert.ok(textsOf(render()).some(text => text.includes('永远匹配不上')))
+    await writeSettle()
+    assert.equal(harness.writes.length, 1)
+    assert.equal(harness.writes[0].ops[0].value, 'example.com:443 *foo')
+  } finally {
+    restore()
+  }
+})
+
 test('a Host that reports no providers degrades to the empty message', async () => {
   const { mod, restore } = loadBundle(async () => ({
     ok: true,

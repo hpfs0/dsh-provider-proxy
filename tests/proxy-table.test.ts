@@ -1,7 +1,19 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { buildRouteEntry, closeTable, createProxyTable, defaultProxyProblem, normalizeDefaultProxy, normalizeRoute, proxyHostProblem, proxyUrl } from '../lib/index.js'
+import {
+  buildRouteEntry,
+  closeTable,
+  createProxyTable,
+  deadRuleEntries,
+  defaultProxyProblem,
+  hostMatches,
+  normalizeDefaultProxy,
+  normalizeRoute,
+  parseHostList,
+  proxyHostProblem,
+  proxyUrl,
+} from '../lib/index.js'
 
 test('proxyUrl assembles host, port and protocol', () => {
   assert.equal(
@@ -282,6 +294,38 @@ test('target-host rules decide proxy vs direct and fail closed', async () => {
   assert.equal(decide('x.skip.test'), 'direct', 'a *. bypass rule is a suffix match')
   assert.equal(decide(undefined), 'proxy', 'an unparsable target stays proxied (fail-closed)')
   await closeTable(entries)
+})
+
+test('the shared host-rule matrix matches the Host matcher', () => {
+  // One matrix fixes the shared parser/matcher contract. The browser imports
+  // these same functions, so a future change to either half fails here first.
+  const rules = ['api.example.com', '.internal.test', '*.skip.test', '*']
+  assert.deepEqual(parseHostList(rules.join(', ')), [
+    'api.example.com',
+    'internal.test',
+    'skip.test',
+    '*',
+  ])
+  assert.equal(hostMatches('api.example.com', rules), true)
+  assert.equal(hostMatches('x.api.example.com', rules), true)
+  assert.equal(hostMatches('internal.test', rules), true)
+  assert.equal(hostMatches('x.skip.test', rules), true)
+  assert.equal(hostMatches('anything.invalid', rules), true)
+})
+
+test('dead host-rule entries are classified from the raw token', () => {
+  const dead = deadRuleEntries(
+    'example.com:443, *foo, foo*, https://x, x/path, [::1]:443, *., good.example, *.ok.example, *, [::1]',
+  )
+  assert.deepEqual(dead, [
+    'example.com:443',
+    '*foo',
+    'foo*',
+    'https://x',
+    'x/path',
+    '[::1]:443',
+    '*.',
+  ])
 })
 
 test('without rules every target is proxied', async () => {

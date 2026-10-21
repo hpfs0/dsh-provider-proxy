@@ -21,6 +21,7 @@
 // at materialization. The binding is what the component reads; importing it for
 // side effects only would leave `styles` undefined at render time.
 import styles from './client.css'
+import { deadRuleEntries } from './host-rules.js'
 import { defaultProxyProblem, proxyHostProblem } from './proxy-address.js'
 
 type Protocol = 'http' | 'https' | 'socks5'
@@ -484,25 +485,6 @@ function touchCatalogPolling(): void {
 }
 
 const byName = (a: ProviderRow, b: ProviderRow): number => a.name.localeCompare(b.name)
-
-/**
- * Rule entries that can never match anything.
- *
- * The Host's matcher compares a lower-cased target HOSTNAME against entries
- * (suffix match, `*` for all) — so an entry carrying a scheme (`https://…`) or
- * a path (`example.com/v1`) never matches, and the rule silently does the
- * opposite of what the user typed: a malformed `onlyHosts` entry makes
- * fail-closed send traffic DIRECT while the user believes it is proxied. The
- * Host cannot warn about this — refusing the whole route over a rule typo
- * would break proxying that still works — so the page flags the value exactly
- * where it is typed, from the merged view (draft included).
- */
-function deadRuleEntries(raw: string): string[] {
-  return raw
-    .split(/[,\s]+/)
-    .map(entry => entry.trim())
-    .filter(entry => /^[a-z][a-z0-9+.-]*:\/\//i.test(entry) || entry.includes('/'))
-}
 
 function view(route: Partial<RouteValue> | undefined): RouteValue {
   return {
@@ -2060,7 +2042,7 @@ const EN = {
   onlyHostsHint: 'Comma/space separated; when set, only requests to these hosts are proxied (suffix match, * for all).',
   bypassHosts: 'Bypass',
   bypassHostsHint: 'Comma/space separated; requests to these hosts go direct, taking priority.',
-  ruleDeadHint: 'These entries never match — rules take host names only, without scheme or path: ',
+  ruleDeadHint: 'These entries never match — use bare host names (no port, scheme or path); a wildcard must be `*` or start with `*.`: ',
   testTarget: 'Self-check target',
   testTargetHint: 'Empty uses the top-level testUrl; when set, this card\'s Test requests this URL instead — point it at a real upstream to verify the end-to-end path.',
   socks5Hint: 'SOCKS5 tunnels the connection; the proxy resolves the target host name.',
@@ -2132,7 +2114,7 @@ const ZH = {
   onlyHostsHint: '逗号或空格分隔；非空时只有匹配这些主机的请求走代理（后缀匹配，* 表示全部）。',
   bypassHosts: '直连',
   bypassHostsHint: '逗号或空格分隔；匹配这些主机的请求直连，优先于上一项。',
-  ruleDeadHint: '以下条目永远匹配不上——规则只认主机名，不要带协议前缀或路径：',
+  ruleDeadHint: '以下条目永远匹配不上——规则只认主机名（不要带端口、协议前缀或路径），通配符只能是单独的 * 或以 *. 开头：',
   testTarget: '自检目标',
   testTargetHint: '留空用顶层 testUrl；填写后该卡片的「测试」改为请求这个地址，可拿真实上游验证端到端路径。',
   socks5Hint: 'SOCKS5 会建立隧道，目标域名由代理端解析。',

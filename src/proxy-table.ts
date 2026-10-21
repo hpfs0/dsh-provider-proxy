@@ -22,6 +22,7 @@ import {
   type DefaultProxyValue,
   type ProviderProxyRouteValue,
 } from './config.js'
+import { hostMatches, parseHostList } from './host-rules.js'
 import { defaultProxyProblem } from './proxy-address.js'
 import type { DispatcherLike } from './fetch-router.js'
 
@@ -101,35 +102,6 @@ function createDispatcher(
     return new Socks5ProxyAgent(url, auth) as unknown as DispatcherLike
   }
   return new ProxyAgent({ uri: url }) as unknown as DispatcherLike
-}
-
-/**
- * Split a host-rule string into matchable entries.
- *
- * Entries are separated by commas or whitespace. A leading `.` or `*.` is
- * dropped — both spellings mean the same suffix match as a bare host — and the
- * whole string was already lower-cased by `normalizeRoute`, so matching is
- * case-insensitive on both sides.
- */
-function parseHostList(raw: string): string[] {
-  return raw
-    .split(/[,\s]+/)
-    .map(entry => entry.trim().replace(/^\*?\./, ''))
-    .filter(entry => entry.length > 0)
-}
-
-/**
- * Whether a host is covered by one rule list.
- *
- * `*` matches everything; otherwise a rule matches the host itself or any
- * subdomain of it (`example.com` covers `api.example.com`).
- */
-function hostMatches(host: string, rules: readonly string[]): boolean {
-  for (const rule of rules) {
-    if (rule === '*') return true
-    if (host === rule || host.endsWith(`.${rule}`)) return true
-  }
-  return false
 }
 
 /**
