@@ -450,7 +450,9 @@ export function apply(ctx: any, config?: ProxyConfig): void {
         viaProxy,
         ...targetField,
         kind: 'target',
-        error: `目标返回 HTTP ${response.status}（5xx，上游或链路异常）：${displayTarget}`,
+        // The status travels in its own field; the reason text must not repeat
+        // it, or the page shows the same code twice in different colours.
+        error: `目标返回 5xx（上游或链路异常）：${displayTarget}`,
       }
     } catch (error) {
       return {
@@ -474,12 +476,27 @@ export function apply(ctx: any, config?: ProxyConfig): void {
    * the raw config's value: the key must be built from the SAME resolution the
    * check uses, or the two can disagree about what the next request would try.
    */
-  const selfCheckTargets = (provider: string, testTarget: string | undefined): string[] => {
+  /**
+   * The check's targets, and WHERE they came from.
+   *
+   * The target is NOT always the top-level `testUrl`: a route's own
+   * `testTarget` wins, then the provider's REAL upstream, and only a provider
+   * that publishes none falls back to `testUrl`. Without this the page cannot
+   * explain why editing `testUrl` changed one card and not another.
+   *
+   * The upstream is read ONCE: reading it twice could disagree if the settings
+   * service moved in between, and the target list and the reported source must
+   * never contradict each other.
+   */
+  const selfCheckTargetsOf = (
+    provider: string,
+    testTarget: string | undefined,
+  ): { targets: string[]; source: 'route' | 'upstream' | 'testUrl' } => {
     const own = (testTarget ?? '').trim()
-    if (own.length > 0) return [own]
+    if (own.length > 0) return { targets: [own], source: 'route' }
     const upstream = upstreamOf(provider)
-    if (upstream !== undefined) return [upstream]
-    return plainTestUrls()
+    if (upstream !== undefined) return { targets: [upstream], source: 'upstream' }
+    return { targets: plainTestUrls(), source: 'testUrl' }
   }
 
   /**
@@ -516,7 +533,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
       raw.onlyHosts ?? '',
       raw.bypassHosts ?? '',
       plainLocalDirect(config),
-      selfCheckTargets(provider, raw.testTarget),
+      selfCheckTargetsOf(provider, raw.testTarget).targets,
     ])
   }
 
@@ -558,15 +575,18 @@ export function apply(ctx: any, config?: ProxyConfig): void {
     }
     try {
       let last: Record<string, unknown> | undefined
-      for (const target of selfCheckTargets(provider, route.testTarget)) {
+      const { targets, source } = selfCheckTargetsOf(provider, route.testTarget)
+      for (const target of targets) {
         const outcome = await probeTarget(target, route)
-        if (outcome.ok === true) return outcome
+        if (outcome.ok === true) return { ...outcome, targetSource: source }
         last = outcome
         // 407 is about the PROXY, not the target: another candidate would ask the
         // same question and get the same answer.
         if (outcome.kind === 'proxy-auth') break
       }
-      return last ?? { ok: false, kind: 'target', target: '', error: '没有可用的自检目标' }
+      return last === undefined
+        ? { ok: false, kind: 'target', target: '', targetSource: source, error: '没有可用的自检目标' }
+        : { ...last, targetSource: source }
     } finally {
       // A dispatcher built for one check must not outlive it: the table owns the
       // long-lived ones, and this one was never in the table to begin with.

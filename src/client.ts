@@ -268,6 +268,12 @@ function testResultFrom(body: any, strings: Record<string, string>): Record<stri
     status:
       typeof body?.status === 'number' && Number.isInteger(body.status) ? body.status : undefined,
     target: typeof body?.target === 'string' && body.target.length > 0 ? body.target : undefined,
+    targetSource:
+      body?.targetSource === 'route' || body?.targetSource === 'upstream'
+        ? body.targetSource
+        : body?.targetSource === 'testUrl'
+          ? 'testUrl'
+          : undefined,
     cached: body?.cached === true,
     // The Host probes a target the way routing would: a loopback/private upstream
     // (or a bypassHosts match) is reached DIRECT, not through the proxy. The card
@@ -312,6 +318,30 @@ function isAbsoluteHttpUrl(value: string): boolean {
     return (url.protocol === 'http:' || url.protocol === 'https:') && url.hostname.length > 0
   } catch {
     return false
+  }
+}
+
+/**
+ * Where the check's target came from, in the card's own words.
+ *
+ * The target is NOT always the top-level `testUrl`: a route's own
+ * `testTarget` wins, then the provider's REAL upstream, and only a provider
+ * that publishes none falls back to `testUrl`. Saying so is what explains why
+ * editing `testUrl` changed one card and not another.
+ */
+function targetSourceSuffix(
+  result: { targetSource?: unknown },
+  t: Record<string, string>,
+): string {
+  switch (result.targetSource) {
+    case 'route':
+      return t.targetSourceRoute
+    case 'upstream':
+      return t.targetSourceUpstream
+    case 'testUrl':
+      return t.targetSourceTestUrl
+    default:
+      return ''
   }
 }
 
@@ -736,6 +766,14 @@ const S = {
     cursor: 'pointer',
   },
   testResult: {
+    // A flex row so the target can drop onto its own line: the container was a
+    // plain span, where `flexBasis: 100%` does nothing and the target ran into
+    // the "cached" label.
+    display: 'flex',
+    flexWrap: 'wrap',
+    alignItems: 'baseline',
+    columnGap: '6px',
+    rowGap: '2px',
     fontSize: '11px',
     color: 'var(--dsw-alias-label-secondary)',
     wordBreak: 'break-all',
@@ -1828,24 +1866,35 @@ function renderPage(ctx: any): unknown {
                 ),
                 result?.pending === false
                   ? h(
-                      'span',
+                      'div',
                       { style: S.testResult },
                       result.ok === true
                         ? [
-                            // Only the latency carries the band colour; the exit IP
-                            // stays in the secondary label colour.
+                            // The band colour belongs to the LATENCY alone. The
+                            // status sits beside it in the plain label colour:
+                            // colouring the whole line made a successful check
+                            // over 1500 ms read as a failure.
                             h(
                               'span',
                               { key: 'lat', style: { color: latencyColor(result.ms) } },
-                              `✓${
-                                typeof result.status === 'number'
-                                  ? ` HTTP ${result.status}`
-                                  : ''
-                              } · ${typeof result.ms === 'number' ? result.ms : '—'} ms`,
+                              `✓ ${typeof result.ms === 'number' ? result.ms : '—'} ms`,
                             ),
-                            result.ip === undefined ? null : ` · ${t.exitIpLabel}${result.ip}`,
-                            result.direct === true ? ` · ${t.directLabel}` : null,
-                            result.cached === true ? ` · ${t.cachedLabel}` : null,
+                            typeof result.status === 'number'
+                              ? h(
+                                  'span',
+                                  { key: 'status' },
+                                  `HTTP ${result.status}`,
+                                )
+                              : null,
+                            result.ip === undefined
+                              ? null
+                              : h('span', { key: 'ip' }, `${t.exitIpLabel}${result.ip}`),
+                            result.direct === true
+                              ? h('span', { key: 'direct' }, t.directLabel)
+                              : null,
+                            result.cached === true
+                              ? h('span', { key: 'cached' }, t.cachedLabel)
+                              : null,
                             result.target === undefined
                               ? null
                               : h(
@@ -1859,11 +1908,14 @@ function renderPage(ctx: any): unknown {
                                       wordBreak: 'break-all',
                                     },
                                   },
-                                  `${t.testTargetLabel}${result.target}`,
+                                  `${t.testTargetLabel}${result.target}${targetSourceSuffix(result, t)}`,
                                 ),
                           ]
                         : [
                             h('span', { key: 'err', style: S.testFailure }, `✗ ${result.error}`),
+                            typeof result.status === 'number'
+                              ? h('span', { key: 'status' }, `HTTP ${result.status}`)
+                              : null,
                             result.target === undefined
                               ? null
                               : h(
@@ -1877,7 +1929,7 @@ function renderPage(ctx: any): unknown {
                                       wordBreak: 'break-all',
                                     },
                                   },
-                                  `${t.testTargetLabel}${result.target}`,
+                                  `${t.testTargetLabel}${result.target}${targetSourceSuffix(result, t)}`,
                                 ),
                           ],
                     )
@@ -2069,6 +2121,9 @@ const EN = {
   directLabel: 'direct (not through the proxy)',
   cachedLabel: 'cached',
   testTargetLabel: 'Target: ',
+  targetSourceRoute: " (this card's own target)",
+  targetSourceUpstream: " (this provider's real upstream)",
+  targetSourceTestUrl: ' (global self-check URL)',
   globalTitle: 'Global settings (advanced)',
   globalLead: 'These fields are saved with the plugin rather than per provider. Leave testUrl empty to use the built-in default; comma/space separated candidates are tried in order and only the first 5 are used. localDirect is on by default; turn it off only when the proxy itself is a loopback or private target.',
   testUrl: 'Self-check URL',
@@ -2143,6 +2198,9 @@ const ZH = {
   directLabel: '直连（未经过代理）',
   cachedLabel: '缓存',
   testTargetLabel: '目标 ',
+  targetSourceRoute: '（本卡片自检目标）',
+  targetSourceUpstream: '（该 provider 的真实上游）',
+  targetSourceTestUrl: '（全局自检地址）',
   globalTitle: '全局设置（高级）',
   globalLead: '这里的两项属于插件全局设置。testUrl 留空时 Host 使用内置默认值；多个候选用逗号或空格分隔，按顺序回退，只有前 5 个生效。localDirect 默认开启；只有代理本身就是本机或内网目标时才需要关闭。',
   testUrl: '自检地址',

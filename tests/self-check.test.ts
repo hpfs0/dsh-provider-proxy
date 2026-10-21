@@ -439,6 +439,73 @@ test('a network failure never echoes the raw target', async () => {
   assert.ok(!serialized.includes('fragment-secret'), 'the network error does not echo the fragment')
 })
 
+test('the result says which target source was used', async () => {
+  // A provider that publishes a REAL upstream does not use the top-level
+  // `testUrl` at all — the page has to be able to say so, or editing `testUrl`
+  // looks broken for that card.
+  const proxy = await startEchoProxy()
+  try {
+    const { routes } = mountHost(
+      {
+        providers: {
+          get: () => ({
+            p: {
+              enabled: true,
+              protocol: 'http',
+              host: '127.0.0.1',
+              port: proxy.port,
+            },
+          }),
+        },
+        testUrl: 'http://echo.invalid/ip',
+      },
+      publishedUpstream(),
+    )
+    const { body } = await selfCheck(routes, { provider: 'p' })
+    assert.equal(body.targetSource, 'upstream', 'the real upstream wins over `testUrl`')
+    assert.equal(body.target, 'http://echo.invalid/upstream')
+  } finally {
+    await proxy.close()
+  }
+})
+
+test('a provider without an upstream falls back to the global URL', async () => {
+  const proxy = await startEchoProxy()
+  try {
+    const { routes } = mountHost(oneRoute(proxy.port))
+    const { body } = await selfCheck(routes, { provider: 'p' })
+    assert.equal(body.targetSource, 'testUrl')
+    assert.equal(body.target, 'http://echo.invalid/ip')
+  } finally {
+    await proxy.close()
+  }
+})
+
+test("a route's own testTarget is reported as the source", async () => {
+  const proxy = await startEchoProxy()
+  try {
+    const { routes } = mountHost({
+      providers: {
+        get: () => ({
+          p: {
+            enabled: true,
+            protocol: 'http',
+            host: '127.0.0.1',
+            port: proxy.port,
+            testTarget: 'http://own.invalid/target',
+          },
+        }),
+      },
+      testUrl: 'http://echo.invalid/ip',
+    })
+    const { body } = await selfCheck(routes, { provider: 'p' })
+    assert.equal(body.targetSource, 'route')
+    assert.equal(body.target, 'http://own.invalid/target')
+  } finally {
+    await proxy.close()
+  }
+})
+
 /** A directory entry plus the settings section an llm-pi-ai route would publish. */
 const publishedUpstream = () => ({
   configurable: [
@@ -567,7 +634,11 @@ test('a 5xx reads as a broken path, not a success', async () => {
     const { body } = await selfCheck(routes, { provider: 'p' })
     assert.equal(body.ok, false)
     assert.equal(body.status, 502)
-    assert.match(body.error, /502/, 'a bare "测试失败" points at nothing; the status must be named')
+    assert.match(body.error, /5xx/, 'a bare "测试失败" points at nothing; the reason must be named')
+    assert.ok(
+      !body.error.includes('502'),
+      'the status travels in its own field, so the reason does not repeat it',
+    )
     assert.equal(body.target, 'http://echo.invalid/ip')
   } finally {
     await proxy.close()

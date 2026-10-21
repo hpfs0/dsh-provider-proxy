@@ -1128,7 +1128,14 @@ test('N2: a check names its HTTP status, target and cached state', async () => {
     findButton(cardFor(render(), 'sensenova')).props.onClick()
     await settle()
     const texts = textsOf(cardFor(render(), 'sensenova'))
-    assert.ok(texts.includes('✓ HTTP 401 · 120 ms'), 'the status explains where the check reached')
+    assert.ok(
+      texts.some(text => text.includes('✓') && text.includes('120 ms')),
+      'the latency is shown with the success mark',
+    )
+    assert.ok(
+      texts.includes('HTTP 401'),
+      'the status explains where the check reached',
+    )
     assert.ok(
       texts.some(text => text.includes('缓存')),
       'a cached answer is labelled',
@@ -1136,6 +1143,113 @@ test('N2: a check names its HTTP status, target and cached state', async () => {
     assert.ok(
       texts.some(text => text.includes('目标 https://api.example.com/v1')),
       'the sanitized target is visible',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('a slow but successful check is not painted like a failure', async () => {
+  // The band colour belongs to the latency ALONE. Putting `HTTP 200` inside the
+  // same span made a successful 2646 ms check render entirely in the error
+  // colour, so it read as a failure.
+  const { mod, restore } = loadBundle(async url => ({
+    ok: true,
+    status: 200,
+    json: async () =>
+      String(url).includes('/test')
+        ? { ok: true, ms: 2646, status: 200, target: 'http://www.google.com/' }
+        : { providers: [{ id: 'sensenova', name: 'SenseNova', live: true }] },
+  }))
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    findButton(cardFor(render(), 'sensenova')).props.onClick()
+    await settle()
+    const card = cardFor(render(), 'sensenova')
+    const texts = textsOf(card)
+    assert.ok(
+      texts.some(text => text.includes('✓') && text.includes('2646 ms')),
+      'the success mark and the latency are both shown',
+    )
+    assert.ok(
+      texts.includes('HTTP 200'),
+      'the status is shown, but as its own element',
+    )
+    assert.ok(
+      !texts.some(text => text.includes('✗')),
+      'a successful check never shows the failure mark',
+    )
+    // The status must not inherit the latency's error colour.
+    const statusNode = (() => {
+      let found
+      const walk = node => {
+        if (found !== undefined || node === null || typeof node !== 'object') return
+        if (Array.isArray(node)) return node.forEach(walk)
+        if (node.children) {
+          const inner = textsOf(node)
+          if (inner.length === 1 && inner[0] === 'HTTP 200') found = node
+        }
+        if (node.children) walk(node.children)
+      }
+      walk(card)
+      return found
+    })()
+    assert.ok(statusNode, 'the status is a separate element')
+    assert.ok(
+      !String(statusNode.props?.style?.color ?? '').includes('state-error'),
+      'the status keeps the neutral label colour, not the error colour',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('the target line explains where the target came from', async () => {
+  const { mod, restore } = loadBundle(async url => ({
+    ok: true,
+    status: 200,
+    json: async () =>
+      String(url).includes('/test')
+        ? { ok: true, ms: 41, status: 200, target: 'http://www.baidu.com/', targetSource: 'upstream' }
+        : { providers: [{ id: 'sensenova', name: 'SenseNova', live: true }] },
+  }))
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    findButton(cardFor(render(), 'sensenova')).props.onClick()
+    await settle()
+    const texts = textsOf(cardFor(render(), 'sensenova'))
+    assert.ok(
+      texts.some(text => text.includes('http://www.baidu.com/') && text.includes('真实上游')),
+      'a provider with a real upstream says so, so the global testUrl is not a mystery',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('a provider without a real upstream says it used the global URL', async () => {
+  const { mod, restore } = loadBundle(async url => ({
+    ok: true,
+    status: 200,
+    json: async () =>
+      String(url).includes('/test')
+        ? { ok: true, ms: 41, status: 200, target: 'http://www.google.com/', targetSource: 'testUrl' }
+        : { providers: [{ id: 'sensenova', name: 'SenseNova', live: true }] },
+  }))
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    findButton(cardFor(render(), 'sensenova')).props.onClick()
+    await settle()
+    const texts = textsOf(cardFor(render(), 'sensenova'))
+    assert.ok(
+      texts.some(text => text.includes('http://www.google.com/') && text.includes('全局自检地址')),
+      'the card says it used the global self-check URL',
     )
   } finally {
     restore()
@@ -1189,8 +1303,17 @@ test('an old payload without status or target still renders', async () => {
     findButton(cardFor(render(), 'sensenova')).props.onClick()
     await settle()
     const tree = JSON.stringify(cardFor(render(), 'sensenova'))
-    assert.ok(tree.includes('✓ · 50 ms'), 'legacy payloads omit status without breaking')
+    assert.ok(tree.includes('✓ 50 ms'), 'legacy payloads omit status without breaking')
     assert.ok(!tree.includes('目标 undefined'), 'a missing target is not rendered')
+    // The protocol dropdown carries "HTTP" too, so only the RESULT row may be
+    // checked for a status.
+    const resultText = textsOf(cardFor(render(), 'sensenova')).filter(text =>
+      text.includes('ms'),
+    )
+    assert.ok(
+      resultText.every(text => !text.includes('HTTP')),
+      'a payload without a status shows no status',
+    )
   } finally {
     restore()
   }
