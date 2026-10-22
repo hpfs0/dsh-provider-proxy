@@ -158,7 +158,69 @@ export function apply(ctx: any, config?: ProxyConfig): void {
    * stale value — and it is marked `cached` so a caller can tell.
    */
   const SELF_CHECK_COOLDOWN_MS = 3_000
-  const lastChecks = new Map<string, { at: number; result: Record<string, unknown> }>()
+  const MAX_CHECK_ENTRIES_PER_PROVIDER = 8
+  const MAX_CHECK_PROVIDERS = 64
+  const lastChecks = new Map<string, Map<string, { at: number; result: Record<string, unknown> }>>()
+  /** Cache key without its provider id, so the inner map can be indexed by provider. */
+  const checkKeyOf = (provider: string, key: string): string => key.slice(provider.length)
+
+  const pruneCheckCache = (now = Date.now()): void => {
+    for (const [provider, entries] of lastChecks) {
+      for (const [key, entry] of entries) {
+        if (now - entry.at >= SELF_CHECK_COOLDOWN_MS) entries.delete(key)
+      }
+      if (entries.size === 0) lastChecks.delete(provider)
+    }
+    while (lastChecks.size > MAX_CHECK_PROVIDERS) {
+      let oldestProvider: string | undefined
+      let oldestAt = Infinity
+      for (const [provider, entries] of lastChecks) {
+        let latest = -Infinity
+        for (const entry of entries.values()) latest = Math.max(latest, entry.at)
+        if (latest < oldestAt) {
+          oldestAt = latest
+          oldestProvider = provider
+        }
+      }
+      if (oldestProvider === undefined) break
+      lastChecks.delete(oldestProvider)
+    }
+  }
+
+  const rememberCheck = (
+    provider: string,
+    key: string,
+    result: Record<string, unknown>,
+  ): void => {
+    pruneCheckCache()
+    let entries = lastChecks.get(provider)
+    if (entries === undefined) {
+      entries = new Map()
+      lastChecks.set(provider, entries)
+    }
+    entries.set(checkKeyOf(provider, key), { at: Date.now(), result })
+    while (entries.size > MAX_CHECK_ENTRIES_PER_PROVIDER) {
+      let oldestKey: string | undefined
+      let oldestAt = Infinity
+      for (const [candidate, entry] of entries) {
+        if (entry.at < oldestAt) {
+          oldestAt = entry.at
+          oldestKey = candidate
+        }
+      }
+      if (oldestKey === undefined) break
+      entries.delete(oldestKey)
+    }
+    pruneCheckCache()
+  }
+
+  /** Drop both completed and in-flight checks for one route identity. */
+  const forgetChecks = (provider: string): void => {
+    lastChecks.delete(provider)
+    for (const key of [...selfChecks.keys()]) {
+      if (key.startsWith(`${provider}\u0000`)) selfChecks.delete(key)
+    }
+  }
 
   /**
    * Read `testUrl`, which is Volatile under the Loader and therefore needs
@@ -638,6 +700,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
       if (configured.has(provider)) continue
       routeStates.delete(provider)
       lastUse.delete(provider)
+      forgetChecks(provider)
     }
 
     for (const [provider, raw] of Object.entries(providers)) {
@@ -654,9 +717,13 @@ export function apply(ctx: any, config?: ProxyConfig): void {
         enabled: raw?.enabled === true,
       })
       const token = decision.token === 'new' ? nextRouteToken++ : routeStates.get(provider)!.token
-      if (decision.clearLastUse) lastUse.delete(provider)
+      if (decision.clearLastUse) {
+        lastUse.delete(provider)
+        forgetChecks(provider)
+      }
       routeStates.set(provider, { fingerprint, enabled: raw?.enabled === true, token })
     }
+    pruneCheckCache()
     // Retire the previous table only after the new one is live, so an in-flight
     // stream keeps a dispatcher that still works.
     void closeTable(previous)
@@ -831,16 +898,22 @@ export function apply(ctx: any, config?: ProxyConfig): void {
               // configuration. Without this, a user who tests, sees a failure,
               // fixes the port, and re-tests within the cooldown would be shown
               // the pre-fix result and think the fix did nothing.
-              const key = selfCheckKey(provider)
+              const key = `${provider}\u0000${selfCheckKey(provider)}`
               let pending = selfChecks.get(key)
               if (pending === undefined) {
-                const last = lastChecks.get(key)
+                pruneCheckCache()
+                const last = lastChecks.get(provider)?.get(checkKeyOf(provider, key))
                 if (last !== undefined && Date.now() - last.at < SELF_CHECK_COOLDOWN_MS) {
                   send(200, { ...last.result, cached: true })
                   return
                 }
+                const checkToken = routeStates.get(provider)?.token
                 pending = runSelfCheck(provider).then(result => {
-                  lastChecks.set(key, { at: Date.now(), result })
+                  // A provider deleted while its check was in flight must not
+                  // resurrect a cache entry under the same id.
+                  if (checkToken !== undefined && routeStates.get(provider)?.token === checkToken) {
+                    rememberCheck(provider, key, result)
+                  }
                   return result
                 })
                 selfChecks.set(key, pending)
@@ -960,12 +1033,38 @@ export function apply(ctx: any, config?: ProxyConfig): void {
       problems: Object.fromEntries(problems),
       hits: Object.fromEntries(hits),
       lastUse: Object.fromEntries(lastUse),
+      selfCheckCache: (() => {
+        let expiredEntries = 0
+        let maxPerProvider = 0
+        let totalEntries = 0
+        for (const entries of lastChecks.values()) {
+          totalEntries += entries.size
+          maxPerProvider = Math.max(maxPerProvider, entries.size)
+          for (const entry of entries.values()) {
+            if (Date.now() - entry.at >= SELF_CHECK_COOLDOWN_MS) expiredEntries += 1
+          }
+        }
+        return {
+          providers: lastChecks.size,
+          pending: selfChecks.size,
+          expiredEntries,
+          totalEntries,
+          maxPerProvider,
+        }
+      })(),
     }),
   })
 }
 
 export { acquireFetchRouter } from './fetch-router.js'
-export { buildRouteEntry, createProxyTable, closeTable, proxyUrl, routeFingerprint, routeStateDecision } from './proxy-table.js'
+export {
+  buildRouteEntry,
+  createProxyTable,
+  closeTable,
+  proxyUrl,
+  routeFingerprint,
+  routeStateDecision,
+} from './proxy-table.js'
 export { Config, ProviderProxyRoute, normalizeRoute, normalizeDefaultProxy, PROTOCOLS } from './config.js'
 export { defaultProxyProblem, proxyHostProblem } from './proxy-address.js'
 export { deadRuleEntries, hostMatches, hostRuleProblem, parseHostList, splitHostRules } from './host-rules.js'

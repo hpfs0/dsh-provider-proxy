@@ -56,7 +56,7 @@ function mountHost(config, extras = {}) {
     return () => {}
   }
   apply(ctx, config)
-  return { routes }
+  return { routes, ctx }
 }
 
 /** POST the self-check endpoint and resolve its JSON reply. */
@@ -929,6 +929,107 @@ test('the cooldown still caches an UNCHANGED configuration', async () => {
     assert.equal(second.body.cached, true, 'an unchanged configuration is still cached')
     assert.equal(second.body.exitIp, first.body.exitIp)
     assert.equal(proxy.seen.length, 1, 'the cached answer cost no outbound request')
+  } finally {
+    await proxy.close()
+  }
+})
+
+// ---- the self-check cache is bounded and provider-scoped ----
+
+test('the self-check cache is exposed only as bounded diagnostics', async () => {
+  const proxy = await startEchoProxy()
+  try {
+    const { routes, ctx } = mountHost(oneRoute(proxy.port))
+    await selfCheck(routes, { provider: 'p' })
+    const stats = ctx.providerProxyState.selfCheckCache
+    assert.ok(stats, 'the Host must expose a cache statistics seam')
+    assert.equal(stats.providers, 1)
+    assert.equal(stats.totalEntries, 1)
+    assert.equal(stats.maxPerProvider, 1)
+    assert.equal(stats.pending, 0)
+    assert.equal(stats.expiredEntries, 0)
+    assert.ok(!JSON.stringify(stats).includes('echo.invalid'), 'raw keys must not leak')
+    assert.ok(!JSON.stringify(stats).includes('203.0.113.9'), 'results must not leak')
+  } finally {
+    await proxy.close()
+  }
+})
+
+test('the self-check cache keeps at most eight entries per provider', async () => {
+  const proxy = await startScriptedProxy(() => ({ status: 200, body: '{"ip":"203.0.113.9"}' }))
+  try {
+    const providers = {
+      p: { enabled: false, protocol: 'http', host: '127.0.0.1', port: proxy.port },
+    }
+    const { routes, ctx } = mountHost({
+      providers: { get: () => providers },
+      testUrl: 'http://first.invalid/ip',
+    })
+    for (let i = 0; i < 10; i += 1) {
+      providers.p.testTarget = `http://target-${i}.invalid/ip`
+      await selfCheck(routes, { provider: 'p' })
+    }
+    const stats = ctx.providerProxyState.selfCheckCache
+    assert.equal(stats.providers, 1)
+    assert.ok(stats.maxPerProvider <= 8, 'one provider cannot accumulate an unbounded key set')
+  } finally {
+    await proxy.close()
+  }
+})
+
+test('the self-check cache is globally capped and clears removed providers', async () => {
+  const proxy = await startEchoProxy()
+  try {
+    const providers = {}
+    for (let i = 0; i < 70; i += 1) {
+      providers[`p${i}`] = {
+        enabled: false,
+        protocol: 'http',
+        host: '127.0.0.1',
+        port: proxy.port,
+        testTarget: `http://target-${i}.invalid/ip`,
+      }
+    }
+    const { routes, ctx } = mountHost({
+      providers: { get: () => providers },
+      testUrl: 'http://echo.invalid/ip',
+    })
+    for (let i = 0; i < 70; i += 1) {
+      await selfCheck(routes, { provider: `p${i}` })
+    }
+    let stats = ctx.providerProxyState.selfCheckCache
+    assert.ok(stats.providers <= 64, 'the outer provider map must be bounded too')
+
+    delete providers.p69
+    await ctx.emit('loader/volatile-update', [['providers']])
+    await new Promise(resolve => setImmediate(resolve))
+    stats = ctx.providerProxyState.selfCheckCache
+    assert.ok(stats.providers <= 63, 'a deleted provider loses its cached checks')
+  } finally {
+    await proxy.close()
+  }
+})
+
+test('an in-flight check from a replaced route cannot populate the new route cache', async () => {
+  const proxy = await startEchoProxy(50)
+  try {
+    const providers = {
+      p: { enabled: true, protocol: 'http', host: '127.0.0.1', port: proxy.port },
+    }
+    const { routes, ctx } = mountHost({
+      providers: { get: () => providers },
+      testUrl: 'http://echo.invalid/ip',
+    })
+    const pending = selfCheck(routes, { provider: 'p' })
+    await new Promise(resolve => setTimeout(resolve, 10))
+    providers.p.port = proxy.port + 1
+    await ctx.emit('loader/volatile-update', [['providers']])
+    await pending
+    assert.equal(
+      ctx.providerProxyState.selfCheckCache.totalEntries,
+      0,
+      'the old check must not seed the cache for the new route token',
+    )
   } finally {
     await proxy.close()
   }
