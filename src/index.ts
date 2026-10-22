@@ -9,7 +9,15 @@
 import { fetch as undiciFetch } from 'undici'
 
 import { acquireFetchRouter } from './fetch-router.js'
-import { buildRouteEntry, closeTable, createProxyTable, type RouteEntry } from './proxy-table.js'
+import {
+  buildRouteEntry,
+  closeTable,
+  createProxyTable,
+  routeFingerprint,
+  routeStateDecision,
+  type RouteEntry,
+  type RouteState,
+} from './proxy-table.js'
 import {
   normalizeDefaultProxy,
   type DefaultProxyValue,
@@ -96,6 +104,16 @@ export function apply(ctx: any, config?: ProxyConfig): void {
   // Counted at request initiation — see fetch-router.ts.
   const hits = new Map<string, number>()
   /**
+   * The immutable identity of the route each request was bound to.
+   *
+   * `lastUse` answers "does THIS configuration still work", so an in-flight
+   * request from an older route must never write to the current one. Tokens are
+   * global and never reused, which also makes delete-and-re-add distinguishable
+   * from an unchanged provider.
+   */
+  const routeStates = new Map<string, RouteState>()
+  let nextRouteToken = 1
+  /**
    * Per-provider liveness. `startedAt` is when the last proxied request BEGAN;
    * `at`/`ok`/`code` describe the last request that FINISHED. They are kept apart
    * because LLM calls are concurrent: a single `at` shared by both would pair one
@@ -103,13 +121,15 @@ export function apply(ctx: any, config?: ProxyConfig): void {
    * that belongs to a call which in fact succeeded.
    */
   const lastUse = new Map<string, { startedAt: number; at?: number; ok?: boolean; code?: string }>()
-  const bump = (provider: string): void => {
+  const bump = (provider: string, token: number): void => {
     hits.set(provider, (hits.get(provider) ?? 0) + 1)
+    if (routeStates.get(provider)?.token !== token) return
     // Only the START moves here. The outcome fields are written once a request
     // settles, so an in-flight call cannot overwrite the last COMPLETED result.
     lastUse.set(provider, { ...lastUse.get(provider), startedAt: Date.now() })
   }
-  const settle = (provider: string) => (ok: boolean, detail: unknown): void => {
+  const settle = (provider: string, token: number) => (ok: boolean, detail: unknown): void => {
+    if (routeStates.get(provider)?.token !== token) return
     const previous = lastUse.get(provider)
     lastUse.set(provider, {
       startedAt: previous?.startedAt ?? Date.now(),
@@ -602,20 +622,65 @@ export function apply(ctx: any, config?: ProxyConfig): void {
     // A context without a logger still works; the diagnostics getter remains.
   }
 
-  const rebuild = async (): Promise<void> => {
-    const next = createProxyTable(plainProviders(config), {
-      defaultProxy: plainDefaultProxy(config),
-      localDirect: plainLocalDirect(config),
-    })
+  const rebuild = (): Promise<void> => {
+    // One snapshot feeds the table, the route-state diff and every cleanup.
+    // Reading the Volatile fields more than once could mix two settings writes.
+    const providers = plainProviders(config)
+    const defaultProxy = plainDefaultProxy(config)
+    const localDirect = plainLocalDirect(config)
+    const next = createProxyTable(providers, { defaultProxy, localDirect })
     const previous = current
     current = next.entries
     problems = next.problems
+
+    const configured = new Set(Object.keys(providers))
+    for (const provider of [...routeStates.keys()]) {
+      if (configured.has(provider)) continue
+      routeStates.delete(provider)
+      lastUse.delete(provider)
+    }
+
+    for (const [provider, raw] of Object.entries(providers)) {
+      const effective =
+        raw?.useDefault === true
+          ? { ...raw, ...defaultProxy }
+          : raw
+      const fingerprint = routeFingerprint({
+        ...effective,
+        localDirect,
+      })
+      const decision = routeStateDecision(routeStates.get(provider), {
+        fingerprint,
+        enabled: raw?.enabled === true,
+      })
+      const token = decision.token === 'new' ? nextRouteToken++ : routeStates.get(provider)!.token
+      if (decision.clearLastUse) lastUse.delete(provider)
+      routeStates.set(provider, { fingerprint, enabled: raw?.enabled === true, token })
+    }
     // Retire the previous table only after the new one is live, so an in-flight
     // stream keeps a dispatcher that still works.
     void closeTable(previous)
+    return Promise.resolve()
   }
 
-  const ready = rebuild()
+  let rebuildQueue = Promise.resolve()
+  const enqueueRebuild = (): Promise<void> => {
+    if (closed) return Promise.resolve()
+    // The table build is synchronous; commit immediately to preserve apply()'s
+    // long-standing "catalog is usable as soon as apply returns" contract.
+    // `rebuildQueue` still records the completion for disposal ordering.
+    try {
+      const done = rebuild()
+      rebuildQueue = rebuildQueue.then(() => done).catch(() => undefined)
+      return done
+    } catch (error) {
+      const failed = Promise.reject(error)
+      rebuildQueue = failed.catch(() => undefined)
+      return failed
+    }
+  }
+
+  enqueueRebuild()
 
   /**
    * The provider catalogue, read from `ctx.llm` where it is actually available.
@@ -813,11 +878,13 @@ export function apply(ctx: any, config?: ProxyConfig): void {
     const patched = function (this: unknown, request: unknown, signal?: unknown): unknown {
       const route = current.get(WEB_SEARCH_KEY)
       if (route === undefined) return original.call(this, request, signal)
+      const token = routeStates.get(WEB_SEARCH_KEY)?.token
+      if (token === undefined) return original.call(this, request, signal)
       return router.run(
         {
           dispatcher: route.dispatcher,
-          onHit: () => bump(WEB_SEARCH_KEY),
-          onSettle: settle(WEB_SEARCH_KEY),
+          onHit: () => bump(WEB_SEARCH_KEY, token),
+          onSettle: settle(WEB_SEARCH_KEY, token),
           decide: route.decide,
         },
         () => original.call(this, request, signal),
@@ -848,13 +915,15 @@ export function apply(ctx: any, config?: ProxyConfig): void {
         if (typeof provider !== 'string') return next()
         const route = current.get(provider)
         if (route === undefined) return next()
+        const token = routeStates.get(provider)?.token
+        if (token === undefined) return next()
         // The stream is consumed lazily; wrap it so the scope survives. The hit
         // counter rides inside the scope, so an abandoned stream still counts.
         return router.wrap(
           {
             dispatcher: route.dispatcher,
-            onHit: () => bump(provider),
-            onSettle: settle(provider),
+            onHit: () => bump(provider, token),
+            onSettle: settle(provider, token),
             decide: route.decide,
           },
           next as () => AsyncIterable<unknown>,
@@ -864,7 +933,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
     )
 
     const onConfig = (): void => {
-      void rebuild()
+      void enqueueRebuild()
     }
     ctx.on('loader/volatile-update', onConfig, { global: true })
 
@@ -872,7 +941,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
       stop()
       if (closed) return
       closed = true
-      await ready.catch(() => undefined)
+      await rebuildQueue.catch(() => undefined)
       await closeTable(current)
       current = new Map()
       router.release()
@@ -896,7 +965,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
 }
 
 export { acquireFetchRouter } from './fetch-router.js'
-export { buildRouteEntry, createProxyTable, closeTable, proxyUrl } from './proxy-table.js'
+export { buildRouteEntry, createProxyTable, closeTable, proxyUrl, routeFingerprint, routeStateDecision } from './proxy-table.js'
 export { Config, ProviderProxyRoute, normalizeRoute, normalizeDefaultProxy, PROTOCOLS } from './config.js'
 export { defaultProxyProblem, proxyHostProblem } from './proxy-address.js'
 export { deadRuleEntries, hostMatches, hostRuleProblem, parseHostList, splitHostRules } from './host-rules.js'

@@ -7,6 +7,8 @@ import {
   createProxyTable,
   deadRuleEntries,
   defaultProxyProblem,
+  routeFingerprint,
+  routeStateDecision,
   hostMatches,
   normalizeDefaultProxy,
   normalizeRoute,
@@ -311,6 +313,85 @@ test('the shared host-rule matrix matches the Host matcher', () => {
   assert.equal(hostMatches('internal.test', rules), true)
   assert.equal(hostMatches('x.skip.test', rules), true)
   assert.equal(hostMatches('anything.invalid', rules), true)
+})
+
+// ---- route fingerprints and route-state decisions ----
+
+test('the route fingerprint treats host-rule lists as ordered sets', () => {
+  const base = {
+    enabled: true,
+    protocol: 'http',
+    host: 'proxy.test',
+    port: 8080,
+    onlyHosts: 'api.example.com, .internal.test',
+    bypassHosts: 'skip.test',
+    localDirect: true,
+  }
+  const same = routeFingerprint({
+    ...base,
+    onlyHosts: '*.INTERNAL.test, API.EXAMPLE.COM, api.example.com',
+  })
+  assert.equal(
+    routeFingerprint(base),
+    same,
+    'case, wildcard spelling and duplicates must not change the fingerprint',
+  )
+  assert.equal(
+    routeFingerprint({ ...base, onlyHosts: 'api.example.com, internal.test' }),
+    routeFingerprint({ ...base, onlyHosts: 'internal.test, api.example.com' }),
+    'rule order must not change the fingerprint',
+  )
+  assert.equal(
+    routeFingerprint({ ...base, onlyHosts: ' api.example.com,  api.example.com ' }),
+    routeFingerprint({ ...base, onlyHosts: 'api.example.com' }),
+    'whitespace and duplicate rules must not change the fingerprint',
+  )
+  assert.notEqual(
+    routeFingerprint({ ...base, onlyHosts: 'api.example.com' }),
+    routeFingerprint({ ...base, onlyHosts: 'other.example.com' }),
+    'a genuinely different rule set must change the fingerprint',
+  )
+})
+
+test('the route fingerprint includes effective transport and localDirect only', () => {
+  const base = {
+    enabled: true,
+    useDefault: false,
+    protocol: 'http',
+    host: 'proxy.test',
+    port: 8080,
+    username: '',
+    password: '',
+    onlyHosts: '',
+    bypassHosts: '',
+    testTarget: 'http://one.invalid/ip',
+    localDirect: true,
+  }
+  const fingerprint = routeFingerprint(base)
+  assert.equal(routeFingerprint({ ...base, enabled: false }), fingerprint)
+  assert.equal(routeFingerprint({ ...base, testTarget: 'http://two.invalid/ip' }), fingerprint)
+  assert.notEqual(routeFingerprint({ ...base, port: 8081 }), fingerprint)
+  assert.notEqual(routeFingerprint({ ...base, localDirect: false }), fingerprint)
+})
+
+test('route-state decisions preserve lastUse for enabled-only changes and clear it for real changes', () => {
+  const base = { fingerprint: 'a', enabled: true, token: 1 }
+  assert.deepEqual(routeStateDecision(undefined, { fingerprint: 'a', enabled: true }), {
+    token: 'new',
+    clearLastUse: false,
+  })
+  assert.deepEqual(routeStateDecision(base, { fingerprint: 'a', enabled: false }), {
+    token: 'new',
+    clearLastUse: false,
+  })
+  assert.deepEqual(routeStateDecision(base, { fingerprint: 'b', enabled: true }), {
+    token: 'new',
+    clearLastUse: true,
+  })
+  assert.deepEqual(routeStateDecision(base, { fingerprint: 'a', enabled: true }), {
+    token: 'keep',
+    clearLastUse: false,
+  })
 })
 
 test('dead host-rule entries are classified from the raw token', () => {

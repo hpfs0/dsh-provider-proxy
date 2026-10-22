@@ -22,7 +22,7 @@ import {
   type DefaultProxyValue,
   type ProviderProxyRouteValue,
 } from './config.js'
-import { hostMatches, parseHostList } from './host-rules.js'
+import { hostMatches, normalizeHostRule, parseHostList } from './host-rules.js'
 import { defaultProxyProblem } from './proxy-address.js'
 import type { DispatcherLike } from './fetch-router.js'
 
@@ -38,6 +38,72 @@ export interface RouteEntry {
    * Only the self-check reads it; a bad value fails a check, never a route.
    */
   testTarget: string
+}
+
+/** The routing inputs that make one route's `lastUse` meaningful. */
+export interface RouteFingerprintInput {
+  enabled?: boolean
+  useDefault?: boolean
+  protocol?: string
+  host?: string
+  port?: number
+  username?: string
+  password?: string
+  onlyHosts?: string
+  bypassHosts?: string
+  localDirect?: boolean
+}
+
+/** Stable, non-secret representation of the rule set in one route. */
+function normalizedRuleSet(raw: string | undefined): string[] {
+  const rules = (raw ?? '')
+    .split(/[,\s]+/)
+    .map(normalizeHostRule)
+    .filter(entry => entry.length > 0)
+  return [...new Set(rules)].sort()
+}
+
+/**
+ * A pure fingerprint of everything that decides where a route's traffic goes.
+ *
+ * `enabled` and the self-check target are deliberately absent: switching a route
+ * off does not invalidate its last result, and a probe URL cannot change real
+ * traffic. Host-rule lists are ordered SETS, so reordering or deduplicating a
+ * list must not clear the card's health record.
+ */
+export function routeFingerprint(input: RouteFingerprintInput): string {
+  return JSON.stringify([
+    input.protocol ?? 'http',
+    String(input.host ?? '').trim(),
+    input.port ?? 0,
+    String(input.username ?? '').trim(),
+    input.password ?? '',
+    normalizedRuleSet(input.onlyHosts),
+    normalizedRuleSet(input.bypassHosts),
+    input.localDirect !== false,
+  ])
+}
+
+export interface RouteState {
+  fingerprint: string
+  enabled: boolean
+  token: number
+}
+
+/**
+ * Whether a config diff allocates a fresh token and/or clears `lastUse`.
+ *
+ * Kept pure so the token rules can be tested without a dispatcher or a live
+ * config. The caller owns the global monotonically increasing token counter.
+ */
+export function routeStateDecision(
+  previous: Pick<RouteState, 'fingerprint' | 'enabled' | 'token'> | undefined,
+  next: Pick<RouteState, 'fingerprint' | 'enabled'>,
+): { token: 'new' | 'keep'; clearLastUse: boolean } {
+  if (previous === undefined) return { token: 'new', clearLastUse: false }
+  if (previous.fingerprint !== next.fingerprint) return { token: 'new', clearLastUse: true }
+  if (previous.enabled !== next.enabled) return { token: 'new', clearLastUse: false }
+  return { token: 'keep', clearLastUse: false }
 }
 
 function proxyUrl(route: ProviderProxyRouteValue): string {

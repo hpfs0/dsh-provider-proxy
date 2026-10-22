@@ -417,3 +417,348 @@ test('a failed routed request records the real failure code', async () => {
     }
   }
 })
+
+// ---- last-use is bound to the current route configuration ----
+
+test('changing the proxy endpoint clears lastUse but keeps hits', async () => {
+  const proxyA = await startRecordingProxy('A')
+  const proxyB = await startRecordingProxy('B')
+  const ctx = mockCtx()
+  let snapshot = {
+    p: { enabled: true, protocol: 'http', host: '127.0.0.1', port: proxyA.port },
+    q: { enabled: true, protocol: 'http', host: '127.0.0.1', port: proxyA.port },
+  }
+  const config = { providers: { get: () => snapshot } }
+  apply(ctx, config)
+  await settle()
+
+  const call = async (provider) => {
+    async function* adapter() {
+      await fetch(`http://${provider}-target.invalid/x`)
+      yield { type: 'finish' }
+    }
+    for await (const _ of ctx.emit('llm/stream', { provider }, adapter)) {
+      // drain
+    }
+  }
+
+  try {
+    await call('p')
+    await call('q')
+    await settle()
+    assert.equal(ctx.providerProxyState.hits.p, 1)
+    assert.equal(ctx.providerProxyState.hits.q, 1)
+    assert.ok(ctx.providerProxyState.lastUse.p)
+    assert.ok(ctx.providerProxyState.lastUse.q)
+
+    snapshot = { ...snapshot, p: { ...snapshot.p, port: proxyB.port } }
+    await ctx.emit('loader/volatile-update', [['providers']])
+    await settle()
+    assert.equal(ctx.providerProxyState.lastUse.p, undefined, 'the changed route loses its old health proof')
+    assert.ok(ctx.providerProxyState.lastUse.q, 'an unrelated route keeps its record')
+    assert.equal(ctx.providerProxyState.hits.p, 1, 'hits is a historical counter')
+  } finally {
+    for (const cleanup of ctx.cleanups) {
+      if (typeof cleanup === 'function') await cleanup()
+    }
+    await proxyA.close()
+    await proxyB.close()
+  }
+})
+
+test('only disabling a route keeps lastUse, while its old token cannot write back', async () => {
+  const proxy = await startRecordingProxy('A')
+  const ctx = mockCtx()
+  let snapshot = {
+    p: { enabled: true, protocol: 'http', host: '127.0.0.1', port: proxy.port },
+  }
+  const config = { providers: { get: () => snapshot } }
+  apply(ctx, config)
+  await settle()
+
+  try {
+    async function* adapter() {
+      await fetch('http://api.example.com/one')
+      yield { type: 'finish' }
+    }
+    for await (const _ of ctx.emit('llm/stream', { provider: 'p' }, adapter)) {
+      // drain
+    }
+    await settle()
+    const retained = ctx.providerProxyState.lastUse.p
+    assert.ok(retained)
+
+    snapshot = { p: { ...snapshot.p, enabled: false } }
+    await ctx.emit('loader/volatile-update', [['providers']])
+    await settle()
+    assert.deepEqual(ctx.providerProxyState.lastUse.p, retained, 'turning off is not a config change')
+
+    snapshot = { p: { ...snapshot.p, enabled: true } }
+    await ctx.emit('loader/volatile-update', [['providers']])
+    await settle()
+    assert.deepEqual(ctx.providerProxyState.lastUse.p, retained, 'turning back on keeps the record')
+  } finally {
+    for (const cleanup of ctx.cleanups) {
+      if (typeof cleanup === 'function') await cleanup()
+    }
+    await proxy.close()
+  }
+})
+
+test('a stream bound to an old route cannot write after the config changes', async () => {
+  const proxyA = await startRecordingProxy('A')
+  const proxyB = await startRecordingProxy('B')
+  const ctx = mockCtx()
+  let snapshot = {
+    p: { enabled: true, protocol: 'http', host: '127.0.0.1', port: proxyA.port },
+  }
+  const config = { providers: { get: () => snapshot } }
+  apply(ctx, config)
+  await settle()
+
+  try {
+    let started
+    const start = new Promise(resolve => { started = resolve })
+    async function* adapter() {
+      started()
+      await fetch('http://provider-target.invalid/slow')
+      yield { type: 'finish' }
+    }
+    const stream = ctx.emit('llm/stream', { provider: 'p' }, adapter)
+    const iterator = stream[Symbol.asyncIterator]()
+    const pending = iterator.next()
+    await start
+
+    snapshot = { p: { ...snapshot.p, port: proxyB.port } }
+    await ctx.emit('loader/volatile-update', [['providers']])
+    await settle()
+    assert.equal(ctx.providerProxyState.lastUse.p, undefined, 'the old route record is cleared')
+
+    await pending
+    await iterator.return()
+    await settle()
+    assert.equal(ctx.providerProxyState.lastUse.p, undefined, 'the old settle must not recreate it')
+  } finally {
+    for (const cleanup of ctx.cleanups) {
+      if (typeof cleanup === 'function') await cleanup()
+    }
+    await proxyA.close()
+    await proxyB.close()
+  }
+})
+
+test('a deleted and re-added provider cannot be written by its old stream', async () => {
+  const proxy = await startRecordingProxy('A')
+  const ctx = mockCtx()
+  let snapshot = {
+    p: { enabled: true, protocol: 'http', host: '127.0.0.1', port: proxy.port },
+  }
+  const config = { providers: { get: () => snapshot } }
+  apply(ctx, config)
+  await settle()
+
+  try {
+    let started
+    const start = new Promise(resolve => { started = resolve })
+    async function* adapter() {
+      started()
+      await fetch('http://provider-target.invalid/slow')
+      yield { type: 'finish' }
+    }
+    const iterator = ctx.emit('llm/stream', { provider: 'p' }, adapter)[Symbol.asyncIterator]()
+    const pending = iterator.next()
+    await start
+
+    snapshot = {}
+    await ctx.emit('loader/volatile-update', [['providers']])
+    await settle()
+    snapshot = { p: { enabled: true, protocol: 'http', host: '127.0.0.1', port: proxy.port } }
+    await ctx.emit('loader/volatile-update', [['providers']])
+    await settle()
+
+    await pending
+    await iterator.return()
+    await settle()
+    assert.equal(ctx.providerProxyState.lastUse.p, undefined, 'a re-added provider is a new route')
+    assert.equal(ctx.providerProxyState.hits.p, 1, 'the old request was still counted')
+  } finally {
+    for (const cleanup of ctx.cleanups) {
+      if (typeof cleanup === 'function') await cleanup()
+    }
+    await proxy.close()
+  }
+})
+
+test('lastUse survives a testTarget edit but not a localDirect edit', async () => {
+  const proxy = await startRecordingProxy('A')
+  const ctx = mockCtx()
+  let providers = {
+    p: { enabled: true, protocol: 'http', host: '127.0.0.1', port: proxy.port, testTarget: 'http://one.invalid/ip' },
+  }
+  let localDirect = true
+  const config = {
+    providers: { get: () => providers },
+    localDirect: { get: () => localDirect },
+  }
+  apply(ctx, config)
+  await settle()
+
+  try {
+    async function* adapter() {
+      await fetch('http://api.example.com/one')
+      yield { type: 'finish' }
+    }
+    for await (const _ of ctx.emit('llm/stream', { provider: 'p' }, adapter)) {
+      // drain
+    }
+    await settle()
+    const retained = ctx.providerProxyState.lastUse.p
+    assert.ok(retained)
+
+    providers = { p: { ...providers.p, testTarget: 'http://two.invalid/ip' } }
+    await ctx.emit('loader/volatile-update', [['providers']])
+    await settle()
+    assert.deepEqual(ctx.providerProxyState.lastUse.p, retained, 'the check target does not route traffic')
+
+    localDirect = false
+    await ctx.emit('loader/volatile-update', [['localDirect']])
+    await settle()
+    assert.equal(ctx.providerProxyState.lastUse.p, undefined, 'localDirect changes every route decision')
+  } finally {
+    for (const cleanup of ctx.cleanups) {
+      if (typeof cleanup === 'function') await cleanup()
+    }
+    await proxy.close()
+  }
+})
+
+test('lastUse survives a rule reorder and a duplicate, but not a rule change', async () => {
+  const proxy = await startRecordingProxy('A')
+  const ctx = mockCtx()
+  let providers = {
+    p: {
+      enabled: true,
+      protocol: 'http',
+      host: '127.0.0.1',
+      port: proxy.port,
+      onlyHosts: 'api.example.com, .internal.test',
+    },
+  }
+  const config = { providers: { get: () => providers } }
+  apply(ctx, config)
+  await settle()
+
+  try {
+    async function* adapter() {
+      await fetch('http://api.example.com/one')
+      yield { type: 'finish' }
+    }
+    for await (const _ of ctx.emit('llm/stream', { provider: 'p' }, adapter)) {
+      // drain
+    }
+    await settle()
+    const retained = ctx.providerProxyState.lastUse.p
+    assert.ok(retained)
+
+    providers = {
+      p: {
+        ...providers.p,
+        onlyHosts: '*.INTERNAL.test, API.EXAMPLE.COM, api.example.com',
+      },
+    }
+    await ctx.emit('loader/volatile-update', [['providers']])
+    await settle()
+    assert.deepEqual(ctx.providerProxyState.lastUse.p, retained, 'equivalent rule spelling keeps the record')
+
+    providers = { p: { ...providers.p, onlyHosts: 'other.example.com' } }
+    await ctx.emit('loader/volatile-update', [['providers']])
+    await settle()
+    assert.equal(ctx.providerProxyState.lastUse.p, undefined, 'a real rule change clears the record')
+  } finally {
+    for (const cleanup of ctx.cleanups) {
+      if (typeof cleanup === 'function') await cleanup()
+    }
+    await proxy.close()
+  }
+})
+
+test('a defaultProxy edit clears only routes that inherit it', async () => {
+  const proxy = await startRecordingProxy('A')
+  const ctx = mockCtx()
+  let providers = {
+    inherited: { enabled: true, useDefault: true },
+    own: { enabled: true, protocol: 'http', host: '127.0.0.1', port: proxy.port },
+  }
+  let defaultProxy = { protocol: 'http', host: '127.0.0.1', port: proxy.port }
+  const config = {
+    providers: { get: () => providers },
+    defaultProxy: { get: () => defaultProxy },
+  }
+  apply(ctx, config)
+  await settle()
+
+  try {
+    async function* adapter() {
+      await fetch('http://provider-target.invalid/one')
+      yield { type: 'finish' }
+    }
+    for (const provider of ['inherited', 'own']) {
+      for await (const _ of ctx.emit('llm/stream', { provider }, adapter)) {
+        // drain
+      }
+    }
+    await settle()
+    const inheritedBefore = ctx.providerProxyState.lastUse.inherited
+    const ownBefore = ctx.providerProxyState.lastUse.own
+    assert.ok(inheritedBefore)
+    assert.ok(ownBefore)
+
+    defaultProxy = { ...defaultProxy, port: proxy.port + 1 }
+    await ctx.emit('loader/volatile-update', [['defaultProxy']])
+    await settle()
+    assert.equal(ctx.providerProxyState.lastUse.inherited, undefined, 'the inherited route moved')
+    assert.deepEqual(ctx.providerProxyState.lastUse.own, ownBefore, 'the own-endpoint route did not move')
+  } finally {
+    for (const cleanup of ctx.cleanups) {
+      if (typeof cleanup === 'function') await cleanup()
+    }
+    await proxy.close()
+  }
+})
+
+test('back-to-back config updates settle on the last snapshot', async () => {
+  const proxyA = await startRecordingProxy('A')
+  const proxyB = await startRecordingProxy('B')
+  const ctx = mockCtx()
+  let snapshot = {
+    p: { enabled: true, protocol: 'http', host: '127.0.0.1', port: proxyA.port },
+  }
+  const config = { providers: { get: () => snapshot } }
+  apply(ctx, config)
+  await settle()
+
+  try {
+    snapshot = { p: { ...snapshot.p, port: proxyA.port } }
+    ctx.emit('loader/volatile-update', [['providers']])
+    snapshot = { p: { ...snapshot.p, port: proxyB.port } }
+    ctx.emit('loader/volatile-update', [['providers']])
+    await settle()
+    assert.equal(ctx.providerProxyState.routes[0].proxyOrigin, `http://127.0.0.1:${proxyB.port}`)
+
+    async function* adapter() {
+      await fetch('http://provider-target.invalid/one')
+      yield { type: 'finish' }
+    }
+    for await (const _ of ctx.emit('llm/stream', { provider: 'p' }, adapter)) {
+      // drain
+    }
+    assert.equal(proxyB.seen.length, 1, 'the request used the last snapshot')
+    assert.equal(proxyA.seen.length, 0, 'the superseded snapshot never carried a request')
+  } finally {
+    for (const cleanup of ctx.cleanups) {
+      if (typeof cleanup === 'function') await cleanup()
+    }
+    await proxyA.close()
+    await proxyB.close()
+  }
+})
