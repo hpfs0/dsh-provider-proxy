@@ -4030,3 +4030,45 @@ test('N12: batch test button runs checks for all enabled providers with progress
     restore()
   }
 })
+
+test('N13: copy button copies text to clipboard and shows feedback', async () => {
+  let copiedText = ''
+  const previousClipboard = globalThis.navigator?.clipboard
+  if (!globalThis.navigator) (globalThis as any).navigator = {}
+  ;(globalThis.navigator as any).clipboard = {
+    writeText: async (text: string) => {
+      copiedText = text
+    },
+  }
+
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: { enabled: true, protocol: 'http', host: '10.0.0.1', port: 7890 },
+        },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+
+    const testBtn = findButtons(cardFor(render(), 'sensenova')).find(b => textsOf(b).includes('测试'))
+    assert.ok(testBtn)
+    testBtn.props.onClick()
+    await settle()
+
+    const copyBtns = findButtons(cardFor(render(), 'sensenova')).filter(b => b.props['aria-label'] === '复制')
+    assert.ok(copyBtns.length > 0, 'copy button rendered')
+
+    copyBtns[0].props.onClick({ stopPropagation() {} })
+    await settle()
+
+    assert.ok(copiedText.length > 0, 'text was copied to clipboard')
+    assert.ok(textsOf(cardFor(render(), 'sensenova')).some(t => t.includes('已复制')), 'feedback badge displayed')
+  } finally {
+    if (previousClipboard) (globalThis.navigator as any).clipboard = previousClipboard
+    else delete (globalThis as any).navigator.clipboard
+    restore()
+  }
+})

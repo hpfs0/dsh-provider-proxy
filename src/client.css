@@ -344,3 +344,13 @@
   border-color: var(--dsw-alias-state-error-primary, #f85149);
   background: var(--dsw-alias-bg-layer-2);
 }
+
+/* ---- v0.8.0 N13 additions: quick copy ---- */
+.copyButton {
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.copyButton:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover) !important;
+  color: var(--dsw-alias-label-primary) !important;
+}

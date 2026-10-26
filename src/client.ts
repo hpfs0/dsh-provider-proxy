@@ -992,6 +992,18 @@ const S = {
   formGridFull: {
     gridColumn: '1 / -1',
   },
+  copyButton: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    padding: '2px 4px',
+    border: 'none',
+    borderRadius: '4px',
+    background: 'transparent',
+    color: 'var(--dsw-alias-label-secondary)',
+    cursor: 'pointer',
+    fontSize: '11px',
+    lineHeight: '1',
+  },
 } as const
 
 function renderPage(ctx: any): unknown {
@@ -1235,6 +1247,74 @@ function renderPage(ctx: any): unknown {
     { done: number; total: number } | null,
     (v: any) => void,
   ]
+  const [copiedKey, setCopiedKey] = (React.useState ?? ((v: any) => [v, () => {}]))(undefined) as [
+    string | undefined,
+    (v: any) => void,
+  ]
+
+  const copyToClipboard = (key: string, text: string): void => {
+    try {
+      if (typeof globalThis.navigator?.clipboard?.writeText === 'function') {
+        void globalThis.navigator.clipboard.writeText(text).then(() => {
+          setCopiedKey(key)
+          setTimeout(() => setCopiedKey((prev: any) => (prev === key ? undefined : prev)), 1500)
+        }).catch(() => undefined)
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  const copyButton = (key: string, text: string, ariaLabel: string): unknown =>
+    h(
+      'button',
+      {
+        className: styles.copyButton,
+        style: S.copyButton,
+        type: 'button',
+        'aria-label': ariaLabel,
+        title: copiedKey === key ? t.copied : ariaLabel,
+        onClick: (e: any) => {
+          e.stopPropagation?.()
+          copyToClipboard(key, text)
+        },
+      },
+      copiedKey === key
+        ? h(
+            'svg',
+            {
+              width: 12,
+              height: 12,
+              viewBox: '0 0 24 24',
+              fill: 'none',
+              stroke: 'var(--dsw-alias-state-success-primary, #2ea043)',
+              strokeWidth: 2,
+              strokeLinecap: 'round',
+              strokeLinejoin: 'round',
+              'aria-hidden': 'true',
+            },
+            h('path', { d: 'M20 6 9 17l-5-5' }),
+          )
+        : h(
+            'svg',
+            {
+              width: 12,
+              height: 12,
+              viewBox: '0 0 24 24',
+              fill: 'none',
+              stroke: 'currentColor',
+              strokeWidth: 2,
+              strokeLinecap: 'round',
+              strokeLinejoin: 'round',
+              'aria-hidden': 'true',
+            },
+            h('rect', { width: 14, height: 14, x: 8, y: 8, rx: 2, ry: 2 }),
+            h('path', { d: 'M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2' }),
+          ),
+      copiedKey === key
+        ? h('span', { style: { marginLeft: '3px', fontSize: '10px', color: 'var(--dsw-alias-state-success-primary, #2ea043)' } }, t.copied)
+        : null,
+    )
 
   /**
    * Run the Host's self-check for one provider.
@@ -2214,7 +2294,12 @@ function renderPage(ctx: any): unknown {
                               : null,
                             result.ip === undefined
                               ? null
-                              : h('span', { key: 'ip' }, `${t.exitIpLabel}${result.ip}`),
+                              : h(
+                                  'span',
+                                  { key: 'ip', style: { display: 'inline-flex', alignItems: 'center', gap: '3px' } },
+                                  `${t.exitIpLabel}${result.ip}`,
+                                  copyButton(`${row.id}:ip`, result.ip, t.copy),
+                                ),
                             result.direct === true
                               ? h('span', { key: 'direct' }, t.directLabel)
                               : null,
@@ -2232,13 +2317,22 @@ function renderPage(ctx: any): unknown {
                                       fontSize: '11px',
                                       color: 'var(--dsw-alias-label-secondary)',
                                       wordBreak: 'break-all',
+                                      display: 'inline-flex',
+                                      alignItems: 'center',
+                                      gap: '3px',
                                     },
                                   },
                                   `${t.testTargetLabel}${result.target}${targetSourceSuffix(result, t)}`,
+                                  copyButton(`${row.id}:target`, result.target, t.copy),
                                 ),
                           ]
                         : [
-                            h('span', { key: 'err', style: S.testFailure }, `✗ ${result.error}`),
+                            h(
+                              'span',
+                              { key: 'err', style: { ...S.testFailure, display: 'inline-flex', alignItems: 'center', gap: '3px' } },
+                              `✗ ${result.error}`,
+                              copyButton(`${row.id}:err`, String(result.error), t.copy),
+                            ),
                             typeof result.status === 'number'
                               ? h('span', { key: 'status' }, `HTTP ${result.status}`)
                               : null,
@@ -2253,9 +2347,13 @@ function renderPage(ctx: any): unknown {
                                       fontSize: '11px',
                                       color: 'var(--dsw-alias-label-secondary)',
                                       wordBreak: 'break-all',
+                                      display: 'inline-flex',
+                                      alignItems: 'center',
+                                      gap: '3px',
                                     },
                                   },
                                   `${t.testTargetLabel}${result.target}${targetSourceSuffix(result, t)}`,
+                                  copyButton(`${row.id}:target`, result.target, t.copy),
                                 ),
                           ],
                     )
@@ -2569,6 +2667,8 @@ const EN = {
   catalogueMismatchSuffix: '. Their proxy settings are kept.',
   saveFailedPrefix: 'Save failed: ',
   close: 'Close',
+  copy: 'Copy',
+  copied: 'Copied',
 }
 
 const ZH = {
@@ -2661,6 +2761,8 @@ const ZH = {
   catalogueMismatchSuffix: '。代理配置仍会保留。',
   saveFailedPrefix: '保存失败：',
   close: '关闭',
+  copy: '复制',
+  copied: '已复制',
 }
 
 /**
