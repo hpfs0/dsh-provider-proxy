@@ -955,6 +955,33 @@ const S = {
     color: 'var(--dsw-alias-brand-primary)',
     fontWeight: '600',
   },
+  compactRow: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: '10px',
+    padding: '10px 14px',
+    border: '1px solid var(--dsw-alias-border-l1)',
+    borderRadius: '8px',
+    background: 'var(--dsw-alias-bg-layer-1)',
+    marginBottom: '8px',
+  },
+  compactRowActive: {
+    borderColor: 'var(--dsw-alias-state-success-primary)',
+    background: 'var(--dsw-alias-bg-layer-2)',
+  },
+  compactRowRejected: {
+    borderColor: 'var(--dsw-alias-state-error-primary, #f85149)',
+    background: 'var(--dsw-alias-bg-layer-2)',
+  },
+  compactEndpoint: {
+    fontSize: '11px',
+    color: 'var(--dsw-alias-label-secondary)',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+    maxWidth: '180px',
+  },
 } as const
 
 function renderPage(ctx: any): unknown {
@@ -1184,6 +1211,14 @@ function renderPage(ctx: any): unknown {
   const [filter, setFilter] = (React.useState ?? ((v: any) => [v, () => {}]))('')
   const [statusFilter, setStatusFilter] = (React.useState ?? ((v: any) => [v, () => {}]))('all') as [
     'all' | 'proxied' | 'direct' | 'rejected',
+    (v: any) => void,
+  ]
+  const [viewMode, setViewMode] = (React.useState ?? ((v: any) => [v, () => {}]))('card') as [
+    'card' | 'compact',
+    (v: any) => void,
+  ]
+  const [expandedCards, setExpandedCards] = (React.useState ?? ((v: any) => [v, () => {}]))({}) as [
+    Record<string, boolean>,
     (v: any) => void,
   ]
 
@@ -1779,13 +1814,27 @@ function renderPage(ctx: any): unknown {
       ? null
       : field(
           t.filterLabel,
-          h('input', {
-            className: styles.input,
-            style: S.input,
-            placeholder: t.filterPlaceholder,
-            value: filter,
-            onChange: (event: any) => setFilter(event.target.value),
-          }),
+          h(
+            'div',
+            { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
+            h('input', {
+              className: styles.input,
+              style: S.input,
+              placeholder: t.filterPlaceholder,
+              value: filter,
+              onChange: (event: any) => setFilter(event.target.value),
+            }),
+            h(
+              'button',
+              {
+                className: styles.testButton,
+                style: { ...S.testButton, flex: 'none', whiteSpace: 'nowrap' },
+                type: 'button',
+                onClick: () => setViewMode((m: any) => (m === 'card' ? 'compact' : 'card')),
+              },
+              viewMode === 'card' ? t.viewCompact : t.viewCard,
+            ),
+          ),
         )
 
   // The empty slot answers three different questions: still loading, the read
@@ -1962,7 +2011,7 @@ function renderPage(ctx: any): unknown {
           : route.enabled
             ? { className: styles.pillOn, style: { ...S.pill, ...S.pillOn }, text: t.on }
             : { className: styles.pillLive, style: { ...S.pill, ...S.pillLive }, text: t.off }
-        return h(
+        const cardSection = h(
           'section',
           {
             className: rejected ? styles.cardRejected : route.enabled ? styles.cardActive : styles.card,
@@ -2196,6 +2245,78 @@ function renderPage(ctx: any): unknown {
             ),
           ),
         )
+
+        const isExpanded = expandedCards[row.id] === true
+        const compactRowElement = h(
+          'section',
+          {
+            className: rejected ? styles.compactRowRejected : route.enabled ? styles.compactRowActive : styles.compactRow,
+            style: rejected
+              ? { ...S.compactRow, ...S.compactRowRejected }
+              : route.enabled
+                ? { ...S.compactRow, ...S.compactRowActive }
+                : S.compactRow,
+            key: `compact:${row.id}`,
+          },
+          h(
+            'div',
+            { style: { display: 'flex', alignItems: 'center', gap: '8px', minWidth: '0' } },
+            h('input', {
+              type: 'checkbox',
+              checked: route.enabled,
+              onChange: (event: any) => bind(row.id, 'enabled')(event.target.checked === true),
+            }),
+            h('span', { className: styles.name, style: { ...S.name, maxWidth: '140px' } }, row.name),
+            h('span', { className: styles.id, style: S.id }, row.id),
+            useDefault
+              ? h('span', { style: S.compactEndpoint }, `${t.useDefault}: ${defaultOrigin}`)
+              : h('span', { style: S.compactEndpoint }, `${route.protocol.toUpperCase()}://${route.host || '—'}:${route.port || '—'}`),
+          ),
+          h(
+            'div',
+            { style: { display: 'flex', alignItems: 'center', gap: '8px', flex: 'none' } },
+            result?.pending === true
+              ? h('span', { style: { fontSize: '11px', color: 'var(--dsw-alias-label-secondary)' } }, t.testRunning)
+              : result?.ok === true
+                ? h('span', { style: { fontSize: '11px', color: latencyColor(result.ms), fontWeight: '500' } }, `✓ ${result.ms ?? '—'} ms`)
+                : result?.ok === false
+                  ? h('span', { style: { fontSize: '11px', color: 'var(--dsw-alias-state-error-primary, #f85149)', fontWeight: '500' } }, `✗ ${result.error}`)
+                  : lastText !== undefined
+                    ? h('span', { style: { fontSize: '11px', color: 'var(--dsw-alias-label-secondary)' } }, lastText)
+                    : null,
+            h('span', { className: pill.className, style: pill.style }, pill.text),
+            showTest
+              ? h(
+                  'button',
+                  {
+                    className: styles.testButton,
+                    style: { ...S.testButton, padding: '3px 8px', fontSize: '11px' },
+                    type: 'button',
+                    disabled: result?.pending === true,
+                    onClick: () => runTest(row.id),
+                  },
+                  result?.pending === true ? t.testRunning : t.testButton,
+                )
+              : null,
+            h(
+              'button',
+              {
+                className: styles.testButton,
+                style: { ...S.testButton, padding: '3px 8px', fontSize: '11px' },
+                type: 'button',
+                onClick: () => setExpandedCards((curr: any) => ({ ...curr, [row.id]: !curr[row.id] })),
+              },
+              isExpanded ? t.collapseDetails : t.expandDetails,
+            ),
+          ),
+        )
+
+        if (viewMode === 'compact') {
+          return isExpanded
+            ? h('div', { key: `compact-wrap:${row.id}` }, compactRowElement, cardSection)
+            : compactRowElement
+        }
+        return cardSection
       })
 
   return h(
@@ -2323,6 +2444,10 @@ const EN = {
   minutesAgo: ' min ago',
   hoursAgo: ' h ago',
   daysAgo: ' d ago',
+  viewCard: 'Card view',
+  viewCompact: 'Compact view',
+  expandDetails: 'Edit',
+  collapseDetails: 'Collapse',
   testButton: 'Test',
   testRunning: 'Testing…',
   testDisabledNote: 'Not enabled — test only: ',
@@ -2409,6 +2534,10 @@ const ZH = {
   minutesAgo: ' 分钟前',
   hoursAgo: ' 小时前',
   daysAgo: ' 天前',
+  viewCard: '卡片视图',
+  viewCompact: '紧凑视图',
+  expandDetails: '编辑',
+  collapseDetails: '收起',
   testButton: '测试',
   testRunning: '测试中…',
   testDisabledNote: '未启用，仅测试：',

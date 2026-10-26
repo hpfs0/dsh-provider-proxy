@@ -295,3 +295,29 @@
   background: var(--dsw-alias-interactive-bg-hover) !important;
   color: var(--dsw-alias-brand-primary) !important;
 }
+
+/* ---- v0.8.0 N10 additions: compact view ---- */
+
+.compactRow,
+.compactRowActive,
+.compactRowRejected {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 14px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-1);
+  margin-bottom: 8px;
+}
+
+.compactRowActive {
+  border-color: var(--dsw-alias-state-success-primary);
+  background: var(--dsw-alias-bg-layer-2);
+}
+
+.compactRowRejected {
+  border-color: var(--dsw-alias-state-error-primary, #f85149);
+  background: var(--dsw-alias-bg-layer-2);
+}

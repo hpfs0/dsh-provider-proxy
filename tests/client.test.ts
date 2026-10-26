@@ -3909,3 +3909,33 @@ test('N9: status filter chips render counts and filter the visible providers', a
     restore()
   }
 })
+
+test('N10: compact view mode toggles and allows expanding individual cards', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      settings: {
+        providers: {
+          sensenova: { enabled: true, protocol: 'http', host: '10.0.0.1', port: 7890 },
+        },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+
+    const viewSwitch = findButtons(render()).find(b => textsOf(b).includes('紧凑视图'))
+    assert.ok(viewSwitch, 'button offers switching to compact view')
+
+    viewSwitch.props.onClick()
+    assert.ok(findButtons(render()).find(b => textsOf(b).includes('卡片视图')), 'button toggled to Card view')
+
+    const editBtn = findButtons(render()).find(b => textsOf(b).includes('编辑'))
+    assert.ok(editBtn, 'compact row provides an Edit/Expand button')
+
+    editBtn.props.onClick()
+    assert.ok(findButtons(render()).find(b => textsOf(b).includes('收起')), 'button toggled to Collapse')
+    assert.ok(findInputsUnderLabel(render(), 'IP / 主机').length > 0)
+  } finally {
+    restore()
+  }
+})
