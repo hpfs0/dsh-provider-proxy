@@ -158,10 +158,11 @@
 
 .field {
   display: grid;
-  grid-template-columns: 96px 1fr;
+  grid-template-columns: 76px 1fr;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   font-size: 12px;
+  min-width: 0;
 }
 
 .label {
@@ -169,8 +170,8 @@
 }
 
 .hint {
-  grid-column: 2;
-  margin-top: -2px;
+  grid-column: 1 / -1;
+  margin-top: 2px;
   font-size: 11px;
   color: var(--dsw-alias-state-warn-primary);
 }
@@ -294,6 +295,28 @@
   border-color: var(--dsw-alias-brand-primary) !important;
   background: var(--dsw-alias-interactive-bg-hover) !important;
   color: var(--dsw-alias-brand-primary) !important;
+}
+
+/* ---- v0.8.0 N11 additions: form grid ---- */
+
+.formGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 10px 14px;
+}
+
+.formGridFull {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 520px) {
+  .formGrid {
+    grid-template-columns: 1fr !important;
+  }
+  .formGridFull {
+    grid-column: auto !important;
+  }
 }
 
 /* ---- v0.8.0 N10 additions: compact view ---- */

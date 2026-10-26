@@ -897,10 +897,11 @@ const S = {
   },
   field: {
     display: 'grid',
-    gridTemplateColumns: '88px 1fr',
+    gridTemplateColumns: '76px 1fr',
     alignItems: 'center',
-    gap: '10px',
+    gap: '8px',
     fontSize: '12px',
+    minWidth: '0',
   },
   label: { color: 'var(--dsw-alias-label-secondary)' },
   input: {
@@ -925,7 +926,7 @@ const S = {
     color: 'var(--dsw-alias-label-secondary)',
   },
   hint: {
-    gridColumn: '2',
+    gridColumn: '1 / -1',
     fontSize: '11px',
     color: 'var(--dsw-alias-label-secondary)',
   },
@@ -981,6 +982,15 @@ const S = {
     textOverflow: 'ellipsis',
     whiteSpace: 'nowrap',
     maxWidth: '180px',
+  },
+  formGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+    alignItems: 'start',
+    gap: '10px 14px',
+  },
+  formGridFull: {
+    gridColumn: '1 / -1',
   },
 } as const
 
@@ -1513,10 +1523,23 @@ function renderPage(ctx: any): unknown {
       apply(parts)
     }
 
-  const field = (label: string, control: unknown, hint?: string, hintError?: boolean): unknown =>
+  const field = (
+    label: string,
+    control: unknown,
+    hint?: string,
+    hintError?: boolean,
+    fullWidth?: boolean,
+  ): unknown =>
     h(
       'label',
-      { className: styles.field, style: S.field, key: label },
+      {
+        className: `${styles.field}${fullWidth ? ` ${styles.formGridFull}` : ''}`,
+        style: {
+          ...S.field,
+          ...(fullWidth ? S.formGridFull : {}),
+        },
+        key: label,
+      },
       h('span', { className: styles.label, style: S.label }, label),
       control,
       hint === undefined
@@ -1526,8 +1549,9 @@ function renderPage(ctx: any): unknown {
             {
               className: styles.hint,
               style: {
-                gridColumn: '2',
+                gridColumn: '1 / -1',
                 fontSize: '11px',
+                marginTop: '2px',
                 // A warning that a value can never work is an answer, not
                 // decoration — same rule as the failed self-check text.
                 ...(hintError === true
@@ -1585,77 +1609,83 @@ function renderPage(ctx: any): unknown {
       ),
     ),
     h('p', { className: styles.defaultLead, style: S.defaultLead }, t.defaultLead),
-    field(
-      t.protocol,
-      h(
-        'select',
-        {
-          className: styles.input,
-          style: S.input,
-          value: defaultView.protocol,
-          onChange: (event: any) => bindDefault('protocol')(event.target.value),
-        },
-        ...PROTOCOLS.map(protocol =>
-          h('option', { key: protocol, value: protocol }, protocol.toUpperCase()),
+    h(
+      'div',
+      { className: styles.formGrid, style: S.formGrid, key: 'default:form-grid' },
+      field(
+        t.protocol,
+        h(
+          'select',
+          {
+            className: styles.input,
+            style: S.input,
+            value: defaultView.protocol,
+            onChange: (event: any) => bindDefault('protocol')(event.target.value),
+          },
+          ...PROTOCOLS.map(protocol =>
+            h('option', { key: protocol, value: protocol }, protocol.toUpperCase()),
+          ),
         ),
       ),
-    ),
-    field(
-      t.host,
-      h('input', {
-        className: styles.input,
-        style: S.input,
-        placeholder: '127.0.0.1',
-        value: defaultView.host,
-        onChange: (event: any) => bindDefault('host')(event.target.value),
-        // Same convenience as the cards: a full URL fills the whole block.
-        onPaste: onProxyUrlPaste(applyDefaultUrl),
-      }),
-      defaultHostWhy ?? t.hostHint,
-      defaultHostWhy !== undefined,
-    ),
-    field(
-      t.port,
-      h('input', {
-        className: styles.input,
-        style: S.input,
-        type: 'number',
-        min: 1,
-        max: 65535,
-        placeholder: '7890',
-        value: defaultView.port === 0 ? '' : String(defaultView.port),
-        onChange: (event: any) => {
-          const parsed = Number.parseInt(event.target.value, 10)
-          bindDefault('port')(Number.isNaN(parsed) ? 0 : parsed)
-        },
-      }),
-    ),
-    field(
-      t.username,
-      h('input', {
-        className: styles.input,
-        style: S.input,
-        autoComplete: 'off',
-        value: defaultView.username,
-        onChange: (event: any) => bindDefault('username')(event.target.value),
-      }),
-    ),
-    field(
-      t.password,
-      h(
-        'div',
-        { style: S.passwordControl },
+      field(
+        t.host,
         h('input', {
           className: styles.input,
-          style: { ...S.input, paddingRight: '36px' },
-          type: defaultPasswordVisible === true ? 'text' : 'password',
-          autoComplete: 'off',
-          value: defaultView.password,
-          onChange: (event: any) => bindDefault('password')(event.target.value),
+          style: S.input,
+          placeholder: '127.0.0.1',
+          value: defaultView.host,
+          onChange: (event: any) => bindDefault('host')(event.target.value),
+          // Same convenience as the cards: a full URL fills the whole block.
+          onPaste: onProxyUrlPaste(applyDefaultUrl),
         }),
-        passwordToggle(defaultPasswordVisible === true, toggleDefaultPassword),
+        defaultHostWhy ?? t.hostHint,
+        defaultHostWhy !== undefined,
       ),
-      t.passwordHintProxy,
+      field(
+        t.port,
+        h('input', {
+          className: styles.input,
+          style: S.input,
+          type: 'number',
+          min: 1,
+          max: 65535,
+          placeholder: '7890',
+          value: defaultView.port === 0 ? '' : String(defaultView.port),
+          onChange: (event: any) => {
+            const parsed = Number.parseInt(event.target.value, 10)
+            bindDefault('port')(Number.isNaN(parsed) ? 0 : parsed)
+          },
+        }),
+      ),
+      field(
+        t.username,
+        h('input', {
+          className: styles.input,
+          style: S.input,
+          autoComplete: 'off',
+          value: defaultView.username,
+          onChange: (event: any) => bindDefault('username')(event.target.value),
+        }),
+      ),
+      field(
+        t.password,
+        h(
+          'div',
+          { style: S.passwordControl },
+          h('input', {
+            className: styles.input,
+            style: { ...S.input, paddingRight: '36px' },
+            type: defaultPasswordVisible === true ? 'text' : 'password',
+            autoComplete: 'off',
+            value: defaultView.password,
+            onChange: (event: any) => bindDefault('password')(event.target.value),
+          }),
+          passwordToggle(defaultPasswordVisible === true, toggleDefaultPassword),
+        ),
+        t.passwordHintProxy,
+        false,
+        true,
+      ),
     ),
     // Bulk opt-in, in ONE write: a per-card walk would rebuild the table N times.
     // Disabled while the default configuration is incomplete, because pointing every card at an
@@ -2001,6 +2031,8 @@ function renderPage(ctx: any): unknown {
               passwordToggle(passwordVisible[row.id] === true, () => togglePassword(row.id)),
             ),
             route.protocol === 'socks5' ? t.passwordHint : t.passwordHintProxy,
+            false,
+            true,
           ),
         ]
         // The pill describes the ROUTE, never provider availability: a saved
@@ -2089,7 +2121,9 @@ function renderPage(ctx: any): unknown {
                   `${t.inheritingDefault}${defaultOrigin}`,
                 )
               : null,
-          ...(useDefault ? [] : endpointFields),
+          ...(useDefault
+            ? []
+            : [h('div', { className: styles.formGrid, style: S.formGrid, key: `${row.id}:form-grid` }, ...endpointFields)]),
           // The self-check is offered whenever there is something to check: an
           // enabled route (the Host's table carries it, and a rejected one still
           // reports WHY), or a disabled one whose endpoint is already complete —
@@ -2431,7 +2465,7 @@ const EN = {
   hidePassword: 'Hide',
   confirmPromoteToDefault:
     'The default proxy is already in use by one or more providers. Replace it with this card\'s endpoint?',
-  hostHint: 'Only an IPv4, IPv6, or domain name is allowed. A full proxy URL (socks5://user:pass@host:1080) can be pasted instead — it is split into the fields.',
+  hostHint: 'IP or domain only; paste full URL supported',
   passwordHint: 'Sent to the SOCKS5 proxy for authentication; stored with this setting.',
   passwordHintProxy: 'Sent to the proxy as an authentication password; stored with this setting.',
   hitCountPrefix: '',
@@ -2521,7 +2555,7 @@ const ZH = {
   showPassword: '显示',
   hidePassword: '隐藏',
   confirmPromoteToDefault: '已有 provider 正在使用默认代理。要用这张卡片的端点覆盖它吗？',
-  hostHint: '只允许填写 IPv4、IPv6 或域名；也可以直接粘贴完整代理 URL（如 socks5://user:pass@host:1080），会自动拆分到各字段。',
+  hostHint: '仅限 IP 或域名，支持粘贴完整代理 URL',
   passwordHint: '仅作为 SOCKS5 认证口令发送给代理；随该设置一起保存。',
   passwordHintProxy: '作为代理认证口令发送给代理；随该设置一起保存。',
   hitCountPrefix: '已代理 ',

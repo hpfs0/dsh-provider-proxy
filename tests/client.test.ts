@@ -3939,3 +3939,49 @@ test('N10: compact view mode toggles and allows expanding individual cards', asy
     restore()
   }
 })
+
+test('N11: form grid renders responsive two-column layout in default proxy and card forms', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      settings: {
+        providers: {
+          sensenova: { enabled: true, useDefault: false, protocol: 'socks5', host: '10.0.0.1', port: 1080 },
+        },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+
+    const tree = render()
+    function findNodes(node, pred, out = []) {
+      if (node === null || typeof node !== 'object') return out
+      if (Array.isArray(node)) {
+        node.forEach(n => findNodes(n, pred, out))
+        return out
+      }
+      if (pred(node)) out.push(node)
+      if (node.children) findNodes(node.children, pred, out)
+      return out
+    }
+
+    const formGrids = findNodes(
+      tree,
+      n => n.props?.style?.gridTemplateColumns === 'repeat(2, minmax(0, 1fr))',
+    )
+    assert.ok(formGrids.length >= 2, 'both default proxy block and custom cards use two-column grid')
+    assert.strictEqual(
+      findNodes(cardFor(tree, 'sensenova'), n => n.props?.style?.gridTemplateColumns === 'repeat(2, minmax(0, 1fr))').length,
+      1,
+      'card renders its endpoint fields inside a two-column grid',
+    )
+
+    const fullWidthLabels = findNodes(
+      tree,
+      n => n.props?.style?.gridColumn === '1 / -1' && n.type === 'label',
+    )
+    assert.ok(fullWidthLabels.length >= 2, 'password fields span both columns with fullWidth grid-column')
+  } finally {
+    restore()
+  }
+})
