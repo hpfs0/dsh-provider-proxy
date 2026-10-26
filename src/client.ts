@@ -399,6 +399,12 @@ type LastUse = {
 /** What the Host endpoint publishes: provider rows, hit counts, rejected routes. */
 type Catalog = {
   rows: ProviderRow[]
+  /**
+   * Exactly what the Host published, before `knownProviders` merges saved
+   * routes in. N7 must compare against this set: comparing against `rows`
+   * would make every saved provider look published.
+   */
+  publishedRows: ProviderRow[]
   hits: Record<string, number>
   problems: Record<string, string>
   lastUse: Record<string, LastUse>
@@ -480,7 +486,7 @@ async function fetchCatalog(): Promise<Catalog> {
       }
     }
   }
-  return { rows, hits, problems, lastUse }
+  return { rows, publishedRows: rows, hits, problems, lastUse }
 }
 
 /**
@@ -765,6 +771,29 @@ const S = {
     fontSize: '12px',
     cursor: 'pointer',
   },
+  /** The reveal/hide control sits inside the password field's right edge. */
+  passwordControl: {
+    position: 'relative',
+    minWidth: '0',
+  },
+  passwordToggle: {
+    position: 'absolute',
+    top: '50%',
+    right: '4px',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: '26px',
+    height: '26px',
+    padding: '0',
+    border: '0',
+    borderRadius: '6px',
+    background: 'transparent',
+    color: 'var(--dsw-alias-label-secondary)',
+    lineHeight: '1',
+    transform: 'translateY(-50%)',
+    cursor: 'pointer',
+  },
   testResult: {
     // A flex row so the target can drop onto its own line: the container was a
     // plain span, where `flexBasis: 100%` does nothing and the target ran into
@@ -790,6 +819,10 @@ const S = {
   /** A rejected route is a failure of the settings, not a warning about them. */
   diagProblem: {
     color: 'var(--dsw-alias-state-error-primary, #f85149)',
+  },
+  /** Informational catalogue mismatch: not a rejected route, so no error red. */
+  diagNote: {
+    color: 'var(--dsw-alias-label-secondary)',
   },
   advanced: {
     marginTop: '4px',
@@ -932,6 +965,7 @@ function renderPage(ctx: any): unknown {
       .catch((error: any) => {
         catalogueSetter?.({
           rows: [],
+          publishedRows: [],
           hits: {},
           problems: {},
           lastUse: {},
@@ -940,6 +974,7 @@ function renderPage(ctx: any): unknown {
       })
     return {
       rows: undefined as ProviderRow[] | undefined,
+      publishedRows: undefined as ProviderRow[] | undefined,
       hits: {} as Record<string, number>,
       problems: {} as Record<string, string>,
       lastUse: {} as Record<string, LastUse>,
@@ -952,6 +987,7 @@ function renderPage(ctx: any): unknown {
   catalogueSetter = catalog =>
     setState({
       rows: catalog.rows,
+      publishedRows: catalog.publishedRows,
       hits: catalog.hits,
       problems: catalog.problems,
       lastUse: catalog.lastUse,
@@ -963,6 +999,7 @@ function renderPage(ctx: any): unknown {
   touchCatalogPolling()
 
   const published = state.rows ?? []
+  const publishedRows = state.publishedRows ?? []
   const hits = state.hits ?? {}
   const lastUse = state.lastUse ?? {}
 
@@ -990,7 +1027,22 @@ function renderPage(ctx: any): unknown {
   const problemLines = Object.entries(problems).map(([id, message]) =>
     h('li', { key: `p:${id}`, style: S.diagProblem }, `${id}：${message}`),
   )
-  const problemCount = problemLines.length
+  const publishedIds = new Set(publishedRows.map((row: ProviderRow) => row.id))
+  const missingFromCatalog =
+    state.pending === true || state.error !== undefined
+      ? []
+      : Object.keys(configured)
+          .filter(id => !publishedIds.has(id))
+          .sort()
+  const catalogueMismatchLine =
+    missingFromCatalog.length === 0
+      ? undefined
+      : h(
+          'li',
+          { key: 'catalogue-mismatch', style: S.diagNote },
+          `${t.catalogueMismatch}${missingFromCatalog.join('、')}${t.catalogueMismatchSuffix}`,
+        )
+  const problemCount = problemLines.length + (catalogueMismatchLine === undefined ? 0 : 1)
   note(
     `provider 列表：来自 Host 共 ${published.length} 个（${published.map((r: ProviderRow) => r.id).join('、') || '无'}）`,
   )
@@ -1015,6 +1067,54 @@ function renderPage(ctx: any): unknown {
   const [defaultDraft, setDefaultDraft] = (React.useState ?? ((v: any) => [v, () => {}]))({})
   const editDefault = (field: string, value: unknown) =>
     setDefaultDraft((current: any) => ({ ...current, [field]: value }))
+
+  /**
+   * Whether each password input is temporarily shown as plain text.
+   *
+   * Provider cards are keyed by id; the shared default has its own state so a
+   * real provider named `default` cannot collide with it. This is view state
+   * only: it is deliberately not persisted and never written to the settings.
+   */
+  const [passwordVisible, setPasswordVisible] = (React.useState ?? ((v: any) => [v, () => {}]))({})
+  const [defaultPasswordVisible, setDefaultPasswordVisible] = (React.useState ?? ((v: any) => [v, () => {}]))(false)
+  const togglePassword = (id: string): void =>
+    setPasswordVisible((current: any) => ({ ...current, [id]: current[id] !== true }))
+  const toggleDefaultPassword = (): void =>
+    setDefaultPasswordVisible((current: boolean) => current !== true)
+  const passwordToggle = (visible: boolean, onToggle: () => void): unknown =>
+    h(
+      'button',
+      {
+        className: styles.passwordToggle,
+        style: S.passwordToggle,
+        type: 'button',
+        'aria-label': visible ? t.hidePassword : t.showPassword,
+        'aria-pressed': visible,
+        title: visible ? t.hidePassword : t.showPassword,
+        onClick: onToggle,
+      },
+      h(
+        'svg',
+        {
+          width: 16,
+          height: 16,
+          viewBox: '0 0 24 24',
+          fill: 'none',
+          stroke: 'currentColor',
+          strokeWidth: 2,
+          strokeLinecap: 'round',
+          strokeLinejoin: 'round',
+          'aria-hidden': 'true',
+          focusable: 'false',
+        },
+        h('path', {
+          key: 'eye',
+          d: 'M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z',
+        }),
+        h('circle', { key: 'pupil', cx: 12, cy: 12, r: 3 }),
+        visible ? h('path', { key: 'slash', d: 'm3 3 18 18' }) : null,
+      ),
+    )
 
   /**
    * The advanced global fields live outside `draft` on purpose: `draft` is keyed
@@ -1284,6 +1384,13 @@ function renderPage(ctx: any): unknown {
    * multi-select picker would be a second way to do the same thing.
    */
   const promoteToDefault = (id: string): void => {
+    if (
+      defaultComplete &&
+      inheritingIds().length > 0 &&
+      globalThis.window?.confirm?.(t.confirmPromoteToDefault) !== true
+    ) {
+      return
+    }
     const route = view({ ...configured[id], ...draft[id] })
     applyDefaultUrl({
       protocol: route.protocol,
@@ -1307,7 +1414,7 @@ function renderPage(ctx: any): unknown {
     saveMany(
       '\u0000default\u0000applyAll',
       ids.map(id => ({ op: 'set', path: ['providers', id, 'useDefault'], value: true })),
-      '所有 provider 的 useDefault',
+      `所有 provider 的 useDefault（${ids.length} 个）`,
       () =>
         setDraft((current: any) => {
           const next = { ...current }
@@ -1463,21 +1570,26 @@ function renderPage(ctx: any): unknown {
       h('input', {
         className: styles.input,
         style: S.input,
-        autocomplete: 'off',
+        autoComplete: 'off',
         value: defaultView.username,
         onChange: (event: any) => bindDefault('username')(event.target.value),
       }),
     ),
     field(
       t.password,
-      h('input', {
-        className: styles.input,
-        style: S.input,
-        type: 'password',
-        autocomplete: 'off',
-        value: defaultView.password,
-        onChange: (event: any) => bindDefault('password')(event.target.value),
-      }),
+      h(
+        'div',
+        { style: S.passwordControl },
+        h('input', {
+          className: styles.input,
+          style: { ...S.input, paddingRight: '36px' },
+          type: defaultPasswordVisible === true ? 'text' : 'password',
+          autoComplete: 'off',
+          value: defaultView.password,
+          onChange: (event: any) => bindDefault('password')(event.target.value),
+        }),
+        passwordToggle(defaultPasswordVisible === true, toggleDefaultPassword),
+      ),
       t.passwordHintProxy,
     ),
     // Bulk opt-in, in ONE write: a per-card walk would rebuild the table N times.
@@ -1495,7 +1607,7 @@ function renderPage(ctx: any): unknown {
           disabled: !defaultComplete || rows.length === 0,
           onClick: applyDefaultToAll,
         },
-        t.applyDefaultAll,
+        `${t.applyDefaultAll}（${rows.length}）`,
       ),
     ),
   )
@@ -1731,7 +1843,7 @@ function renderPage(ctx: any): unknown {
             h('input', {
               className: styles.input,
               style: S.input,
-              autocomplete: 'off',
+              autoComplete: 'off',
               value: route.username,
               onChange: (event: any) => bind(row.id, 'username')(event.target.value),
             }),
@@ -1743,14 +1855,19 @@ function renderPage(ctx: any): unknown {
           // config; the diagnostics only ever surface a credential-free origin.
           field(
             t.password,
-            h('input', {
-              className: styles.input,
-              style: S.input,
-              type: 'password',
-              autocomplete: 'off',
-              value: route.password,
-              onChange: (event: any) => bind(row.id, 'password')(event.target.value),
-            }),
+            h(
+              'div',
+              { style: S.passwordControl },
+              h('input', {
+                className: styles.input,
+                style: { ...S.input, paddingRight: '36px' },
+                type: passwordVisible[row.id] === true ? 'text' : 'password',
+                autoComplete: 'off',
+                value: route.password,
+                onChange: (event: any) => bind(row.id, 'password')(event.target.value),
+              }),
+              passwordToggle(passwordVisible[row.id] === true, () => togglePassword(row.id)),
+            ),
             route.protocol === 'socks5' ? t.passwordHint : t.passwordHintProxy,
           ),
         ]
@@ -2070,6 +2187,7 @@ function renderPage(ctx: any): unknown {
           ? [h('li', { key: 'none' }, t.diagPending)]
           : [
               ...problemLines,
+              ...(catalogueMismatchLine === undefined ? [] : [catalogueMismatchLine]),
               ...(savedNote === undefined ? [] : [h('li', { key: 'saved' }, savedNote)]),
               ...diagnostics.map((line, index) => h('li', { key: `d${index}` }, line)),
             ]),
@@ -2100,6 +2218,10 @@ const EN = {
   port: 'Port',
   username: 'Username',
   password: 'Password',
+  showPassword: 'Show',
+  hidePassword: 'Hide',
+  confirmPromoteToDefault:
+    'The default proxy is already in use by one or more providers. Replace it with this card\'s endpoint?',
   hostHint: 'Only an IPv4, IPv6, or domain name is allowed. A full proxy URL (socks5://user:pass@host:1080) can be pasted instead — it is split into the fields.',
   passwordHint: 'Sent to the SOCKS5 proxy for authentication; stored with this setting.',
   passwordHintProxy: 'Sent to the proxy as an authentication password; stored with this setting.',
@@ -2151,6 +2273,8 @@ const EN = {
   notConfigured: 'not configured',
   diagnostics: 'Connection diagnostics',
   diagPending: '(collecting…)',
+  catalogueMismatch: 'Saved but not listed by the Host catalogue: ',
+  catalogueMismatchSuffix: '. Their proxy settings are kept.',
   saveFailedPrefix: 'Save failed: ',
   close: 'Close',
 }
@@ -2177,6 +2301,9 @@ const ZH = {
   port: '端口',
   username: '用户名',
   password: '密码',
+  showPassword: '显示',
+  hidePassword: '隐藏',
+  confirmPromoteToDefault: '已有 provider 正在使用默认代理。要用这张卡片的端点覆盖它吗？',
   hostHint: '只允许填写 IPv4、IPv6 或域名；也可以直接粘贴完整代理 URL（如 socks5://user:pass@host:1080），会自动拆分到各字段。',
   passwordHint: '仅作为 SOCKS5 认证口令发送给代理；随该设置一起保存。',
   passwordHintProxy: '作为代理认证口令发送给代理；随该设置一起保存。',
@@ -2228,6 +2355,8 @@ const ZH = {
   notConfigured: '未配置',
   diagnostics: '连接诊断',
   diagPending: '（正在收集…）',
+  catalogueMismatch: '已保存但未出现在 Host 目录中的 provider：',
+  catalogueMismatchSuffix: '。代理配置仍会保留。',
   saveFailedPrefix: '保存失败：',
   close: '关闭',
 }

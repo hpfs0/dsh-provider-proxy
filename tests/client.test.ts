@@ -247,6 +247,20 @@ function findCheckboxes(node, out = []) {
   return out
 }
 
+function findPasswordInputs(node, out = []) {
+  if (node === null || typeof node !== 'object') return out
+  if (Array.isArray(node)) { node.forEach(n => findPasswordInputs(n, out)); return out }
+  if (
+    node.type === 'input' &&
+    (node.props?.type === 'password' || node.props?.type === 'text') &&
+    node.props?.autoComplete === 'off'
+  ) {
+    out.push(node)
+  }
+  if (node.children) findPasswordInputs(node.children, out)
+  return out
+}
+
 /**
  * The `<section>` card whose texts include one provider id.
  *
@@ -345,6 +359,68 @@ function findInputsByPlaceholder(node, placeholder, out = []) {
   if (node.props?.placeholder === placeholder && node.type === 'input') out.push(node)
   if (node.children) findInputsByPlaceholder(node.children, placeholder, out)
   return out
+}
+
+/** The first input inside a field label whose visible label text matches. */
+function findInputsUnderLabel(node, label, out = []) {
+  if (node === null || typeof node !== 'object') return out
+  if (Array.isArray(node)) {
+    node.forEach(n => findInputsUnderLabel(n, label, out))
+    return out
+  }
+  if (node.type === 'label' && textsOf(node.children?.[0]).includes(label)) {
+    const input = findFirstInput(node)
+    if (input !== undefined) out.push(input)
+  }
+  if (node.children) findInputsUnderLabel(node.children, label, out)
+  return out
+}
+
+function findFirstInput(node) {
+  if (node === null || typeof node !== 'object') return undefined
+  if (Array.isArray(node)) {
+    for (const n of node) {
+      const found = findFirstInput(n)
+      if (found !== undefined) return found
+    }
+    return undefined
+  }
+  if (node.type === 'input') return node
+  return node.children ? findFirstInput(node.children) : undefined
+}
+
+/** The field label whose subtree contains the exact input object. */
+function findFieldForInput(node, target) {
+  if (node === null || typeof node !== 'object') return undefined
+  if (Array.isArray(node)) {
+    for (const n of node) {
+      const found = findFieldForInput(n, target)
+      if (found !== undefined) return found
+    }
+    return undefined
+  }
+  if (node.type === 'label' && containsNode(node, target)) return node
+  return node.children ? findFieldForInput(node.children, target) : undefined
+}
+
+function containsNode(node, target) {
+  if (node === target) return true
+  if (node === null || typeof node !== 'object') return false
+  if (Array.isArray(node)) return node.some(n => containsNode(n, target))
+  return node.children ? containsNode(node.children, target) : false
+}
+
+function findFirstNodeOfType(node, type) {
+  if (node === null || typeof node !== 'object') return undefined
+  if (Array.isArray(node)) {
+    for (const n of node) {
+      const found = findFirstNodeOfType(n, type)
+      if (found !== undefined) return found
+    }
+    return undefined
+  }
+  if (node.type === type) return node
+  return node.children ? findFirstNodeOfType(node.children, type) : undefined
 }
 
 test('rendering survives a context that forbids undeclared services', async () => {
@@ -453,6 +529,202 @@ test('the stored socks5 password renders into the field', async () => {
   }
 })
 
+test('N6: a password can be revealed without changing its value', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: {
+            enabled: true,
+            protocol: 'socks5',
+            host: '127.0.0.1',
+            port: 1080,
+            username: 'alice',
+            password: 'hunter2-secret',
+          },
+        },
+      },
+    })
+    const { writes } = harness
+    const [, render] = renderPage(mod, harness)
+    await settle()
+
+    let card = cardFor(render(), 'sensenova')
+    let input = findPasswordInputs(card).find(node => node.props.value === 'hunter2-secret')
+    assert.ok(input, 'the card password input must be present')
+    assert.equal(input.props.type, 'password', 'passwords start hidden')
+    const reveal = findButtons(card).find(button => button.props['aria-label'] === '显示')
+    assert.ok(reveal, 'the card must offer a reveal control')
+    reveal.props.onClick()
+
+    card = cardFor(render(), 'sensenova')
+    input = findPasswordInputs(card).find(node => node.props.value === 'hunter2-secret')
+    assert.equal(input?.props.type, 'text', 'revealing changes only the input type')
+    assert.equal(input?.props.value, 'hunter2-secret', 'the password value is not rewritten')
+    assert.equal(writes.length, 0, 'revealing is view state, never a settings write')
+  } finally {
+    restore()
+  }
+})
+
+test('N6: the default password and card passwords toggle independently', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        defaultProxy: {
+          protocol: 'http',
+          host: '127.0.0.1',
+          port: 7890,
+          username: 'alice',
+          password: 'default-secret',
+        },
+        providers: {
+          sensenova: {
+            enabled: true,
+            protocol: 'http',
+            host: '10.0.0.1',
+            port: 7890,
+            username: 'bob',
+            password: 'card-secret',
+          },
+        },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+
+    const tree = render()
+    const defaultInput = findPasswordInputs(tree).find(node => node.props.value === 'default-secret')
+    const cardInput = findPasswordInputs(cardFor(tree, 'sensenova')).find(
+      node => node.props.value === 'card-secret',
+    )
+    assert.equal(defaultInput?.props.type, 'password')
+    assert.equal(cardInput?.props.type, 'password')
+
+    const defaultReveal = findButtons(tree).find(button => button.props['aria-label'] === '显示')
+    assert.ok(defaultReveal)
+    defaultReveal.props.onClick()
+
+    const next = render()
+    assert.equal(
+      findPasswordInputs(next).find(node => node.props.value === 'default-secret')?.props.type,
+      'text',
+      'the default password is revealed',
+    )
+    assert.equal(
+      findPasswordInputs(cardFor(next, 'sensenova')).find(
+        node => node.props.value === 'card-secret',
+      )?.props.type,
+      'password',
+      'revealing the default must not reveal a card password',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('N6: a provider named default cannot share the default password visibility', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        defaultProxy: {
+          protocol: 'http',
+          host: '127.0.0.1',
+          port: 7890,
+          username: 'alice',
+          password: 'default-secret',
+        },
+        providers: {
+          default: {
+            enabled: true,
+            protocol: 'http',
+            host: '10.0.0.1',
+            port: 7890,
+            username: 'bob',
+            password: 'provider-default-secret',
+          },
+        },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+
+    const tree = render()
+    const defaultReveal = findButtons(tree).find(button => button.props['aria-label'] === '显示')
+    assert.ok(defaultReveal)
+    defaultReveal.props.onClick()
+
+    const next = render()
+    assert.equal(
+      findPasswordInputs(next).find(node => node.props.value === 'default-secret')?.props.type,
+      'text',
+      'the shared default password is revealed',
+    )
+    assert.equal(
+      findPasswordInputs(cardFor(next, 'default')).find(
+        node => node.props.value === 'provider-default-secret',
+      )?.props.type,
+      'password',
+      'a provider literally named default must keep its own hidden state',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('N6: username and password inputs use the React autoComplete spelling', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [tree] = renderPage(mod, harness)
+    const passwordInputs = findPasswordInputs(tree)
+    assert.equal(passwordInputs.length >= 2, true, 'the default and card passwords are both present')
+    assert.ok(
+      passwordInputs.every(input => input.props.autocomplete === undefined),
+      'the lowercase DOM spelling is not a React prop',
+    )
+
+    const defaultUsername = findInputsUnderLabel(tree, '用户名')[0]
+    const cardUsername = findInputsUnderLabel(cardFor(tree, 'sensenova'), '用户名')[0]
+    assert.ok(defaultUsername, 'the default username input must be present')
+    assert.ok(cardUsername, 'the card username input must be present')
+    for (const input of [defaultUsername, cardUsername]) {
+      assert.equal(input.props.autoComplete, 'off')
+      assert.equal(input.props.autocomplete, undefined)
+    }
+  } finally {
+    restore()
+  }
+})
+
+test('N6: the password reveal control is an accessible icon inside the input', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [tree] = renderPage(mod, harness)
+    const passwordInput = findPasswordInputs(tree).find(input => input.props.value === '')
+    assert.ok(passwordInput, 'the default password input must be present')
+
+    const field = findFieldForInput(tree, passwordInput)
+    assert.ok(field, 'the password input must belong to a field label')
+    const reveal = findButtons(field).find(button => button.props['aria-label'] === '显示')
+    assert.ok(reveal, 'the reveal control must be inside the password field')
+    assert.equal(reveal.props.title, '显示')
+    assert.equal(reveal.props['aria-pressed'], false)
+    assert.equal(reveal.props.type, 'button')
+
+    const icon = findFirstNodeOfType(reveal, 'svg')
+    assert.ok(icon, 'the control must render an icon, not visible text')
+    assert.equal(icon.props['aria-hidden'], 'true')
+    assert.equal(textsOf(reveal).length, 0, 'the button itself has no visible text')
+  } finally {
+    restore()
+  }
+})
+
 test('the page must not touch remote or llm, which do not exist here', () => {
   // The in-page diagnostics reported
   //   cannot get property "remote" without inject
@@ -533,7 +805,7 @@ test('a route the Host refused is reported in the connection diagnostics', async
       JSON.stringify(render()).includes('dsw-alias-state-error-primary'),
       'a refused route takes the error colour',
     )
-    assert.ok(texts.includes('连接诊断 (1)'), 'the collapsed panel must announce that it has content')
+    assert.ok(texts.includes('连接诊断 (2)'), 'the collapsed panel must announce every diagnostic item')
   } finally {
     restore()
   }
@@ -983,7 +1255,7 @@ test('editing any global field clears every provider result', async () => {
     })
     const [, render] = renderPage(mod, harness)
     await settle()
-    for (const id of ['sensenova', 'openai']) findButton(cardFor(render(), id)).props.onClick()
+    for (const id of ['sensenova', 'openai']) findTestButton(cardFor(render(), id)).props.onClick()
     await settle()
     assert.ok(JSON.stringify(render()).includes('120 ms'))
 
@@ -1013,7 +1285,7 @@ test('a global edit is flushed before testing immediately', async () => {
     globalInput(globalBlockOf(render()), 'https://api.ipify.org?format=json').props.onChange({
       target: { value: 'https://changed.example/ip' },
     })
-    findButton(cardFor(render(), 'sensenova')).props.onClick()
+    findTestButton(cardFor(render(), 'sensenova')).props.onClick()
     await settle()
     assert.equal(harness.writes.length, 1, 'the pending global write landed before the test')
     assert.deepEqual(harness.writes[0].ops[0].path, ['testUrl'])
@@ -1091,7 +1363,7 @@ test('a fast self-check latency is rendered in the success colour', async () => 
     await settle()
     // Scoped to the card: the shared-default block above it renders a button of
     // its own, so a bare findButton would grab that one instead.
-    const button = findButton(cardFor(render(), 'sensenova'))
+    const button = findTestButton(cardFor(render(), 'sensenova'))
     assert.ok(button, 'the self-check button must be rendered')
     button.props.onClick()
     await settle()
@@ -1125,7 +1397,7 @@ test('N2: a check names its HTTP status, target and cached state', async () => {
     const harness = mountPlugin(mod)
     const [, render] = renderPage(mod, harness)
     await settle()
-    findButton(cardFor(render(), 'sensenova')).props.onClick()
+    findTestButton(cardFor(render(), 'sensenova')).props.onClick()
     await settle()
     const texts = textsOf(cardFor(render(), 'sensenova'))
     assert.ok(
@@ -1165,7 +1437,7 @@ test('a slow but successful check is not painted like a failure', async () => {
     const harness = mountPlugin(mod)
     const [, render] = renderPage(mod, harness)
     await settle()
-    findButton(cardFor(render(), 'sensenova')).props.onClick()
+    findTestButton(cardFor(render(), 'sensenova')).props.onClick()
     await settle()
     const card = cardFor(render(), 'sensenova')
     const texts = textsOf(card)
@@ -1219,7 +1491,7 @@ test('the target line explains where the target came from', async () => {
     const harness = mountPlugin(mod)
     const [, render] = renderPage(mod, harness)
     await settle()
-    findButton(cardFor(render(), 'sensenova')).props.onClick()
+    findTestButton(cardFor(render(), 'sensenova')).props.onClick()
     await settle()
     const texts = textsOf(cardFor(render(), 'sensenova'))
     assert.ok(
@@ -1244,7 +1516,7 @@ test('a provider without a real upstream says it used the global URL', async () 
     const harness = mountPlugin(mod)
     const [, render] = renderPage(mod, harness)
     await settle()
-    findButton(cardFor(render(), 'sensenova')).props.onClick()
+    findTestButton(cardFor(render(), 'sensenova')).props.onClick()
     await settle()
     const texts = textsOf(cardFor(render(), 'sensenova'))
     assert.ok(
@@ -1274,7 +1546,7 @@ test('N2: a failed check keeps its target visible', async () => {
     const harness = mountPlugin(mod)
     const [, render] = renderPage(mod, harness)
     await settle()
-    findButton(cardFor(render(), 'sensenova')).props.onClick()
+    findTestButton(cardFor(render(), 'sensenova')).props.onClick()
     await settle()
     const tree = JSON.stringify(cardFor(render(), 'sensenova'))
     assert.ok(tree.includes('✗ 目标不可达'), 'the failure reason is still shown')
@@ -1300,7 +1572,7 @@ test('an old payload without status or target still renders', async () => {
     const harness = mountPlugin(mod)
     const [, render] = renderPage(mod, harness)
     await settle()
-    findButton(cardFor(render(), 'sensenova')).props.onClick()
+    findTestButton(cardFor(render(), 'sensenova')).props.onClick()
     await settle()
     const tree = JSON.stringify(cardFor(render(), 'sensenova'))
     assert.ok(tree.includes('✓ 50 ms'), 'legacy payloads omit status without breaking')
@@ -1332,7 +1604,7 @@ test('a self-check that went direct says so, instead of reading as a proxy succe
     const harness = mountPlugin(mod)
     const [, render] = renderPage(mod, harness)
     await settle()
-    const button = findButton(cardFor(render(), 'sensenova'))
+    const button = findTestButton(cardFor(render(), 'sensenova'))
     assert.ok(button, 'the self-check button must be rendered')
     button.props.onClick()
     await settle()
@@ -1359,7 +1631,7 @@ test('a failed self-check is rendered in the error colour, without the Host-log 
     const harness = mountPlugin(mod)
     const [, render] = renderPage(mod, harness)
     await settle()
-    const button = findButton(cardFor(render(), 'sensenova'))
+    const button = findTestButton(cardFor(render(), 'sensenova'))
     assert.ok(button, 'the self-check button must be rendered')
     button.props.onClick()
     await settle()
@@ -1391,7 +1663,7 @@ test('editing a relevant field clears the self-check result', async () => {
     const harness = mountPlugin(mod)
     const [, render] = renderPage(mod, harness)
     await settle()
-    findButton(cardFor(render(), 'sensenova')).props.onClick()
+    findTestButton(cardFor(render(), 'sensenova')).props.onClick()
     await settle()
     assert.ok(JSON.stringify(cardFor(render(), 'sensenova')).includes('120 ms'))
 
@@ -1453,7 +1725,7 @@ test('editing the shared default clears only the cards that inherit it', async (
     const [, render] = renderPage(mod, harness)
     await settle()
     for (const id of ['sensenova', 'openai']) {
-      findButton(cardFor(render(), id)).props.onClick()
+      findTestButton(cardFor(render(), id)).props.onClick()
     }
     await settle()
     assert.ok(JSON.stringify(cardFor(render(), 'sensenova')).includes('120 ms'))
@@ -1502,7 +1774,7 @@ test('editing and testing immediately flushes the write before the self-check', 
 
     const host = findInputsByPlaceholder(cardFor(render(), 'sensenova'), '127.0.0.1')[0]
     host.props.onChange({ target: { value: '10.0.0.2' } })
-    findButton(cardFor(render(), 'sensenova')).props.onClick()
+    findTestButton(cardFor(render(), 'sensenova')).props.onClick()
     await settle()
 
     assert.deepEqual(
@@ -1537,7 +1809,7 @@ test('a self-check that started before an edit is discarded when it settles', as
     const harness = mountPlugin(mod)
     const [, render] = renderPage(mod, harness)
     await settle()
-    findButton(cardFor(render(), 'sensenova')).props.onClick()
+    findTestButton(cardFor(render(), 'sensenova')).props.onClick()
     await settle()
     assert.ok(releaseTest, 'the self-check request must be in flight')
 
@@ -1546,7 +1818,7 @@ test('a self-check that started before an edit is discarded when it settles', as
     const afterEdit = cardFor(render(), 'sensenova')
     assert.ok(!textsOf(afterEdit).includes('测试中…'), 'the edit clears the pending state')
     assert.notEqual(
-      findButton(afterEdit).props.disabled,
+      findTestButton(afterEdit).props.disabled,
       true,
       'the Test button is available again after the edit',
     )
@@ -1826,6 +2098,139 @@ test('a configured provider stays visible even if the Host stopped offering it',
   }
 })
 
+test('N7: saved providers missing from the catalogue are named in diagnostics', async () => {
+  const { mod, restore } = loadBundle(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      providers: [
+        { id: 'sensenova', name: 'SenseNova', live: true },
+        { id: 'openai', name: 'OpenAI', live: false },
+      ],
+    }),
+  }))
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: {
+            enabled: true,
+            protocol: 'http',
+            host: '10.0.0.1',
+            port: 7890,
+            username: '',
+            password: '',
+          },
+          openai: {
+            enabled: false,
+            protocol: 'http',
+            host: '',
+            port: 0,
+            username: '',
+            password: '',
+          },
+          anthropic: {
+            enabled: true,
+            protocol: 'http',
+            host: '10.0.0.2',
+            port: 7890,
+            username: '',
+            password: '',
+          },
+        },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const texts = textsOf(render())
+    const mismatch = texts.find(text => text.includes('已保存但未出现在 Host 目录中的 provider'))
+    assert.ok(mismatch, 'the mismatch must be explained in diagnostics')
+    assert.ok(mismatch.includes('anthropic'), 'the missing provider is named')
+    assert.ok(!mismatch.includes('sensenova'), 'a published live provider is not missing')
+    assert.ok(
+      !mismatch.includes('openai'),
+      'a published but inactive provider is not missing',
+    )
+    assert.ok(
+      texts.some(text => text.includes('连接诊断 (1)')),
+      'the informational mismatch counts as one diagnostic item',
+    )
+    assert.equal(harness.writes.length, 0, 'the notice never writes settings')
+  } finally {
+    restore()
+  }
+})
+
+test('N7: the mismatch is silent while loading or after a catalogue failure', async () => {
+  let release
+  const { mod, restore } = loadBundle(async () => {
+    await new Promise(resolve => { release = resolve })
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ providers: [{ id: 'sensenova', name: 'SenseNova', live: true }] }),
+    }
+  })
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: {
+            enabled: true,
+            protocol: 'http',
+            host: '10.0.0.1',
+            port: 7890,
+            username: '',
+            password: '',
+          },
+          openai: {
+            enabled: false,
+            protocol: 'http',
+            host: '',
+            port: 0,
+            username: '',
+            password: '',
+          },
+        },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    assert.ok(
+      !textsOf(render()).some(text => text.includes('已保存但未出现在 Host 目录中的 provider')),
+      'an in-flight catalogue read is not evidence that providers are missing',
+    )
+    release()
+    await settle()
+    assert.ok(
+      textsOf(render()).some(text => text.includes('已保存但未出现在 Host 目录中的 provider：openai')),
+      'a successful read then shows the real mismatch',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('N7: a catalogue read failure does not accuse saved providers of being missing', async () => {
+  const { mod, restore } = loadBundle(async () => ({
+    ok: false,
+    status: 500,
+    json: async () => ({}),
+  }))
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const texts = textsOf(render())
+    assert.ok(texts.some(text => text.includes('provider 列表读取失败')))
+    assert.ok(
+      !texts.some(text => text.includes('已保存但未出现在 Host 目录中的 provider')),
+      'a failed read says nothing about whether a provider exists',
+    )
+  } finally {
+    restore()
+  }
+})
+
 function findButton(node) {
   if (node === null || typeof node !== 'object') return undefined
   if (Array.isArray(node)) {
@@ -1834,6 +2239,11 @@ function findButton(node) {
   }
   if (node.type === 'button') return node
   return node.children ? findButton(node.children) : undefined
+}
+
+/** The self-check button, ignoring the password reveal control before it. */
+function findTestButton(node) {
+  return findButtons(node).find(button => textsOf(button).includes('测试'))
 }
 
 /** Every button in a subtree, in document order. */
@@ -2659,7 +3069,7 @@ test('a half-filled default credential disables the bulk button and explains why
     })
     const [tree, render] = renderPage(mod, harness)
     const applyAll = findButtons(tree).find(button =>
-      textsOf(button).includes('所有 provider 使用默认代理'),
+      textsOf(button).some(text => text.includes('所有 provider 使用默认代理')),
     )
     assert.ok(applyAll)
     assert.equal(
@@ -2763,7 +3173,7 @@ test('a configured but disabled provider can still be tested', async () => {
     })
     const [tree] = renderPage(mod, harness)
     const card = cardFor(tree, 'sensenova')
-    assert.ok(findButton(card), 'a disabled route with a complete endpoint must offer the check')
+    assert.ok(findTestButton(card), 'a disabled route with a complete endpoint must offer the check')
     assert.ok(
       textsOf(card).some(text => text.includes('未启用，仅测试')),
       'a check on a route that is off must say it is a trial run',
@@ -2793,7 +3203,7 @@ test('a disabled provider with no endpoint offers no check', async () => {
     const [tree] = renderPage(mod, harness)
     const card = cardFor(tree, 'sensenova')
     assert.equal(
-      findButton(card),
+      findTestButton(card),
       undefined,
       'nothing to check: the Host would only answer "not enabled"',
     )
@@ -3203,6 +3613,133 @@ test('a card promotes its own endpoint to the shared default', async () => {
   }
 })
 
+test('N8: the bulk label counts every provider, not just the filtered rows', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const label = () =>
+      findButtons(render())
+        .map(button => textsOf(button).join(''))
+        .find(text => text.includes('所有 provider 使用默认代理'))
+
+    assert.equal(label(), '所有 provider 使用默认代理（2）')
+    findInputsByPlaceholder(render(), '按名称或 id 过滤…')[0].props.onChange({
+      target: { value: 'sense' },
+    })
+    assert.equal(
+      label(),
+      '所有 provider 使用默认代理（2）',
+      'filtering the list must not change how many providers the bulk action targets',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('N8: promoting over an inherited default asks before replacing it', async () => {
+  const { mod, restore } = loadBundle()
+  const previousWindow = globalThis.window
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        defaultProxy: {
+          protocol: 'http',
+          host: '127.0.0.1',
+          port: 7890,
+          username: '',
+          password: '',
+        },
+        providers: {
+          sensenova: {
+            enabled: true,
+            protocol: 'http',
+            host: '10.0.0.1',
+            port: 7891,
+            username: '',
+            password: '',
+          },
+          openai: {
+            enabled: true,
+            useDefault: true,
+            protocol: 'http',
+            host: '',
+            port: 0,
+            username: '',
+            password: '',
+          },
+        },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const calls = []
+    globalThis.window.confirm = message => {
+      calls.push(message)
+      return false
+    }
+    const promote = findButtons(cardFor(render(), 'sensenova')).find(button =>
+      textsOf(button).includes('设为默认代理'),
+    )
+    assert.ok(promote)
+    promote.props.onClick()
+    await writeSettle()
+    assert.equal(calls.length, 1, 'replacing a default in use asks once')
+    assert.equal(harness.writes.length, 0, 'cancelling must not write')
+
+    globalThis.window.confirm = message => {
+      calls.push(message)
+      return true
+    }
+    findButtons(cardFor(render(), 'sensenova'))
+      .find(button => textsOf(button).includes('设为默认代理'))
+      .props.onClick()
+    await writeSettle()
+    assert.equal(calls.length, 2)
+    assert.equal(harness.writes.length, 1, 'confirming writes the promoted endpoint once')
+    assert.deepEqual(
+      harness.writes[0].ops.map(op => [op.path[1], op.value]),
+      [
+        ['protocol', 'http'],
+        ['host', '10.0.0.1'],
+        ['port', 7891],
+        ['username', ''],
+        ['password', ''],
+      ],
+    )
+  } finally {
+    globalThis.window = previousWindow
+    restore()
+  }
+})
+
+test('N8: promoting does not prompt when no card inherits the default', async () => {
+  const { mod, restore } = loadBundle()
+  const previousWindow = globalThis.window
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    let asked = 0
+    globalThis.window.confirm = () => {
+      asked += 1
+      return false
+    }
+    const promote = findButtons(cardFor(render(), 'sensenova')).find(button =>
+      textsOf(button).includes('设为默认代理'),
+    )
+    assert.ok(promote)
+    promote.props.onClick()
+    await writeSettle()
+    assert.equal(asked, 0, 'there is nothing to overwrite')
+    assert.equal(harness.writes.length, 1, 'the unopposed promotion still writes')
+  } finally {
+    globalThis.window = previousWindow
+    restore()
+  }
+})
+
 test('an inheriting card has nothing to promote', async () => {
   const { mod, restore } = loadBundle()
   try {
@@ -3257,7 +3794,7 @@ test('the bulk button points every card at the default, in ONE write', async () 
     const [, render] = renderPage(mod, harness)
     await settle()
     const applyAll = findButtons(render()).find(button =>
-      textsOf(button).includes('所有 provider 使用默认代理'),
+      textsOf(button).some(text => text.includes('所有 provider 使用默认代理')),
     )
     assert.ok(applyAll, 'expected the bulk button in the shared-default block')
     assert.notEqual(applyAll.props.disabled, true, 'the default is usable, so the button is enabled')
@@ -3285,7 +3822,7 @@ test('the bulk button is disabled while the default is unusable', async () => {
     const [, render] = renderPage(mod, harness)
     await settle()
     const applyAll = findButtons(render()).find(button =>
-      textsOf(button).includes('所有 provider 使用默认代理'),
+      textsOf(button).some(text => text.includes('所有 provider 使用默认代理')),
     )
     assert.ok(applyAll)
     assert.equal(
@@ -3311,7 +3848,7 @@ test('a default host carrying a scheme does not read as usable', async () => {
     const [, render] = renderPage(mod, harness)
     await settle()
     const applyAll = findButtons(render()).find(button =>
-      textsOf(button).includes('所有 provider 使用默认代理'),
+      textsOf(button).some(text => text.includes('所有 provider 使用默认代理')),
     )
     assert.ok(applyAll)
     assert.equal(

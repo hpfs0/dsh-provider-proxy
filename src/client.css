@@ -210,6 +210,22 @@
   cursor: not-allowed;
 }
 
+/* The icon sits inside the input, so its hover/focus feedback must be local
+   and must outrank the transparent inline base. */
+.passwordToggle {
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.passwordToggle:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover) !important;
+  color: var(--dsw-alias-label-primary) !important;
+}
+
+.passwordToggle:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: 1px;
+}
+
 /* ---- self-check ---- */
 
 /* The hover state is the one thing an inline style cannot express, which is why
