@@ -3879,3 +3879,33 @@ test('an enabled route with no record yet says so; a disabled one stays silent',
     restore()
   }
 })
+
+test('N9: status filter chips render counts and filter the visible providers', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      settings: {
+        providers: {
+          sensenova: { enabled: true, protocol: 'http', host: '10.0.0.1', port: 7890 },
+          openai: { enabled: false, protocol: 'http', host: '', port: 0 },
+        },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+
+    const chips = findButtons(render()).filter(b =>
+      ['全部', '走代理', '直连', '配置被拒'].some(label => textsOf(b).some(t => t.includes(label))),
+    )
+    assert.strictEqual(chips.length, 4, 'four status filter chips should render')
+
+    const proxiedChip = chips.find(b => textsOf(b).some(t => t.includes('走代理')))
+    assert.ok(proxiedChip, 'proxied chip must be present')
+    proxiedChip.props.onClick()
+
+    assert.ok(cardFor(render(), 'sensenova'), 'sensenova is proxied and should remain visible')
+    assert.equal(cardFor(render(), 'openai'), undefined, 'openai is direct and should be filtered out')
+  } finally {
+    restore()
+  }
+})

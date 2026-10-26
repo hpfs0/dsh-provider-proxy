@@ -929,6 +929,32 @@ const S = {
     fontSize: '11px',
     color: 'var(--dsw-alias-label-secondary)',
   },
+  chipRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '6px',
+    flexWrap: 'wrap',
+    marginBottom: '2px',
+  },
+  chip: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    padding: '3px 10px',
+    borderRadius: '999px',
+    border: '1px solid var(--dsw-alias-border-l1)',
+    background: 'var(--dsw-alias-bg-layer-1)',
+    color: 'var(--dsw-alias-label-secondary)',
+    fontSize: '11px',
+    fontWeight: '500',
+    cursor: 'pointer',
+    userSelect: 'none',
+  },
+  chipActive: {
+    borderColor: 'var(--dsw-alias-brand-primary)',
+    background: 'var(--dsw-alias-interactive-bg-hover)',
+    color: 'var(--dsw-alias-brand-primary)',
+    fontWeight: '600',
+  },
 } as const
 
 function renderPage(ctx: any): unknown {
@@ -1156,6 +1182,10 @@ function renderPage(ctx: any): unknown {
    * saved setting, so a page with no filter one day still shows every route.
    */
   const [filter, setFilter] = (React.useState ?? ((v: any) => [v, () => {}]))('')
+  const [statusFilter, setStatusFilter] = (React.useState ?? ((v: any) => [v, () => {}]))('all') as [
+    'all' | 'proxied' | 'direct' | 'rejected',
+    (v: any) => void,
+  ]
 
   /**
    * Run the Host's self-check for one provider.
@@ -1686,11 +1716,64 @@ function renderPage(ctx: any): unknown {
     ),
   )
 
+  const routeStateOf = (row: ProviderRow): 'proxied' | 'direct' | 'rejected' => {
+    const route = view({ ...configured[row.id], ...draft[row.id] })
+    const recorded = problems[row.id]
+    const useDefault = route.useDefault === true
+    const problemText = recorded !== undefined
+      ? recorded
+      : useDefault
+        ? (defaultComplete ? undefined : `${t.defaultMissing}${defaultWhy}`)
+        : (route.enabled ? defaultProxyProblem(route) : undefined)
+    if (route.enabled && problemText !== undefined) return 'rejected'
+    if (route.enabled) return 'proxied'
+    return 'direct'
+  }
+
   const query = filter.trim().toLowerCase()
-  const shown =
+  const matchedKeywordRows =
     query.length === 0
       ? rows
       : rows.filter(row => `${row.id} ${row.name}`.toLowerCase().includes(query))
+
+  const countActive = matchedKeywordRows.filter(r => routeStateOf(r) === 'proxied').length
+  const countDirect = matchedKeywordRows.filter(r => routeStateOf(r) === 'direct').length
+  const countRejected = matchedKeywordRows.filter(r => routeStateOf(r) === 'rejected').length
+
+  const shown = matchedKeywordRows.filter(row => {
+    if (statusFilter === 'all') return true
+    return routeStateOf(row) === statusFilter
+  })
+
+  const chipRow =
+    rows.length === 0
+      ? null
+      : h(
+          'div',
+          { className: styles.chipRow, style: S.chipRow, key: 'status-chips' },
+          ([
+            { id: 'all', label: `${t.filterStatusAll} (${matchedKeywordRows.length})` },
+            { id: 'proxied', label: `${t.filterStatusProxied} (${countActive})` },
+            { id: 'direct', label: `${t.filterStatusDirect} (${countDirect})` },
+            { id: 'rejected', label: `${t.filterStatusRejected} (${countRejected})` },
+          ] as const).map(({ id, label }) =>
+            h(
+              'button',
+              {
+                key: id,
+                type: 'button',
+                className: statusFilter === id ? styles.chipActive : styles.chip,
+                style: {
+                  ...S.chip,
+                  ...(statusFilter === id ? S.chipActive : {}),
+                },
+                onClick: () => setStatusFilter(id),
+              },
+              label,
+            ),
+          ),
+        )
+
   const filterRow =
     rows.length === 0
       ? null
@@ -2156,6 +2239,7 @@ function renderPage(ctx: any): unknown {
     defaultBlock,
     globalBlock,
     catalogueNotice,
+    chipRow,
     filterRow,
     ...body,
     h(
@@ -2210,6 +2294,10 @@ const EN = {
   defaultMissing: 'The default proxy configuration is incomplete, so this provider is not proxied: ',
   filterLabel: 'Filter',
   filterPlaceholder: 'Filter by name or id…',
+  filterStatusAll: 'All',
+  filterStatusProxied: 'Proxied',
+  filterStatusDirect: 'Direct',
+  filterStatusRejected: 'Rejected',
   noMatch: 'No provider matches the filter.',
   setAsDefault: 'Set as the default proxy',
   applyDefaultAll: 'Use the default proxy for all providers',
@@ -2293,6 +2381,10 @@ const ZH = {
   defaultMissing: '顶层默认代理配置不完整，该 provider 不会走代理：',
   filterLabel: '过滤',
   filterPlaceholder: '按名称或 id 过滤…',
+  filterStatusAll: '全部',
+  filterStatusProxied: '走代理',
+  filterStatusDirect: '直连',
+  filterStatusRejected: '配置被拒',
   noMatch: '没有匹配的 provider。',
   setAsDefault: '设为默认代理',
   applyDefaultAll: '所有 provider 使用默认代理',

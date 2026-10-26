@@ -270,3 +270,28 @@
   font-family: ui-monospace, monospace;
   word-break: break-all;
 }
+
+/* ---- v0.8.0 N9 additions: status filter chips ---- */
+
+.chipRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.chip {
+  transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
+}
+
+.chip:hover:not(:disabled) {
+  border-color: var(--dsw-alias-border-l3) !important;
+  background: var(--dsw-alias-interactive-bg-hover) !important;
+  color: var(--dsw-alias-label-primary) !important;
+}
+
+.chipActive {
+  border-color: var(--dsw-alias-brand-primary) !important;
+  background: var(--dsw-alias-interactive-bg-hover) !important;
+  color: var(--dsw-alias-brand-primary) !important;
+}
