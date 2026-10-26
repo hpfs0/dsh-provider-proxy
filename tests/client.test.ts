@@ -3985,3 +3985,48 @@ test('N11: form grid renders responsive two-column layout in default proxy and c
     restore()
   }
 })
+
+test('N12: batch test button runs checks for all enabled providers with progress', async () => {
+  const { mod, restore } = loadBundle(async url => {
+    if (url === '/dsh-provider-proxy/test') {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, status: 200, ms: 88, exitIp: '1.2.3.4' }),
+      }
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        providers: [
+          { id: 'sensenova', name: 'SenseNova', live: true },
+          { id: 'openai', name: 'OpenAI', live: true },
+        ],
+      }),
+    }
+  })
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: { enabled: true, protocol: 'http', host: '10.0.0.1', port: 7890 },
+          openai: { enabled: true, protocol: 'http', host: '10.0.0.2', port: 7890 },
+        },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+
+    const batchBtn = findButtons(render()).find(b => textsOf(b).some(t => t.includes('测试已启用 (2)')))
+    assert.ok(batchBtn, 'batch test button shows active count 2')
+
+    batchBtn.props.onClick()
+    await settle()
+
+    assert.ok(textsOf(cardFor(render(), 'sensenova')).some(t => t.includes('88 ms')))
+    assert.ok(textsOf(cardFor(render(), 'openai')).some(t => t.includes('88 ms')))
+  } finally {
+    restore()
+  }
+})

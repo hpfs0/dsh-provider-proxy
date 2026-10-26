@@ -1231,6 +1231,10 @@ function renderPage(ctx: any): unknown {
     Record<string, boolean>,
     (v: any) => void,
   ]
+  const [batchProgress, setBatchProgress] = (React.useState ?? ((v: any) => [v, () => {}]))(null) as [
+    { done: number; total: number } | null,
+    (v: any) => void,
+  ]
 
   /**
    * Run the Host's self-check for one provider.
@@ -1242,11 +1246,11 @@ function renderPage(ctx: any): unknown {
    * flushed before the request: the Host reads the saved settings, not the draft,
    * so testing inside the 300 ms debounce would otherwise test the old endpoint.
    */
-  const runTest = (id: string): void => {
+  const runTest = (id: string): Promise<void> => {
     const generation = (testGeneration.get(id) ?? 0) + 1
     testGeneration.set(id, generation)
     setTests((current: any) => ({ ...current, [id]: { pending: true } }))
-    void (async () => {
+    return (async () => {
       try {
         for (const [key, entry] of [...pendingWrites]) {
           if (
@@ -1274,6 +1278,32 @@ function renderPage(ctx: any): unknown {
           [id]: { pending: false, ok: false, error: String(error?.message ?? error) },
         }))
       }
+    })()
+  }
+
+  const runBatchTest = (): void => {
+    const activeIds = rows
+      .filter(row => view({ ...configured[row.id], ...draft[row.id] }).enabled)
+      .map(row => row.id)
+    if (activeIds.length === 0 || batchProgress !== null) return
+    setBatchProgress({ done: 0, total: activeIds.length })
+
+    void (async () => {
+      let index = 0
+      let completed = 0
+      const concurrency = Math.min(3, activeIds.length)
+      const worker = async (): Promise<void> => {
+        while (index < activeIds.length) {
+          const id = activeIds[index++]
+          await runTest(id)
+          completed++
+          setBatchProgress({ done: completed, total: activeIds.length })
+        }
+      }
+      await Promise.all(Array.from({ length: concurrency }, () => worker()))
+      setTimeout(() => {
+        setBatchProgress(null)
+      }, 2000)
     })()
   }
 
@@ -1854,6 +1884,19 @@ function renderPage(ctx: any): unknown {
               value: filter,
               onChange: (event: any) => setFilter(event.target.value),
             }),
+            h(
+              'button',
+              {
+                className: styles.testButton,
+                style: { ...S.testButton, flex: 'none', whiteSpace: 'nowrap' },
+                type: 'button',
+                disabled: countActive === 0 || batchProgress !== null,
+                onClick: runBatchTest,
+              },
+              batchProgress !== null
+                ? `${t.batchTesting} (${batchProgress.done}/${batchProgress.total})`
+                : `${t.batchTest} (${countActive})`,
+            ),
             h(
               'button',
               {
@@ -2482,6 +2525,8 @@ const EN = {
   viewCompact: 'Compact view',
   expandDetails: 'Edit',
   collapseDetails: 'Collapse',
+  batchTest: 'Test active',
+  batchTesting: 'Testing',
   testButton: 'Test',
   testRunning: 'Testing…',
   testDisabledNote: 'Not enabled — test only: ',
@@ -2572,6 +2617,8 @@ const ZH = {
   viewCompact: '紧凑视图',
   expandDetails: '编辑',
   collapseDetails: '收起',
+  batchTest: '测试已启用',
+  batchTesting: '正在测试',
   testButton: '测试',
   testRunning: '测试中…',
   testDisabledNote: '未启用，仅测试：',
