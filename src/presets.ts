@@ -182,3 +182,18 @@ export function endpointSummary(endpoint: Partial<DefaultProxyValue> | undefined
   const port = endpoint?.port ?? 0
   return `${protocol}://${host}:${port === 0 ? '—' : port}`
 }
+
+/**
+ * A very short endpoint summary for a picker option, e.g. `127.0.0.1:7890`.
+ *
+ * The protocol is deliberately omitted: every option in the picker comes from
+ * this plugin and the card shows the full origin underneath once it is chosen.
+ * What a user needs while CHOOSING is the address, because that is what tells
+ * the four local clients apart.
+ */
+export function endpointAddress(endpoint: Partial<DefaultProxyValue> | undefined): string {
+  const host = (endpoint?.host ?? '').trim()
+  const port = endpoint?.port ?? 0
+  if (host.length === 0 || port === 0) return '未配置'
+  return `${host}:${port}`
+}

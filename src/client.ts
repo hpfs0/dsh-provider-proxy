@@ -26,6 +26,7 @@ import { defaultProxyProblem, proxyHostProblem } from './proxy-address.js'
 import {
   DEFAULT_PROFILE_LABEL,
   DEFAULT_PROFILE_BINDING,
+  endpointAddress,
   endpointSummary,
   profileNameProblem,
   profileNames,
@@ -2958,71 +2959,66 @@ function renderPage(ctx: any): unknown {
             }),
             h('span', null, t.useProxy),
           ),
-          // Which endpoint this card takes. With no named preset there is only
-          // one alternative to the card's own fields, so the 0.8.0 checkbox is
-          // kept byte-for-byte. Once presets exist, the same decision becomes a
-          // picker — a checkbox cannot express "which of four presets".
-          profileEntries.length === 0 && boundProfile.length === 0
-            ? h(
-                'label',
-                { className: styles.toggle, style: S.toggle, key: `${row.id}:usedefault` },
-                h('input', {
-                  type: 'checkbox',
-                  checked: useDefault,
-                  onChange: (event: any) => bind(row.id, 'useDefault')(event.target.checked === true),
-                }),
-                h('span', null, t.useDefault),
-              )
-            : h(
-                'label',
-                { className: styles.field, style: S.field, key: `${row.id}:profile` },
-                h('span', { className: styles.label, style: S.label }, t.profileBinding),
+          // Which endpoint this card takes.
+          //
+          // Always a picker, never a checkbox: the decision has three possible
+          // shapes (own fields / the built-in default / a named preset), and a
+          // checkbox can only express the first two. Every option carries the
+          // address it will use, because "预设: 香港专线" alone does not tell a
+          // user which port it points at.
+          h(
+            'label',
+            { className: styles.field, style: S.field, key: `${row.id}:profile` },
+            h('span', { className: styles.label, style: S.label }, t.profileBinding),
+            h(
+              'select',
+              {
+                className: styles.input,
+                style: S.input,
+                value: boundProfile.length > 0 ? boundProfile : useDefault ? DEFAULT_PROFILE_BINDING : '',
+                onChange: (event: any) => {
+                  const value = String(event.target.value)
+                  if (value === DEFAULT_PROFILE_BINDING) {
+                    edit(row.id, 'profileId', '')
+                    bind(row.id, 'useDefault')(true)
+                    return
+                  }
+                  if (value.length === 0) {
+                    edit(row.id, 'useDefault', false)
+                    bind(row.id, 'profileId')('')
+                    return
+                  }
+                  bindRouteProfile(row.id)(value)
+                },
+              },
+              h('option', { key: 'own', value: '' }, t.profileBindingOwn),
+              h(
+                'option',
+                { key: 'default', value: DEFAULT_PROFILE_BINDING },
+                `${t.profileBindingPrefix}${DEFAULT_PROFILE_LABEL.replace(
+                  ' (Default)',
+                  '',
+                )} (${endpointAddress(defaultView)})`,
+              ),
+              ...profileEntries.map(entry =>
                 h(
-                  'select',
-                  {
-                    className: styles.input,
-                    style: S.input,
-                    value: boundProfile.length > 0 ? boundProfile : useDefault ? DEFAULT_PROFILE_BINDING : '',
-                    onChange: (event: any) => {
-                      const value = String(event.target.value)
-                      if (value === DEFAULT_PROFILE_BINDING) {
-                        edit(row.id, 'profileId', '')
-                        bind(row.id, 'useDefault')(true)
-                        return
-                      }
-                      if (value.length === 0) {
-                        edit(row.id, 'useDefault', false)
-                        bind(row.id, 'profileId')('')
-                        return
-                      }
-                      bindRouteProfile(row.id)(value)
-                    },
-                  },
-                  h('option', { key: 'own', value: '' }, t.profileBindingOwn),
-                  h(
-                    'option',
-                    { key: 'default', value: DEFAULT_PROFILE_BINDING },
-                    `${t.profileBindingPrefix}${DEFAULT_PROFILE_LABEL}`,
-                  ),
-                  ...profileEntries.map(entry =>
-                    h(
-                      'option',
-                      { key: entry.name, value: entry.name },
-                      `${t.profileBindingPrefix}${entry.name}`,
-                    ),
-                  ),
-                  // A route may still point at a preset that was deleted while
-                  // this page was open. Without an option for it the select
-                  // would render blank, which reads as "no choice made".
-                  boundProfile.length > 0 && !profileEntries.some(entry => entry.name === boundProfile)
-                    ? h(
-                        'option',
-                        { key: `missing:${boundProfile}`, value: boundProfile },
-                        `${t.profileBindingPrefix}${boundProfile}${t.profileMissingOption}`,
-                      )
-                    : null,
+                  'option',
+                  { key: entry.name, value: entry.name },
+                  `${t.profileBindingPrefix}${entry.name} (${endpointAddress(entry.value)})`,
                 ),
               ),
+              // A route may still point at a preset that was deleted while this
+              // page was open. Without an option for it the select would render
+              // blank, which reads as "no choice made".
+              boundProfile.length > 0 && !profileEntries.some(entry => entry.name === boundProfile)
+                ? h(
+                    'option',
+                    { key: `missing:${boundProfile}`, value: boundProfile },
+                    `${t.profileBindingPrefix}${boundProfile}${t.profileMissingOption}`,
+                  )
+                : null,
+            ),
+          ),
           problemText !== undefined
             ? h('p', { key: `${row.id}:problem`, style: S.inheritWarning }, problemText)
             : boundProfile.length > 0

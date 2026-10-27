@@ -2274,17 +2274,21 @@ test('each provider is rendered as its own card section', async () => {
     walk(tree)
 
     // One section per provider, and each carries that provider's own controls.
-    // Two switches: the route's own on/off, and whether it uses the shared
-    // default endpoint.
+    // One switch (the route's own on/off) plus the endpoint-source picker,
+    // which since 0.9.0 also carries the "use the default proxy" choice.
     assert.equal(sections.length, 2, `expected 2 cards, got ${sections.length}`)
     for (const id of ['sensenova', 'openai']) {
       const card = sections.find(s => textsOf(s).includes(id))
       assert.ok(card, `no card for ${id}`)
       const controls = findCheckboxes(card)
-      assert.equal(controls.length, 2, `${id} must own two switches: enable, and use-default`)
-      for (const label of ['为该 provider 启用代理', '使用默认代理', '类型', 'IP / 主机', '端口', '用户名']) {
+      assert.equal(controls.length, 1, `${id} must own the enable switch`)
+      for (const label of ['为该 provider 启用代理', '端点来源', '类型', 'IP / 主机', '端口', '用户名']) {
         assert.ok(textsOf(card).includes(label), `${id} is missing its ${label} field`)
       }
+      assert.ok(
+        textsOf(cardFor(tree, id)).some(text => text.includes('预设：默认预设')),
+        `${id} must offer the built-in default preset`,
+      )
     }
     // The shared endpoint block is a plain div, never a provider card: a
     // `section` here would be counted as a third provider with no name.
@@ -2927,8 +2931,8 @@ test('the shared default endpoint is its own block, not a provider card', async 
     const texts = textsOf(tree)
     assert.ok(texts.includes('默认代理'), 'the shared endpoint must be rendered under its own title')
     assert.ok(
-      texts.includes('使用默认代理'),
-      'every card must offer the opt-in switch for the shared endpoint',
+      texts.some(text => text.includes('预设：默认预设')),
+      'every card must offer the built-in default preset as an endpoint source',
     )
     // It is the only place the address can be typed, so it must exist even when
     // no card has opted in yet.
@@ -3130,23 +3134,24 @@ test('the shared default endpoint is written to its own settings path', async ()
   }
 })
 
-test('the use-default switch persists to the route it belongs to', async () => {
+test('choosing the built-in default preset persists useDefault to its own route', async () => {
   const { mod, restore } = loadBundle()
   try {
     const harness = mountPlugin(mod)
     const [, render] = renderPage(mod, harness)
     await settle()
     const card = cardFor(render(), 'sensenova')
-    const [, useDefaultBox] = findCheckboxes(card)
-    assert.ok(useDefaultBox, 'expected the use-default switch on the card')
-    useDefaultBox.props.onChange({ target: { checked: true } })
+    const picker = profileSelectOf(card)
+    assert.ok(picker, 'the card offers the endpoint-source picker')
+    picker.props.onChange({ target: { value: '__default__' } })
     await writeSettle()
     assert.deepEqual(
       harness.writes[0].ops[0].path,
       ['providers', 'sensenova', 'useDefault'],
-      'the switch writes to the route, never to the shared block',
+      'the choice writes to the route, never to the shared block',
     )
     assert.equal(harness.writes[0].ops[0].value, true)
+    assert.equal(profileSelectOf(cardFor(render(), 'sensenova')).props.value, '__default__')
   } finally {
     restore()
   }
@@ -4202,14 +4207,19 @@ test('N14: the preset manager is a details block that lists the built-in default
   }
 })
 
-test('N14: with no named presets a card keeps the 0.8.0 use-default checkbox', async () => {
+test('N14: with no named presets a card still offers own fields and the built-in default', async () => {
   const { mod, restore } = loadBundle()
   try {
     const harness = mountPlugin(mod)
     const [tree] = renderPage(mod, harness)
     const card = cardFor(tree, 'sensenova')
-    assert.equal(findCheckboxes(card).length, 2, 'the two switches are unchanged')
-    assert.equal(profileSelectOf(card), undefined, 'no picker is offered with nothing to pick')
+    assert.equal(findCheckboxes(card).length, 1, 'the enable switch is the only checkbox')
+    const select = profileSelectOf(card)
+    assert.ok(select, 'the endpoint-source picker is always available')
+    const options = textsOf(select)
+    assert.ok(options.some(text => text.includes('独立自定义配置')))
+    assert.ok(options.some(text => text.includes('默认预设')))
+    assert.equal(options.filter(text => text.includes('预设：')).length, 1, 'no named preset yet')
   } finally {
     restore()
   }
@@ -4232,8 +4242,12 @@ test('N14: once a preset exists, a card picks its endpoint source from a list', 
     assert.ok(select, 'the card must offer a preset picker')
     const options = textsOf(select)
     assert.ok(options.some(text => text.includes('独立自定义配置')), 'the own-fields option is offered')
-    assert.ok(options.some(text => text.includes('默认预设 (Default)')), 'the default preset is offered')
+    assert.ok(options.some(text => text.includes('默认预设')), 'the default preset is offered')
     assert.ok(options.some(text => text.includes('HK-Proxy')), 'each named preset is offered')
+    assert.ok(
+      options.some(text => text.includes('127.0.0.1:7891')),
+      'each option names the address it will use',
+    )
     assert.equal(select.props.value, '', 'a route with no binding starts on its own fields')
   } finally {
     restore()
