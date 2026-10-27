@@ -4026,6 +4026,236 @@ test('N10: compact view mode toggles and allows expanding individual cards', asy
   }
 })
 
+// ---- N18: two-line compact rows with an endpoint-source switch ----
+
+/** One compact row (the `section` whose texts include a provider id). */
+function compactRowFor(tree, id) {
+  const rows = []
+  const walk = node => {
+    if (node === null || typeof node !== 'object') return
+    if (Array.isArray(node)) return node.forEach(walk)
+    if (node.type === 'section' && node.props?.key === `compact:${id}`) rows.push(node)
+    if (node.children) walk(node.children)
+  }
+  walk(tree)
+  return rows[0]
+}
+
+/** The `<section>`'s real children, without the null slots React keeps. */
+function linesOf(row) {
+  return (row?.children ?? []).filter(child => child !== null && child !== undefined)
+}
+
+/** Switch into compact view and return a render bound to the same hooks. */
+async function renderCompact(mod, harness) {
+  const [, render] = renderPage(mod, harness)
+  await settle()
+  findButtons(render()).find(button => textsOf(button).includes('紧凑视图')).props.onClick()
+  return render
+}
+
+test('N18: a compact row is two lines before a check and three after one', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const render = await renderCompact(mod, harness)
+    const row = compactRowFor(render(), 'sensenova')
+    assert.ok(row, 'the compact row must render')
+    // Two structural children by default: facts on top, controls underneath.
+    // The result line only exists once there is a result to show.
+    assert.equal(linesOf(row).length, 2, 'the row is two lines until a check reports')
+    assert.equal(row.props.style.flexDirection, 'column')
+  } finally {
+    restore()
+  }
+})
+
+test('N18: line one carries the proxy facts and no controls', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const render = await renderCompact(mod, harness)
+    const [info] = compactRowFor(render(), 'sensenova').children
+    const texts = textsOf(info)
+    assert.ok(texts.includes('SenseNova'), 'the provider name is on line one')
+    assert.ok(texts.includes('sensenova'), 'the provider id is on line one')
+    assert.ok(
+      texts.some(text => text.includes('http://10.0.0.1:7890')),
+      'the resolved endpoint is on line one',
+    )
+    // Line one is read-only: no inputs, no buttons.
+    assert.equal(findCheckboxes(info).length, 0, 'no switch on the info line')
+    assert.equal(findButtons(info).length, 0, 'no buttons on the info line')
+    assert.equal(findFirstNodeOfType(info, 'select'), undefined, 'no picker on the info line')
+  } finally {
+    restore()
+  }
+})
+
+test('N18: line two carries the switch, the source picker and the actions', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: { enabled: true, protocol: 'http', host: '10.0.0.1', port: 7890 },
+        },
+        proxyProfiles: { 'HK-Proxy': { protocol: 'socks5', host: '127.0.0.1', port: 7891 } },
+      },
+    })
+    const render = await renderCompact(mod, harness)
+    const [, actions] = compactRowFor(render(), 'sensenova').children
+    assert.equal(findCheckboxes(actions).length, 1, 'the enable switch moved to line two')
+    const picker = findFirstNodeOfType(actions, 'select')
+    assert.ok(picker, 'the endpoint-source picker is on line two')
+    const options = textsOf(picker)
+    assert.ok(options.some(text => text.includes('独立自定义配置')))
+    assert.ok(options.some(text => text.includes('默认预设')))
+    assert.ok(options.some(text => text.includes('HK-Proxy')))
+    assert.equal(
+      findButtons(actions).filter(button => textsOf(button).includes('测试')).length,
+      1,
+      'the Test button is on line two',
+    )
+    assert.ok(
+      findButtons(actions).some(button => textsOf(button).includes('编辑')),
+      'the expand control is on line two',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('N18: the compact endpoint source picker writes both binding fields', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: { enabled: true, protocol: 'http', host: '10.0.0.1', port: 7890 },
+        },
+        proxyProfiles: { 'HK-Proxy': { protocol: 'socks5', host: '127.0.0.1', port: 7891 } },
+      },
+    })
+    const render = await renderCompact(mod, harness)
+    const picker = findFirstNodeOfType(linesOf(compactRowFor(render(), 'sensenova'))[1], 'select')
+    picker.props.onChange({ target: { value: 'HK-Proxy' } })
+    await writeSettle()
+    assert.deepEqual(harness.writes[0].ops, [
+      { op: 'set', path: ['providers', 'sensenova', 'profileId'], value: 'HK-Proxy' },
+      { op: 'set', path: ['providers', 'sensenova', 'useDefault'], value: false },
+    ])
+  } finally {
+    restore()
+  }
+})
+
+test('N18: after switching source in the compact row, line one shows the new endpoint', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: { enabled: true, protocol: 'http', host: '10.0.0.1', port: 7890 },
+        },
+        proxyProfiles: { 'HK-Proxy': { protocol: 'socks5', host: '127.0.0.1', port: 7891 } },
+      },
+    })
+    const render = await renderCompact(mod, harness)
+    findFirstNodeOfType(linesOf(compactRowFor(render(), 'sensenova'))[1], 'select')
+      .props.onChange({ target: { value: 'HK-Proxy' } })
+    const texts = textsOf(linesOf(compactRowFor(render(), 'sensenova'))[0])
+    assert.ok(
+      texts.some(text => text.includes('预设：HK-Proxy: socks5://127.0.0.1:7891')),
+      'the info line must follow the switch immediately',
+    )
+    await writeSettle()
+  } finally {
+    restore()
+  }
+})
+
+test('N18: a compact row bound to a missing preset says so on line one', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: { enabled: true, profileId: 'gone', protocol: 'http', host: '', port: 0 },
+        },
+        proxyProfiles: {},
+      },
+    })
+    const render = await renderCompact(mod, harness)
+    const [info, actions] = compactRowFor(render(), 'sensenova').children
+    assert.ok(
+      textsOf(info).some(text => text.includes('gone') && text.includes('已缺失')),
+      'the gap must be visible without expanding the row',
+    )
+    assert.equal(
+      findFirstNodeOfType(actions, 'select').props.value,
+      'gone',
+      'the picker still shows the missing binding instead of a blank value',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('N18: a test result lands on its own third line, clear of the controls', async () => {
+  // Requested: show the check result on a third line. Keeping it out of the
+  // control line means a running or failing check never shifts the picker or
+  // the buttons, and a long failure message gets the full width.
+  const { mod, restore } = loadBundle(async url => ({
+    ok: true,
+    status: 200,
+    json: async () =>
+      String(url).includes('/test')
+        ? { ok: true, ms: 88, status: 200, exitIp: '203.0.113.7' }
+        : { providers: [{ id: 'sensenova', name: 'SenseNova', live: true }] },
+  }))
+  try {
+    const harness = mountPlugin(mod)
+    const render = await renderCompact(mod, harness)
+
+    assert.equal(linesOf(compactRowFor(render(), 'sensenova')).length, 2, 'no result line before a check')
+
+    findButtons(compactRowFor(render(), 'sensenova'))
+      .find(button => textsOf(button).includes('测试'))
+      .props.onClick()
+    await settle()
+
+    const row = compactRowFor(render(), 'sensenova')
+    assert.equal(linesOf(row).length, 3, 'the result gets its own third line')
+    const [, actions, result] = linesOf(row)
+    assert.ok(
+      textsOf(result).some(text => text.includes('88 ms')),
+      'the latency lands on the result line',
+    )
+    assert.ok(textsOf(result).some(text => text.includes('HTTP 200')))
+    assert.ok(textsOf(result).some(text => text.includes('203.0.113.7')))
+
+    // The control line is unchanged by the result: same picker, same buttons,
+    // and nothing of the outcome ended up in it.
+    assert.ok(findFirstNodeOfType(actions, 'select'), 'the picker stays on line two')
+    assert.ok(
+      findButtons(actions).some(button => textsOf(button).includes('测试')),
+      'the Test button stays on line two',
+    )
+    assert.ok(
+      !textsOf(actions).some(text => text.includes('88 ms')),
+      'the outcome must not be printed on the control line',
+    )
+    // And the result can be copied from where it is shown.
+    assert.ok(
+      findButtons(result).some(button => button.props['aria-label'] === '复制'),
+      'the exit IP on the result line can be copied',
+    )
+  } finally {
+    restore()
+  }
+})
+
 test('N11: form grid renders responsive two-column layout in default proxy and card forms', async () => {
   const { mod, restore } = loadBundle()
   try {

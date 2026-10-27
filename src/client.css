@@ -325,9 +325,9 @@
 .compactRowActive,
 .compactRowRejected {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
   padding: 10px 14px;
   border: 1px solid var(--dsw-alias-border-l1);
   border-radius: 8px;

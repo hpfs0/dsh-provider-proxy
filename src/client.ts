@@ -1030,14 +1030,48 @@ const S = {
   },
   compactRow: {
     display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: '10px',
+    flexDirection: 'column',
+    gap: '8px',
     padding: '10px 14px',
     border: '1px solid var(--dsw-alias-border-l1)',
     borderRadius: '8px',
     background: 'var(--dsw-alias-bg-layer-1)',
     marginBottom: '8px',
+  },
+  /** Row 1 of a compact entry: identity and the proxy it uses. */
+  compactLine: {
+    display: 'flex',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: '8px',
+    minWidth: '0',
+  },
+  /** Row 2 of a compact entry: every control, right-aligned. */
+  compactActions: {
+    display: 'flex',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: '8px',
+    minWidth: '0',
+  },
+  /**
+   * Row 3 of a compact entry: the self-check outcome.
+   *
+   * Its own line, so a running or failing check never shifts the picker or the
+   * buttons, and a long failure message gets the full width instead of being
+   * squeezed between two controls.
+   */
+  compactResultLine: {
+    display: 'flex',
+    alignItems: 'baseline',
+    flexWrap: 'wrap',
+    gap: '6px',
+    paddingTop: '6px',
+    borderTop: '1px solid var(--dsw-alias-border-l1)',
+    fontSize: '11px',
+    color: 'var(--dsw-alias-label-secondary)',
+    minWidth: '0',
+    wordBreak: 'break-all',
   },
   compactRowActive: {
     borderColor: 'var(--dsw-alias-state-success-primary)',
@@ -3362,6 +3396,20 @@ function renderPage(ctx: any): unknown {
         )
 
         const isExpanded = expandedCards[row.id] === true
+        /**
+         * The endpoint line for the compact row, in the same words the card
+         * uses: which source it came from, then the resolved address.
+         */
+        const endpointText =
+          endpointState.missingProfile !== undefined
+            ? `${t.profileBindingPrefix}${endpointState.missingProfile}${t.profileMissingOption}`
+            : boundProfile.length > 0
+              ? `${t.profileBindingPrefix}${boundProfile}: ${endpointSummary(endpointState.endpoint ?? {})}`
+              : useDefault
+                ? `${t.useDefault}: ${defaultOrigin}`
+                // Lower-case, matching the resolved-endpoint wording above so the
+                // same address never appears in two spellings on one page.
+                : `${route.protocol}://${route.host || '—'}:${route.port || '—'}`
         const compactRowElement = h(
           'section',
           {
@@ -3373,38 +3421,89 @@ function renderPage(ctx: any): unknown {
                 : S.compactRow,
             key: `compact:${row.id}`,
           },
+          // Row 1 — who this is and which proxy actually carries it. The
+          // endpoint shown is the RESOLVED one, so a preset-bound row never
+          // claims an address it will not use.
           h(
             'div',
-            { style: { display: 'flex', alignItems: 'center', gap: '8px', minWidth: '0' } },
-            h('input', {
-              type: 'checkbox',
-              checked: route.enabled,
-              onChange: (event: any) => bind(row.id, 'enabled')(event.target.checked === true),
-            }),
-            h('span', { className: styles.name, style: { ...S.name, maxWidth: '140px' } }, row.name),
+            { style: S.compactLine, key: `compact:${row.id}:info` },
+            h('span', { className: styles.name, style: { ...S.name, maxWidth: '160px' } }, row.name),
             h('span', { className: styles.id, style: S.id }, row.id),
-            boundProfile.length > 0
-              ? h(
+            h(
+              'span',
+              {
+                style: {
+                  ...S.compactEndpoint,
+                  ...(endpointState.missingProfile !== undefined || endpointState.why !== undefined
+                    ? { color: 'var(--dsw-alias-state-error-primary, #f85149)' }
+                    : {}),
+                },
+                title: endpointText,
+              },
+              endpointText,
+            ),
+            lastText === undefined
+              ? null
+              : h(
                   'span',
-                  { style: S.compactEndpoint },
-                  `${t.profileBindingPrefix}${boundProfile}: ${endpointSummary(endpointState.endpoint ?? {})}`,
-                )
-              : useDefault
-                ? h('span', { style: S.compactEndpoint }, `${t.useDefault}: ${defaultOrigin}`)
-                : h('span', { style: S.compactEndpoint }, `${route.protocol.toUpperCase()}://${route.host || '—'}:${route.port || '—'}`),
+                  {
+                    style: {
+                      ...S.compactEndpoint,
+                      ...(lastUse[row.id]?.ok === false ? S.inheritWarning : {}),
+                    },
+                  },
+                  lastText,
+                ),
           ),
+          // Row 2 — everything actionable, including the endpoint source. The
+          // source picker lives here rather than in row 1 because it is a
+          // CONTROL: putting it among the read-only facts made the row look
+          // uniform while one element was silently editable.
           h(
             'div',
-            { style: { display: 'flex', alignItems: 'center', gap: '8px', flex: 'none' } },
-            result?.pending === true
-              ? h('span', { style: { fontSize: '11px', color: 'var(--dsw-alias-label-secondary)' } }, t.testRunning)
-              : result?.ok === true
-                ? h('span', { style: { fontSize: '11px', color: latencyColor(result.ms), fontWeight: '500' } }, `✓ ${result.ms ?? '—'} ms`)
-                : result?.ok === false
-                  ? h('span', { style: { fontSize: '11px', color: 'var(--dsw-alias-state-error-primary, #f85149)', fontWeight: '500' } }, `✗ ${result.error}`)
-                  : lastText !== undefined
-                    ? h('span', { style: { fontSize: '11px', color: 'var(--dsw-alias-label-secondary)' } }, lastText)
-                    : null,
+            { style: S.compactActions, key: `compact:${row.id}:actions` },
+            h(
+              'label',
+              {
+                style: { display: 'inline-flex', alignItems: 'center', gap: '6px', flex: 'none' },
+              },
+              h('input', {
+                type: 'checkbox',
+                checked: route.enabled,
+                onChange: (event: any) => bind(row.id, 'enabled')(event.target.checked === true),
+              }),
+              h('span', { style: { fontSize: '11px', color: 'var(--dsw-alias-label-secondary)' } }, t.useProxy),
+            ),
+            h(
+              'select',
+              {
+                className: styles.input,
+                style: { ...S.input, flex: '0 1 190px', minWidth: '120px', padding: '3px 6px' },
+                'aria-label': t.profileBinding,
+                value: boundProfile.length > 0 ? boundProfile : useDefault ? DEFAULT_PROFILE_BINDING : '',
+                onChange: (event: any) => bindRouteProfile(row.id)(String(event.target.value)),
+              },
+              h('option', { key: 'own', value: '' }, t.profileBindingOwn),
+              h(
+                'option',
+                { key: 'default', value: DEFAULT_PROFILE_BINDING },
+                `${t.profileBindingPrefix}${DEFAULT_PROFILE_LABEL.replace(' (Default)', '')} (${endpointAddress(defaultView)})`,
+              ),
+              ...profileEntries.map(entry =>
+                h(
+                  'option',
+                  { key: entry.name, value: entry.name },
+                  `${t.profileBindingPrefix}${entry.name} (${endpointAddress(entry.value)})`,
+                ),
+              ),
+              boundProfile.length > 0 && !profileEntries.some(entry => entry.name === boundProfile)
+                ? h(
+                    'option',
+                    { key: `missing:${boundProfile}`, value: boundProfile },
+                    `${t.profileBindingPrefix}${boundProfile}${t.profileMissingOption}`,
+                  )
+                : null,
+            ),
             h('span', { className: pill.className, style: pill.style }, pill.text),
             showTest
               ? h(
@@ -3430,6 +3529,56 @@ function renderPage(ctx: any): unknown {
               isExpanded ? t.collapseDetails : t.expandDetails,
             ),
           ),
+          // Row 3 — the self-check outcome, on its OWN line.
+          //
+          // Kept out of the control line so a running or failing check can never
+          // shift the picker or the buttons under the cursor, and so a long
+          // failure message has the full width instead of being squeezed
+          // between two controls. It appears only when there is something to
+          // report: an always-present empty row is just extra height.
+          result === undefined || result.ok === undefined
+            ? null
+            : h(
+                'div',
+                { style: S.compactResultLine, key: `compact:${row.id}:result` },
+                result.pending === true
+                  ? h('span', { style: { color: 'var(--dsw-alias-label-secondary)' } }, t.testRunning)
+                  : result.ok === true
+                    ? [
+                        h(
+                          'span',
+                          { key: 'lat', style: { color: latencyColor(result.ms), fontWeight: '500' } },
+                          `✓ ${result.ms ?? '—'} ms`,
+                        ),
+                        typeof result.status === 'number'
+                          ? h('span', { key: 'status' }, `HTTP ${result.status}`)
+                          : null,
+                        result.ip === undefined
+                          ? null
+                          : h(
+                              'span',
+                              { key: 'ip', style: { display: 'inline-flex', alignItems: 'center', gap: '3px' } },
+                              `${t.exitIpLabel}${result.ip}`,
+                              copyButton(`${row.id}:compact:ip`, String(result.ip), t.copy),
+                            ),
+                        result.direct === true ? h('span', { key: 'direct' }, t.directLabel) : null,
+                        result.cached === true ? h('span', { key: 'cached' }, t.cachedLabel) : null,
+                      ]
+                    : [
+                        h(
+                          'span',
+                          {
+                            key: 'err',
+                            style: { ...S.testFailure, display: 'inline-flex', alignItems: 'center', gap: '3px' },
+                          },
+                          `✗ ${result.error}`,
+                          copyButton(`${row.id}:compact:err`, String(result.error), t.copy),
+                        ),
+                        typeof result.status === 'number'
+                          ? h('span', { key: 'status' }, `HTTP ${result.status}`)
+                          : null,
+                      ],
+              ),
         )
 
         if (viewMode === 'compact') {
