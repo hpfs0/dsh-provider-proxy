@@ -4365,7 +4365,10 @@ test('N14: adding a preset writes the whole preset dictionary', async () => {
     const harness = mountPlugin(mod)
     const [, render] = renderPage(mod, harness)
     await settle()
-    globalThis.window = { ...globalThis.window, prompt: () => 'HK-Proxy' }
+    const manager = profileManagerOf(render())
+    const nameInput = findInputsByPlaceholder(manager, '新预设名称，例如 HK-Proxy')[0]
+    assert.ok(nameInput, 'the manager must offer an inline name field')
+    nameInput.props.onChange({ target: { value: 'HK-Proxy' } })
     const add = findButtons(profileManagerOf(render())).find(button =>
       textsOf(button).includes('添加预设'),
     )
@@ -4397,7 +4400,8 @@ test('N14: a duplicate preset name is refused without a write', async () => {
       },
     })
     const [, render] = renderPage(mod, harness)
-    globalThis.window = { ...globalThis.window, prompt: () => 'HK-Proxy' }
+    findInputsByPlaceholder(profileManagerOf(render()), '新预设名称，例如 HK-Proxy')[0]
+      .props.onChange({ target: { value: 'HK-Proxy' } })
     findButtons(profileManagerOf(render()))
       .find(button => textsOf(button).includes('添加预设'))
       .props.onClick()
@@ -4546,9 +4550,21 @@ test('N14: renaming a preset moves the key and rebinds every route using it', as
       },
     })
     const [, render] = renderPage(mod, harness)
-    globalThis.window = { ...globalThis.window, prompt: () => 'HK-Fast' }
+    // Rename is inline: open the field, type, then confirm — the same three
+    // steps a user performs. `window.prompt` cannot be used here because the
+    // Desktop host does not implement it.
     findButtons(profileManagerOf(render()))
       .find(button => textsOf(button).includes('重命名'))
+      .props.onClick()
+    const renameInput = findInputsByPlaceholder(
+      profileManagerOf(render()),
+      '该代理预设的新名称：',
+    )[0]
+    assert.ok(renameInput, 'the rename field must appear in place')
+    assert.equal(renameInput.props.value, 'HK-Proxy', 'it starts from the current name')
+    renameInput.props.onChange({ target: { value: 'HK-Fast' } })
+    findButtons(profileManagerOf(render()))
+      .find(button => textsOf(button).includes('保存名称'))
       .props.onClick()
     await writeSettle()
     assert.deepEqual(harness.writes[0].ops, [
@@ -4562,6 +4578,80 @@ test('N14: renaming a preset moves the key and rebinds every route using it', as
     assert.ok(
       textsOf(cardFor(render(), 'sensenova')).some(text => text.includes('使用预设 HK-Fast')),
       'the card follows the rename without a remount',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('N14: adding a preset works where window.prompt does not exist', async () => {
+  // The Desktop host does not implement `window.prompt` — calling it throws and
+  // a button wired to it does nothing at all, which is exactly how "clicking Add
+  // preset has no effect" was reported. The manager must not depend on it.
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    assert.equal(typeof globalThis.window?.prompt, 'undefined', 'the fixture has no prompt')
+
+    findInputsByPlaceholder(profileManagerOf(render()), '新预设名称，例如 HK-Proxy')[0]
+      .props.onChange({ target: { value: 'HK-Proxy' } })
+    findButtons(profileManagerOf(render()))
+      .find(button => textsOf(button).includes('添加预设'))
+      .props.onClick()
+    await writeSettle()
+
+    assert.equal(harness.writes.length, 1, 'the add must actually reach the Host')
+    assert.deepEqual(Object.keys(harness.writes[0].ops[0].value), ['HK-Proxy'])
+    assert.ok(
+      textsOf(profileManagerOf(render())).includes('HK-Proxy'),
+      'the new row must be visible in the manager',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('N14: the manager opens itself when a preset is added', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    assert.equal(profileManagerOf(render()).props.open, false, 'collapsed by default')
+
+    findInputsByPlaceholder(profileManagerOf(render()), '新预设名称，例如 HK-Proxy')[0]
+      .props.onChange({ target: { value: 'HK-Proxy' } })
+    findButtons(profileManagerOf(render()))
+      .find(button => textsOf(button).includes('添加预设'))
+      .props.onClick()
+
+    assert.equal(
+      profileManagerOf(render()).props.open,
+      true,
+      'a new row inside a collapsed block would still read as "nothing happened"',
+    )
+    await writeSettle()
+  } finally {
+    restore()
+  }
+})
+
+test('N14: an empty name is reported instead of silently doing nothing', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    findButtons(profileManagerOf(render()))
+      .find(button => textsOf(button).includes('添加预设'))
+      .props.onClick()
+    await writeSettle()
+    assert.equal(harness.writes.length, 0)
+    assert.ok(
+      textsOf(render()).some(text => text.includes('保存失败：') && text.includes('不能为空')),
+      'the reason must be visible, otherwise the click still looks dead',
     )
   } finally {
     restore()

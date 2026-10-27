@@ -1231,6 +1231,30 @@ function renderPage(ctx: any): unknown {
     }))
 
   /**
+   * The preset manager's own edit state.
+   *
+   * `window.prompt` is NOT usable here: Electron does not implement it, so the
+   * call throws and a button wired to it does nothing at all — exactly the
+   * symptom "clicking Add preset has no effect". Naming is therefore an inline
+   * input, which also works in a web build.
+   */
+  const [newProfileName, setNewProfileName] = (React.useState ?? ((v: any) => [v, () => {}]))('')
+  const [renamingProfile, setRenamingProfile] = (React.useState ?? ((v: any) => [v, () => {}]))(
+    undefined as string | undefined,
+  )
+  const [renameDraft, setRenameDraft] = (React.useState ?? ((v: any) => [v, () => {}]))('')
+  /**
+   * Whether the preset manager is expanded.
+   *
+   * A controlled `<details>`: adding a preset must open the block that contains
+   * it, otherwise the new row appears inside a collapsed section and the click
+   * still reads as "nothing happened".
+   */
+  const [profileManagerOpen, setProfileManagerOpen] = (React.useState ?? ((v: any) => [v, () => {}]))(
+    false,
+  )
+
+  /**
    * Whether each password input is temporarily shown as plain text.
    *
    * Provider cards are keyed by id; the shared default has its own state so a
@@ -1941,17 +1965,17 @@ function renderPage(ctx: any): unknown {
     saveMany(key, [{ op: 'set', path: ['proxyProfiles'], value: full }], label, onRefused)
   }
 
-  /** Add a preset, then focus its rows by name. */
+  /** Add a preset from the inline name field. */
   const addProfile = (): void => {
-    const raw = globalThis.window?.prompt?.(t.profileNamePrompt) ?? null
-    if (raw === null) return
-    const name = raw.trim()
+    const name = String(newProfileName ?? '').trim()
     const problem = profileNameProblem(name)
     if (problem !== undefined) {
+      setSavedNote(undefined)
       setSaveError({ label: t.profileNameLabel, message: problem })
       return
     }
     if (storedProfiles[name] !== undefined || profileDraft[name] !== undefined) {
+      setSavedNote(undefined)
       setSaveError({ label: t.profileNameLabel, message: t.profileNameTaken })
       return
     }
@@ -1960,7 +1984,11 @@ function renderPage(ctx: any): unknown {
       ProfileValue
     >
     next[name] = profileView({})
+    setNewProfileName('')
     setProfileDraft((current: any) => ({ ...current, [name]: profileView({}) }))
+    // A new row is worthless if it is still collapsed under the manager or
+    // scrolled out of view, so the manager is opened with the new row.
+    setProfileManagerOpen(true)
     writeProfiles(`\u0000profile\u0000add`, next, `${t.profileNameLabel} ${name}`, () => {
       setProfileDraft((current: any) => {
         if (current[name] === undefined) return current
@@ -1973,16 +2001,18 @@ function renderPage(ctx: any): unknown {
 
   /** Rename one preset, carrying its fields and every binding with it. */
   const renameProfile = (from: string): void => {
-    const raw = globalThis.window?.prompt?.(t.profileRenamePrompt, from) ?? null
-    if (raw === null) return
-    const to = raw.trim()
+    const to = String(renameDraft ?? '').trim()
+    setRenamingProfile(undefined)
+    setRenameDraft('')
     if (to === from) return
     const problem = profileNameProblem(to)
     if (problem !== undefined) {
+      setSavedNote(undefined)
       setSaveError({ label: t.profileNameLabel, message: problem })
       return
     }
     if (storedProfiles[to] !== undefined || profileDraft[to] !== undefined) {
+      setSavedNote(undefined)
       setSaveError({ label: t.profileNameLabel, message: t.profileNameTaken })
       return
     }
@@ -2236,6 +2266,11 @@ function renderPage(ctx: any): unknown {
       className: styles.diag,
       style: { ...S.diag, marginTop: '0' },
       key: 'profile-manager',
+      open: profileManagerOpen === true,
+      onToggle: (event: any) => {
+        const open = event?.currentTarget?.open
+        if (typeof open === 'boolean') setProfileManagerOpen(open)
+      },
     },
     h(
       'summary',
@@ -2245,12 +2280,28 @@ function renderPage(ctx: any): unknown {
     h('p', { className: styles.defaultLead, style: S.defaultLead }, t.profileManagerLead),
     h(
       'div',
-      { style: S.testRow, key: 'profile:add' },
+      { style: { ...S.testRow, alignItems: 'stretch' }, key: 'profile:add' },
+      h('input', {
+        className: styles.input,
+        style: { ...S.input, flex: '1 1 160px', minWidth: '0' },
+        placeholder: t.profileNamePlaceholder,
+        value: newProfileName,
+        'aria-label': t.profileNameLabel,
+        onChange: (event: any) => setNewProfileName(event.target.value),
+        // Enter is the obvious gesture in a one-field form; without it the user
+        // has to reach for the button after typing, which is the same dead end
+        // the native prompt left them in.
+        onKeyDown: (event: any) => {
+          if (event?.key !== 'Enter') return
+          event.preventDefault?.()
+          addProfile()
+        },
+      }),
       h(
         'button',
         {
           className: styles.testButton,
-          style: S.testButton,
+          style: { ...S.testButton, flex: 'none' },
           type: 'button',
           onClick: addProfile,
         },
@@ -2309,7 +2360,10 @@ function renderPage(ctx: any): unknown {
                 className: styles.testButton,
                 style: { ...S.testButton, padding: '3px 8px', fontSize: '11px' },
                 type: 'button',
-                onClick: () => renameProfile(entry.name),
+                onClick: () => {
+                  setRenamingProfile(entry.name)
+                  setRenameDraft(entry.name)
+                },
               },
               t.profileRename,
             ),
@@ -2325,6 +2379,57 @@ function renderPage(ctx: any): unknown {
             ),
           ),
         ),
+        // The rename field, shown in place of the row title's edit gesture.
+        // Inline rather than a modal, for the same reason the add field is
+        // inline: the Desktop build has no `window.prompt`.
+        renamingProfile !== entry.name
+          ? null
+          : h(
+              'div',
+              { style: { ...S.testRow, alignItems: 'stretch' }, key: `profile:${entry.name}:rename` },
+              h('input', {
+                className: styles.input,
+                style: { ...S.input, flex: '1 1 160px', minWidth: '0' },
+                value: renameDraft,
+                placeholder: t.profileRenamePrompt,
+                'aria-label': t.profileRenamePrompt,
+                autoFocus: true,
+                onChange: (event: any) => setRenameDraft(event.target.value),
+                onKeyDown: (event: any) => {
+                  if (event?.key === 'Escape') {
+                    setRenamingProfile(undefined)
+                    setRenameDraft('')
+                    return
+                  }
+                  if (event?.key !== 'Enter') return
+                  event.preventDefault?.()
+                  renameProfile(entry.name)
+                },
+              }),
+              h(
+                'button',
+                {
+                  className: styles.testButton,
+                  style: { ...S.testButton, flex: 'none' },
+                  type: 'button',
+                  onClick: () => renameProfile(entry.name),
+                },
+                t.profileRenameConfirm,
+              ),
+              h(
+                'button',
+                {
+                  className: styles.testButton,
+                  style: { ...S.testButton, flex: 'none' },
+                  type: 'button',
+                  onClick: () => {
+                    setRenamingProfile(undefined)
+                    setRenameDraft('')
+                  },
+                },
+                t.cancel,
+              ),
+            ),
         bound.length === 0
           ? null
           : h('p', { style: S.inheritNote }, `${t.profileUsedBy}${bound.join('、')}`),
@@ -3504,8 +3609,11 @@ const EN = {
   profileRename: 'Rename',
   profileDelete: 'Delete',
   profileNameLabel: 'Preset name',
+  profileNamePlaceholder: 'New preset name, e.g. HK-Proxy',
   profileNamePrompt: 'Name for the new proxy preset:',
   profileRenamePrompt: 'New name for this proxy preset:',
+  profileRenameConfirm: 'Save name',
+  cancel: 'Cancel',
   profileNameTaken: 'A preset with that name already exists.',
   profileDeleteConfirm: 'Delete this proxy preset?',
   profileDeleteInUse:
@@ -3637,8 +3745,11 @@ const ZH = {
   profileRename: '重命名',
   profileDelete: '删除',
   profileNameLabel: '预设名称',
+  profileNamePlaceholder: '新预设名称，例如 HK-Proxy',
   profileNamePrompt: '新代理预设的名称：',
   profileRenamePrompt: '该代理预设的新名称：',
+  profileRenameConfirm: '保存名称',
+  cancel: '取消',
   profileNameTaken: '已存在同名预设。',
   profileDeleteConfirm: '确认删除该代理预设？',
   profileDeleteInUse: '以下 provider 绑定在该预设上，删除后将不再走代理，直到重新绑定：\n',
