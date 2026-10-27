@@ -693,6 +693,59 @@ type PendingWrite = { timer?: ReturnType<typeof setTimeout>; flush: () => Promis
 const pendingWrites = new Map<string, PendingWrite>()
 
 /**
+ * Where the page remembers its own VIEW preferences.
+ *
+ * The settings page is torn down and remounted whenever the user navigates
+ * away, so anything held in `useState` alone resets: a user who prefers the
+ * compact list had to switch back on every visit. These are preferences about
+ * how to LOOK at the page, never about what it configures, so they live in
+ * `localStorage` rather than in the plugin's settings file — writing them to
+ * `cordis.patch.yml` would make a display toggle look like configuration, and
+ * a failed settings write would silently discard it.
+ */
+const VIEW_PREFS_KEY = 'dsh-provider-proxy:view'
+
+type ViewPrefs = {
+  viewMode?: 'card' | 'compact'
+  statusFilter?: 'all' | 'proxied' | 'direct' | 'rejected'
+}
+
+/** Stored preferences, or `{}` when storage is missing or unreadable. */
+function readViewPrefs(): ViewPrefs {
+  try {
+    const raw = globalThis.localStorage?.getItem(VIEW_PREFS_KEY)
+    if (typeof raw !== 'string' || raw.length === 0) return {}
+    const parsed = JSON.parse(raw) as ViewPrefs
+    if (parsed === null || typeof parsed !== 'object') return {}
+    const out: ViewPrefs = {}
+    if (parsed.viewMode === 'card' || parsed.viewMode === 'compact') out.viewMode = parsed.viewMode
+    if (
+      parsed.statusFilter === 'all' ||
+      parsed.statusFilter === 'proxied' ||
+      parsed.statusFilter === 'direct' ||
+      parsed.statusFilter === 'rejected'
+    ) {
+      out.statusFilter = parsed.statusFilter
+    }
+    return out
+  } catch {
+    // Private mode, a quota error, or a corrupt value: the page still works,
+    // it just forgets the preference.
+    return {}
+  }
+}
+
+/** Persist one preference, merging with what is already stored. */
+function writeViewPrefs(patch: ViewPrefs): void {
+  try {
+    const next = { ...readViewPrefs(), ...patch }
+    globalThis.localStorage?.setItem(VIEW_PREFS_KEY, JSON.stringify(next))
+  } catch {
+    // A view preference that cannot be saved must never break the page.
+  }
+}
+
+/**
  * Writes are serialized so a test can await every write it flushed without
  * racing the settings revision fence. A run handles its own failures, so the
  * tail never rejects the next write.
@@ -1474,14 +1527,23 @@ function renderPage(ctx: any): unknown {
    * saved setting, so a page with no filter one day still shows every route.
    */
   const [filter, setFilter] = (React.useState ?? ((v: any) => [v, () => {}]))('')
-  const [statusFilter, setStatusFilter] = (React.useState ?? ((v: any) => [v, () => {}]))('all') as [
+  /**
+   * View preferences are seeded from storage, so a remount restores the view the
+   * user left behind instead of snapping back to the card layout.
+   *
+   * The initializer is LAZY for the same reason the catalogue fetch is: reading
+   * storage during render would be a side effect. `useState(fn)` runs it once
+   * per mount, which is exactly the "remember across visits" semantic wanted.
+   */
+  const [statusFilter, setStatusFilter] = (React.useState ?? ((v: any) => [v, () => {}]))(
+    () => readViewPrefs().statusFilter ?? 'all',
+  ) as [
     'all' | 'proxied' | 'direct' | 'rejected',
     (v: any) => void,
   ]
-  const [viewMode, setViewMode] = (React.useState ?? ((v: any) => [v, () => {}]))('card') as [
-    'card' | 'compact',
-    (v: any) => void,
-  ]
+  const [viewMode, setViewMode] = (React.useState ?? ((v: any) => [v, () => {}]))(
+    () => readViewPrefs().viewMode ?? 'card',
+  ) as ['card' | 'compact', (v: any) => void]
   const [expandedCards, setExpandedCards] = (React.useState ?? ((v: any) => [v, () => {}]))({}) as [
     Record<string, boolean>,
     (v: any) => void,
@@ -2984,7 +3046,10 @@ function renderPage(ctx: any): unknown {
                   // and it is what the regression test reads instead of
                   // trusting a colour.
                   'aria-pressed': statusFilter === id,
-                  onClick: () => setStatusFilter(id),
+                  onClick: () => {
+                    setStatusFilter(id)
+                    writeViewPrefs({ statusFilter: id })
+                  },
                 },
                 label,
               ),
@@ -3020,7 +3085,15 @@ function renderPage(ctx: any): unknown {
                 className: styles.testButton,
                 style: { ...S.testButton, flex: 'none', whiteSpace: 'nowrap' },
                 type: 'button',
-                onClick: () => setViewMode((m: any) => (m === 'card' ? 'compact' : 'card')),
+                onClick: () =>
+                  setViewMode((m: 'card' | 'compact') => {
+                    const next = m === 'card' ? 'compact' : 'card'
+                    // Written where the STATE changes, not in an effect: the
+                    // map callback sees the same `next` the state receives, so
+                    // storage can never disagree with what is on screen.
+                    writeViewPrefs({ viewMode: next })
+                    return next
+                  }),
               },
               viewMode === 'card' ? t.viewCompact : t.viewCard,
             ),

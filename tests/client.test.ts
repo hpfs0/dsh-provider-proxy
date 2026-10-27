@@ -52,11 +52,25 @@ const React = {
  */
 function loadBundle(fetchImpl) {
   const styles = []
-  const previous = { window: globalThis.window, document: globalThis.document, fetch: globalThis.fetch }
+  const previous = {
+    window: globalThis.window,
+    document: globalThis.document,
+    fetch: globalThis.fetch,
+    localStorage: globalThis.localStorage,
+  }
   globalThis.window = { __ModuleLoader__: { load: o => { globalThis.__reg = o } } }
   globalThis.document = {
     createElement: () => ({ setAttribute() {}, set textContent(v) { styles.push(v) } }),
     head: { appendChild() {} },
+  }
+  // The page remembers its view preferences here. A fresh in-memory store per
+  // `loadBundle` keeps one test's preferences out of the next.
+  const store = new Map()
+  globalThis.localStorage = {
+    getItem: key => (store.has(key) ? store.get(key) : null),
+    setItem: (key, value) => { store.set(key, String(value)) },
+    removeItem: key => { store.delete(key) },
+    clear: () => store.clear(),
   }
   // The page reads the provider catalogue from the Host endpoint, so `fetch`
   // must be stubbed before the bundle runs.
@@ -96,6 +110,7 @@ function loadBundle(fetchImpl) {
       globalThis.window = previous.window
       globalThis.document = previous.document
       globalThis.fetch = previous.fetch
+      globalThis.localStorage = previous.localStorage
       delete globalThis.__reg
     },
   }
@@ -4244,6 +4259,133 @@ test('N10: compact view mode toggles and allows expanding individual cards', asy
 // ---- N18: two-line compact rows with an endpoint-source switch ----
 
 // ---- N19: layout consistency ----
+
+// ---- N20: view preferences survive a remount ----
+
+/** Mount, switch to compact view, and return the storage key's value. */
+async function switchToCompactAndReadStore(mod, harness) {
+  const [, render] = renderPage(mod, harness)
+  await settle()
+  findButtons(render()).find(button => textsOf(button).includes('紧凑视图')).props.onClick()
+  return globalThis.localStorage.getItem('dsh-provider-proxy:view')
+}
+
+test('N20: the compact view is remembered across a remount', async () => {
+  // The settings page is torn down on navigation, so a `useState`-only view mode
+  // reset to "card" every time the user came back.
+  const { mod, restore } = loadBundle()
+  try {
+    const first = mountPlugin(mod)
+    const stored = await switchToCompactAndReadStore(mod, first)
+    assert.ok(stored, 'switching the view must persist a preference')
+    assert.equal(JSON.parse(stored).viewMode, 'compact')
+
+    // A NEW mount, exactly like re-entering the page.
+    const second = mountPlugin(mod)
+    const [tree] = renderPage(mod, second)
+    assert.ok(
+      textsOf(tree).includes('卡片视图'),
+      'the button offers the card view, i.e. the page is in compact mode',
+    )
+    assert.ok(
+      findButtons(tree).some(button => textsOf(button).includes('编辑')),
+      'compact rows are rendered',
+    )
+    assert.equal(cardFor(tree, 'sensenova').props.style.flexDirection, 'column', 'compact row, not a card')
+  } finally {
+    restore()
+  }
+})
+
+test('N20: switching back to the card view is remembered too', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const first = mountPlugin(mod)
+    const [, render] = renderPage(mod, first)
+    await settle()
+    findButtons(render()).find(button => textsOf(button).includes('紧凑视图')).props.onClick()
+    findButtons(render()).find(button => textsOf(button).includes('卡片视图')).props.onClick()
+    assert.equal(JSON.parse(globalThis.localStorage.getItem('dsh-provider-proxy:view')).viewMode, 'card')
+
+    const second = mountPlugin(mod)
+    const [tree] = renderPage(mod, second)
+    assert.ok(
+      textsOf(tree).includes('紧凑视图'),
+      'the button offers compact again, i.e. the page is back on cards',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('N20: the status filter is remembered across a remount', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const first = mountPlugin(mod)
+    const [, render] = renderPage(mod, first)
+    await settle()
+    findButtons(render())
+      .find(button => textsOf(button).some(text => text.startsWith('走代理')))
+      .props.onClick()
+    assert.equal(
+      JSON.parse(globalThis.localStorage.getItem('dsh-provider-proxy:view')).statusFilter,
+      'proxied',
+    )
+
+    const second = mountPlugin(mod)
+    const [tree] = renderPage(mod, second)
+    const chips = findButtons(tree).filter(button => button.props['aria-pressed'] !== undefined)
+    assert.equal(
+      chips.filter(chip => chip.props['aria-pressed'] === true).length,
+      1,
+      'exactly one chip is selected after the remount',
+    )
+    assert.ok(
+      chips.find(chip => chip.props['aria-pressed'] === true) &&
+        textsOf(chips.find(chip => chip.props['aria-pressed'] === true)).some(text =>
+          text.startsWith('走代理'),
+        ),
+      'the remembered filter is the selected one',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('N20: a corrupt or unreadable preference falls back to the defaults', async () => {
+  // Private-browsing quotas and hand-edited values must never break the page.
+  for (const raw of ['not json', '{}', 'null', '{"viewMode":"gallery"}', '{"statusFilter":7}']) {
+    const { mod, restore } = loadBundle()
+    try {
+      globalThis.localStorage.setItem('dsh-provider-proxy:view', raw)
+      const harness = mountPlugin(mod)
+      const [tree] = renderPage(mod, harness)
+      assert.ok(
+        textsOf(tree).includes('紧凑视图'),
+        `a bad value (${raw}) must fall back to the card view`,
+      )
+      assert.ok(
+        findButtons(tree).some(button => textsOf(button).some(text => text.startsWith('全部'))),
+        `a bad value (${raw}) must fall back to the "all" filter`,
+      )
+    } finally {
+      restore()
+    }
+  }
+})
+
+test('N20: a page with no storage at all still renders', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    globalThis.localStorage = undefined
+    const harness = mountPlugin(mod)
+    const [tree] = renderPage(mod, harness)
+    assert.ok(tree, 'the page renders without localStorage')
+    assert.ok(textsOf(tree).includes('紧凑视图'), 'and starts on the card view')
+  } finally {
+    restore()
+  }
+})
 
 /** Every box that should share the page's container scale. */
 function containersOf(tree) {
