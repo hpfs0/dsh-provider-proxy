@@ -1106,10 +1106,13 @@ export { defaultProxyProblem, proxyHostProblem } from './proxy-address.js'
 export { PROXY_CLIENT_PRESETS, proxyClientPreset } from './proxy-clients.js'
 export { detectProxyEnv, parseProxyEnvValue } from './proxy-env.js'
 export {
+  PROVIDER_HOST_TEMPLATES,
+  appendHostRules,
   deadRuleEntries,
   hostMatches,
   hostRuleProblem,
   parseHostList,
+  providerHostTemplate,
   splitHostRules,
 } from './host-rules.js'
 export {

@@ -15,6 +15,9 @@ import {
   parseHostList,
   bindingFields,
   profileNameProblem,
+  PROVIDER_HOST_TEMPLATES,
+  appendHostRules,
+  providerHostTemplate,
   proxyHostProblem,
   proxyUrl,
   routeBindingOf,
@@ -894,5 +897,67 @@ test('N14: routes bound to a preset are enumerable for cache invalidation', () =
   }
   assert.deepEqual(routesBoundTo(routes, 'HK-Proxy'), ['a', 'b'])
   assert.deepEqual(routesBoundTo(routes, 'none'), [])
+})
+
+// ---- N16: official provider host templates ----
+
+test('N16: every template entry is a live rule with zero dead entries', () => {
+  // A dead entry inside a template is the worst kind: fail-closed would send
+  // traffic DIRECT while the user believes the button proxied it.
+  for (const [id, template] of Object.entries(PROVIDER_HOST_TEMPLATES)) {
+    assert.ok(template.hosts.length > 0, `${id} must carry a host list`)
+    assert.deepEqual(deadRuleEntries(template.hosts), [], `${id} has a dead rule entry`)
+    // And each template really covers the host it names.
+    for (const rule of parseHostList(template.hosts)) {
+      assert.equal(hostMatches(rule.replace(/^\*\./, ''), parseHostList(template.hosts)), true)
+    }
+  }
+})
+
+test('N16: the four required providers all have a template', () => {
+  for (const id of ['openai', 'anthropic', 'google', 'deepseek']) {
+    const template = providerHostTemplate(id)
+    assert.ok(template, `${id} must have a template`)
+    assert.equal(template.id, id)
+  }
+  assert.match(PROVIDER_HOST_TEMPLATES.openai.hosts, /api\.openai\.com/)
+  assert.match(PROVIDER_HOST_TEMPLATES.anthropic.hosts, /api\.anthropic\.com/)
+  assert.match(PROVIDER_HOST_TEMPLATES.google.hosts, /generativelanguage\.googleapis\.com/)
+  assert.match(PROVIDER_HOST_TEMPLATES.deepseek.hosts, /api\.deepseek\.com/)
+})
+
+test('N16: a suffixed or namespaced provider id still finds its template', () => {
+  assert.equal(providerHostTemplate('openai-responses')?.id, 'openai')
+  assert.equal(providerHostTemplate('DEEPSEEK:default')?.id, 'deepseek')
+  assert.equal(providerHostTemplate(' anthropic ')?.id, 'anthropic')
+})
+
+test('N16: an unknown provider offers no template instead of guessing one', () => {
+  assert.equal(providerHostTemplate('sensenova'), undefined)
+  assert.equal(providerHostTemplate('my-openai'), undefined, 'a later segment is not a match')
+  assert.equal(providerHostTemplate(''), undefined)
+})
+
+test('N16: template hosts are appended without duplicating existing rules', () => {
+  assert.equal(appendHostRules('', 'api.openai.com, *.openai.com'), 'api.openai.com, *.openai.com')
+  assert.equal(
+    appendHostRules('relay.internal', 'api.openai.com'),
+    'relay.internal, api.openai.com',
+    'a card rule of its own must be preserved',
+  )
+  // The same rule written differently must not be added twice.
+  assert.equal(appendHostRules('api.openai.com', 'api.openai.com, *.openai.com'), 'api.openai.com, *.openai.com')
+  assert.equal(
+    appendHostRules('*.openai.com', 'api.openai.com, *.openai.com'),
+    '*.openai.com, api.openai.com',
+  )
+  assert.equal(appendHostRules('api.anthropic.com', 'api.anthropic.com'), 'api.anthropic.com')
+})
+
+test('N16: an appended template still passes the dead-rule check', () => {
+  for (const template of Object.values(PROVIDER_HOST_TEMPLATES)) {
+    const merged = appendHostRules('relay.internal', template.hosts)
+    assert.deepEqual(deadRuleEntries(merged), [], merged)
+  }
 })
 

@@ -4759,3 +4759,93 @@ test('N15: an environment credential is announced instead of silently dropped', 
   }
 })
 
+// ---- N16: official provider host templates ----
+
+test('N16: a known provider offers its official-upstream pill', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [tree] = renderPage(mod, harness)
+    const card = cardFor(tree, 'openai')
+    const pill = findButtons(card).find(button =>
+      textsOf(button).some(text => text.includes('载入官方上游域名')),
+    )
+    assert.ok(pill, 'an OpenAI card must offer the template pill')
+    assert.ok(
+      textsOf(pill).some(text => text.includes('api.openai.com')),
+      'the pill names the hosts it will load',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('N16: the pill fills onlyHosts and the result has no dead entry', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const card = cardFor(render(), 'openai')
+    const pill = findButtons(card).find(button =>
+      textsOf(button).some(text => text.includes('载入官方上游域名')),
+    )
+    pill.props.onClick()
+    await writeSettle()
+    assert.deepEqual(harness.writes[0].ops, [
+      { op: 'set', path: ['providers', 'openai', 'onlyHosts'], value: 'api.openai.com, *.openai.com' },
+    ])
+
+    const after = cardFor(render(), 'openai')
+    assert.ok(
+      !textsOf(after).some(text => text.includes('永远匹配不上')),
+      'the loaded template must not be flagged as a dead rule',
+    )
+    const onlyHostsInput = findInputsUnderLabel(after, '仅走代理')[0]
+    assert.equal(onlyHostsInput.props.value, 'api.openai.com, *.openai.com')
+  } finally {
+    restore()
+  }
+})
+
+test('N16: loading a template into an existing rule keeps the card rule', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          anthropic: { enabled: true, protocol: 'http', host: '10.0.0.1', port: 7890, onlyHosts: 'relay.internal' },
+        },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    findButtons(cardFor(render(), 'anthropic'))
+      .find(button => textsOf(button).some(text => text.includes('载入官方上游域名')))
+      .props.onClick()
+    await writeSettle()
+    assert.equal(
+      harness.writes[0].ops[0].value,
+      'relay.internal, api.anthropic.com',
+      'the relay host the user already chose must survive',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('N16: an unknown provider shows no template pill', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [tree] = renderPage(mod, harness)
+    const card = cardFor(tree, 'sensenova')
+    assert.ok(
+      !findButtons(card).some(button => textsOf(button).some(text => text.includes('载入官方上游域名'))),
+      'a provider with no known upstream must not be offered a guess',
+    )
+  } finally {
+    restore()
+  }
+})
+

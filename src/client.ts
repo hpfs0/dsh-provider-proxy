@@ -21,7 +21,7 @@
 // at materialization. The binding is what the component reads; importing it for
 // side effects only would leave `styles` undefined at render time.
 import styles from './client.css'
-import { deadRuleEntries } from './host-rules.js'
+import { appendHostRules, deadRuleEntries, providerHostTemplate } from './host-rules.js'
 import { defaultProxyProblem, proxyHostProblem } from './proxy-address.js'
 import {
   DEFAULT_PROFILE_LABEL,
@@ -2676,6 +2676,7 @@ function renderPage(ctx: any): unknown {
         // the traffic DIRECT while the user believes it is proxied.
         const onlyDead = deadRuleEntries(route.onlyHosts)
         const bypassDead = deadRuleEntries(route.bypassHosts)
+        const hostTemplate = providerHostTemplate(row.id)
         const useDefault = route.useDefault === true
         const boundProfile = route.profileId.trim()
         const endpointState = cardEndpoint(route)
@@ -3076,6 +3077,29 @@ function renderPage(ctx: any): unknown {
               onlyDead.length === 0 ? t.onlyHostsHint : `${t.ruleDeadHint}${onlyDead.join('、')}`,
               onlyDead.length > 0,
             ),
+            // The official-upstream pill. Offered only for a provider whose id
+            // maps to a known template: a button that guessed a hostname for an
+            // arbitrary relay would be worse than no button at all.
+            hostTemplate === undefined
+              ? null
+              : h(
+                  'div',
+                  { style: S.chipRow, key: `${row.id}:host-template` },
+                  h(
+                    'button',
+                    {
+                      className: styles.chip,
+                      style: S.chip,
+                      type: 'button',
+                      title: hostTemplate.hosts,
+                      onClick: () =>
+                        bind(row.id, 'onlyHosts')(
+                          appendHostRules(route.onlyHosts, hostTemplate.hosts),
+                        ),
+                    },
+                    `${t.loadHostTemplate}${hostTemplate.label}: ${hostTemplate.hosts}`,
+                  ),
+                ),
             field(
               t.bypassHosts,
               h('input', {
@@ -3387,6 +3411,7 @@ const EN = {
   quickImportEnv: 'From environment: ',
   quickImportEnvNone: 'From environment (none detected)',
   quickImportEnvCredentials: 'The environment variable also carried credentials; enter them below.',
+  loadHostTemplate: 'Load official upstream hosts: ',
 }
 
 const ZH = {
@@ -3507,6 +3532,7 @@ const ZH = {
   quickImportEnv: '从环境变量：',
   quickImportEnvNone: '从环境变量（未检测到）',
   quickImportEnvCredentials: '该环境变量还带了凭据，请在下方补填。',
+  loadHostTemplate: '载入官方上游域名：',
 }
 
 /**
