@@ -664,7 +664,6 @@ export function apply(ctx: any, config?: ProxyConfig): void {
      * a configuration it is not using, so the live route is reused only while
      * it still matches what the settings say right now.
      */
-    let staleRoute = false
     if (route !== undefined) {
       // Comparing the resolved ORIGIN is enough to tell two configurations
       // apart for this purpose, and it never touches a credential. A provider
@@ -675,20 +674,19 @@ export function apply(ctx: any, config?: ProxyConfig): void {
           : buildRouteEntry(provider, saved, buildOptions)
       if (expected === undefined || !expected.ok || expected.entry.proxyOrigin !== route.proxyOrigin) {
         route = undefined
-        staleRoute = true
       }
     }
     if (route === undefined) {
-      // A route the guards REJECTED (a bad port, an HTTP password with no
-      // username) is missing from the table too, and answering "not enabled"
-      // for it names a cause that is not the case — the setting IS on. The
-      // problem the table recorded explains it, but only while that record
-      // belongs to the SAME configuration: a stale route whose replacement was
-      // never rebuilt has no meaningful entry in `problems`.
-      const problem = staleRoute ? undefined : problems.get(provider)
-      if (problem !== undefined) {
-        return { ok: false, kind: 'route-rejected', error: bareMessage(problem) }
-      }
+      // No usable route in the table. Rather than quote the problem the last
+      // rebuild RECORDED, re-validate the CURRENT settings.
+      //
+      // `problems` is a snapshot from the last rebuild, and a recorded refusal
+      // outlives the configuration that caused it: a user who half-typed a
+      // password, saw the route refused, then cleared the field would still be
+      // told "配置了代理密码但没有用户名" — about a password that no longer
+      // exists anywhere. Building again cannot lie: the same `buildRouteEntry`
+      // that produced the record produces the current verdict, so a fixed
+      // setting reports fine and a broken one still names its real reason.
       const configured = saved
       if (configured === undefined) {
         return { ok: false, kind: 'no-route', error: `provider "${provider}" 未启用代理` }

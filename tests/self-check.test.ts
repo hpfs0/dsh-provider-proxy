@@ -159,6 +159,66 @@ test('a route rejected by validation reports the recorded problem', async () => 
   )
 })
 
+test('a recorded refusal is never quoted for a configuration that has been fixed', async () => {
+  // Reported: the default proxy was reported as having "a password but no
+  // username" when no password was set anywhere. The record came from an
+  // earlier rebuild — the user had typed into the password field, saw the
+  // refusal, then CLEARED it. `problems` holds that snapshot, and the old code
+  // quoted it without re-checking the current settings.
+  const defaultProxy = { protocol: 'http', host: '127.0.0.1', port: 7897, username: '', password: 'typed-once' }
+  const providers = { 'deepseek-account': { enabled: true, useDefault: true } }
+  const proxy = await startEchoProxy()
+  try {
+    const { routes } = mountHost({
+      providers: { get: () => providers },
+      proxyProfiles: { get: () => ({}) },
+      defaultProxy: { get: () => defaultProxy },
+      testUrl: 'http://echo.invalid/ip',
+    })
+
+    // 1. The half-filled credential really is refused, and recorded.
+    const broken = await selfCheck(routes, { provider: 'deepseek-account' })
+    assert.equal(broken.body.ok, false)
+    assert.equal(broken.body.kind, 'route-rejected')
+    assert.match(broken.body.error, /密码但没有用户名/)
+    assert.match(broken.body.error, /默认代理/)
+
+    // 2. The user clears the password. The next check must re-validate instead
+    //    of repeating the old sentence about a password that no longer exists.
+    defaultProxy.password = ''
+    defaultProxy.port = proxy.port
+    const fixed = await selfCheck(routes, { provider: 'deepseek-account' })
+    assert.notEqual(fixed.body.kind, 'route-rejected', 'a fixed setting must not be refused')
+    assert.ok(
+      fixed.body.ok === true,
+      `the repaired endpoint must actually be used, got ${JSON.stringify(fixed.body)}`,
+    )
+    assert.equal(fixed.body.status, 200)
+    assert.deepEqual(proxy.seen.map(entry => entry.url), ['http://echo.invalid/ip'])
+  } finally {
+    await proxy.close()
+  }
+})
+
+test('a refusal that is still true is still reported after a re-check', async () => {
+  // The mirror of the test above: re-validating must not turn a real mistake
+  // into silence.
+  const { routes } = mountHost({
+    providers: {
+      get: () => ({
+        p: { enabled: true, protocol: 'http', host: 'proxy.test', port: 8080, password: 'secret' },
+      }),
+    },
+    testUrl: 'http://echo.invalid/ip',
+  })
+  const first = await selfCheck(routes, { provider: 'p' })
+  const second = await selfCheck(routes, { provider: 'p' })
+  for (const result of [first, second]) {
+    assert.equal(result.body.kind, 'route-rejected')
+    assert.match(result.body.error, /没有用户名/)
+  }
+})
+
 test('the endpoint refuses anything but POST', async () => {
   const { routes } = mountHost({ providers: { get: () => ({}) }, testUrl: 'http://echo.invalid/ip' })
   const { status, body } = await selfCheck(routes, { provider: 'p' }, 'GET')
