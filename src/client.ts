@@ -806,7 +806,12 @@ const S = {
     flexDirection: 'column',
     gap: '12px',
     padding: '14px 16px',
-    border: '1px solid var(--dsw-alias-border-l1)',
+    // Longhands, for the same reason as `chip`: `cardActive`/`cardRejected`
+    // override ONLY `borderColor`, and a shorthand here would lose its colour
+    // the moment a card went back to the resting state.
+    borderWidth: '1px',
+    borderStyle: 'solid',
+    borderColor: 'var(--dsw-alias-border-l1)',
     borderRadius: '10px',
     background: 'var(--dsw-alias-bg-layer-1)',
   },
@@ -1093,7 +1098,18 @@ const S = {
     // read as "selected, just with dimmer text". The border is kept in the
     // declaration as `transparent` rather than removed, so selecting a chip
     // cannot shift the row by a pixel.
-    border: '1px solid transparent',
+    //
+    // WRITTEN AS THREE LONGHANDS, NOT AS THE `border` SHORTHAND. This is not
+    // style: React diffs inline styles key by key, and `chipActive` only
+    // overrides `borderColor`. Deselecting a chip therefore DELETES the
+    // `borderColor` key, React writes `style.borderColor = ''`, and the
+    // shorthand's transparent value is NOT restored — the border falls back to
+    // the CSS initial value `currentColor`, leaving a text-coloured outline on
+    // a chip that is supposed to have none. Keeping all three longhands present
+    // in every state means only the VALUE changes, never the key.
+    borderWidth: '1px',
+    borderStyle: 'solid',
+    borderColor: 'transparent',
     background: 'transparent',
     color: 'var(--dsw-alias-label-secondary)',
     fontSize: '11px',
@@ -1113,7 +1129,9 @@ const S = {
     flexDirection: 'column',
     gap: '8px',
     padding: '12px 16px',
-    border: '1px solid var(--dsw-alias-border-l1)',
+    borderWidth: '1px',
+    borderStyle: 'solid',
+    borderColor: 'var(--dsw-alias-border-l1)',
     borderRadius: '10px',
     background: 'var(--dsw-alias-bg-layer-1)',
   },

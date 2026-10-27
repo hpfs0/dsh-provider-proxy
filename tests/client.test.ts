@@ -2698,7 +2698,7 @@ test('the layout is carried by inline styles, not only by the stylesheet', async
 
     assert.ok(sections.length > 0, 'no provider card rendered')
     const card = sections[0]
-    for (const prop of ['display', 'flexDirection', 'border', 'borderRadius', 'padding', 'gap']) {
+    for (const prop of ['display', 'flexDirection', 'borderWidth', 'borderColor', 'borderRadius', 'padding', 'gap']) {
       assert.ok(card.props.style?.[prop] !== undefined, `卡片必须内联设置 ${prop}`)
     }
 
@@ -4069,8 +4069,8 @@ test('N9: selecting a status chip leaves exactly one chip active', async () => {
         `${labelOf(chip)} must not keep a fill`,
       )
       assert.equal(
-        chip.props.style.border,
-        '1px solid transparent',
+        chip.props.style.borderColor,
+        'transparent',
         `${labelOf(chip)} must not keep an outline`,
       )
     }
@@ -4108,6 +4108,107 @@ test('N9: a hovered chip cannot be mistaken for the selected one', async () => {
     active.includes('background: var(--dsw-alias-brand-primary)'),
     'the selected chip is filled, not merely outlined',
   )
+})
+
+test('N9: a deselected chip keeps a transparent border after being active once', async () => {
+  // The reported bug, and the reason it only showed up on the SECOND look:
+  // the resting style declared the `border` SHORTHAND while the active style
+  // overrode only `borderColor`. React diffs inline styles key by key, so
+  // deselecting removed the `borderColor` key entirely — React wrote
+  // `style.borderColor = ''`, the shorthand's `transparent` was not restored,
+  // and the border fell back to `currentColor`: a text-coloured outline on a
+  // chip that must have none. First visit looked right because no chip had ever
+  // carried a `borderColor` key yet.
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      settings: {
+        providers: { a: { enabled: false, protocol: 'http', host: '', port: 0 } },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+
+    const chipsOf = tree => {
+      const out = []
+      const walk = node => {
+        if (node === null || typeof node !== 'object') return
+        if (Array.isArray(node)) return node.forEach(walk)
+        if (
+          node.type === 'button' &&
+          /_(chip|chipActive)$/.test(String(node.props?.className ?? ''))
+        ) {
+          out.push(node)
+        }
+        if (node.children) walk(node.children)
+      }
+      walk(tree)
+      return out
+    }
+    const labelOf = chip => textsOf(chip).join('')
+    // One snapshot per assertion: each `render()` builds fresh node objects, so
+    // comparing nodes across two calls would never match by identity.
+    const chipsNow = () => chipsOf(render())
+    const find = (chips, name) => chips.find(chip => labelOf(chip).startsWith(name))
+
+    // First visit: 全部 is active, the others were never touched.
+    const first = chipsNow()
+    assert.equal(find(first, '全部').props.style.borderColor, 'var(--dsw-alias-brand-primary)')
+    for (const chip of first.filter(chip => !labelOf(chip).startsWith('全部'))) {
+      assert.equal(chip.props.style.borderColor, 'transparent')
+    }
+
+    // Activate another chip, then come back: 全部 has now held a borderColor.
+    find(chipsNow(), '走代理').props.onClick()
+    find(chipsNow(), '全部').props.onClick()
+
+    // 全部 is active again, so its key is present. Deselect it once more, which
+    // is the exact transition that used to drop the key and leave an outline.
+    assert.equal(find(chipsNow(), '全部').props['aria-pressed'], true, 'the click re-selected 全部')
+    find(chipsNow(), '直连').props.onClick()
+    const after = find(chipsNow(), '全部')
+    assert.equal(after.props['aria-pressed'], false, '全部 is deselected again')
+    // The KEY must still be present. With the shorthand form it was absent in
+    // this state, which is precisely what made React clear it on the DOM and
+    // leave the border colouring itself with `currentColor`.
+    assert.ok(
+      'borderColor' in after.props.style,
+      'the resting style must still declare borderColor, or React deletes it',
+    )
+    assert.equal(
+      after.props.style.borderColor,
+      'transparent',
+      'a deselected chip must not keep an outline after having been active',
+    )
+    assert.equal(after.props.style.borderWidth, '1px', 'the reserved width keeps the row from shifting')
+    assert.equal(after.props.style.borderStyle, 'solid')
+  } finally {
+    restore()
+  }
+})
+
+test('N9: no style object mixes the border shorthand with a borderColor override', async () => {
+  // The mechanical rule behind the bug above: if a resting style declares the
+  // `border` shorthand and a sibling state style overrides `borderColor`, then
+  // LEAVING that state deletes the key and loses the shorthand's colour. Every
+  // element with a state variant must use the three longhands instead.
+  const source = clientSource
+  for (const [base, variant] of [
+    ['card', 'cardActive'],
+    ['compactRow', 'compactRowActive'],
+    ['chip', 'chipActive'],
+  ]) {
+    const baseBlock = new RegExp(`\\n  ${base}: \\{([\\s\\S]*?)\\n  \\}`).exec(source)
+    assert.ok(baseBlock, `${base} style must exist`)
+    assert.ok(
+      !/(^|\s)border:/.test(baseBlock[1]),
+      `${base} must not use the border shorthand while ${variant} overrides borderColor`,
+    )
+    assert.ok(
+      baseBlock[1].includes('borderColor:'),
+      `${base} must declare borderColor so the key is never deleted`,
+    )
+  }
 })
 
 test('N10: compact view mode toggles and allows expanding individual cards', async () => {
