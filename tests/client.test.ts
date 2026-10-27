@@ -3145,13 +3145,94 @@ test('choosing the built-in default preset persists useDefault to its own route'
     assert.ok(picker, 'the card offers the endpoint-source picker')
     picker.props.onChange({ target: { value: '__default__' } })
     await writeSettle()
-    assert.deepEqual(
-      harness.writes[0].ops[0].path,
-      ['providers', 'sensenova', 'useDefault'],
-      'the choice writes to the route, never to the shared block',
-    )
-    assert.equal(harness.writes[0].ops[0].value, true)
+    // BOTH binding fields travel in ONE write: `profileId` wins over
+    // `useDefault`, so leaving the old preset id on disk would keep routing
+    // through it (see the "switch back" regression below).
+    assert.deepEqual(harness.writes[0].ops, [
+      { op: 'set', path: ['providers', 'sensenova', 'profileId'], value: '' },
+      { op: 'set', path: ['providers', 'sensenova', 'useDefault'], value: true },
+    ])
     assert.equal(profileSelectOf(cardFor(render(), 'sensenova')).props.value, '__default__')
+  } finally {
+    restore()
+  }
+})
+
+test('N14: switching a card OFF a preset actually clears profileId on disk', async () => {
+  // Reported: bind a dead preset -> unreachable; switch back to the working
+  // default preset -> STILL unreachable. The old code changed `profileId` in the
+  // draft only and persisted `useDefault` alone, so the file kept
+  // `profileId: 'clash2'` and — because profileId wins — every later request and
+  // check kept going through the dead port.
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: { enabled: true, profileId: 'clash2', protocol: 'http', host: '', port: 0 },
+        },
+        proxyProfiles: { clash2: { protocol: 'http', host: '127.0.0.1', port: 8888 } },
+        defaultProxy: { protocol: 'http', host: '127.0.0.1', port: 7891 },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    assert.equal(profileSelectOf(cardFor(render(), 'sensenova')).props.value, 'clash2')
+
+    profileSelectOf(cardFor(render(), 'sensenova')).props.onChange({
+      target: { value: '__default__' },
+    })
+    await writeSettle()
+
+    const ops = harness.writes[0].ops
+    assert.deepEqual(
+      ops.filter(op => op.path[op.path.length - 1] === 'profileId'),
+      [{ op: 'set', path: ['providers', 'sensenova', 'profileId'], value: '' }],
+      'the preset binding must be cleared on disk, not only in the draft',
+    )
+    assert.equal(
+      ops.find(op => op.path[op.path.length - 1] === 'useDefault').value,
+      true,
+      'and the default preset must be selected in the same write',
+    )
+    const card = cardFor(render(), 'sensenova')
+    assert.equal(profileSelectOf(card).props.value, '__default__')
+    assert.ok(
+      textsOf(card).some(text => text.includes('使用默认代理：http://127.0.0.1:7891')),
+      'the card must now name the default endpoint, not the dead preset',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('N14: switching a card to custom fields also clears profileId on disk', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: {
+            enabled: true,
+            profileId: 'clash2',
+            protocol: 'http',
+            host: '10.0.0.1',
+            port: 7890,
+          },
+        },
+        proxyProfiles: { clash2: { protocol: 'http', host: '127.0.0.1', port: 8888 } },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    profileSelectOf(cardFor(render(), 'sensenova')).props.onChange({ target: { value: '' } })
+    await writeSettle()
+    assert.deepEqual(harness.writes[0].ops, [
+      { op: 'set', path: ['providers', 'sensenova', 'profileId'], value: '' },
+      { op: 'set', path: ['providers', 'sensenova', 'useDefault'], value: false },
+    ])
+    // The card falls back to ITS OWN fields, so they become editable again.
+    assert.ok(textsOf(cardFor(render(), 'sensenova')).includes('IP / 主机'))
   } finally {
     restore()
   }

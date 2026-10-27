@@ -26,6 +26,7 @@ import { defaultProxyProblem, proxyHostProblem } from './proxy-address.js'
 import {
   DEFAULT_PROFILE_LABEL,
   DEFAULT_PROFILE_BINDING,
+  bindingFields,
   endpointAddress,
   endpointSummary,
   profileNameProblem,
@@ -2098,29 +2099,42 @@ function renderPage(ctx: any): unknown {
   }
 
   /**
-   * Point one card at a preset, or back at its own fields.
+   * Point one card at a preset, at the built-in default, or back at its own
+   * fields.
    *
-   * Both binding fields are written together: `profileId` alone would leave a
-   * stale `useDefault: true` behind, and a hand-edited file that carries both
-   * resolves to the preset anyway — writing both keeps the file honest.
+   * BOTH binding fields are always written, in ONE write.
+   *
+   * This is not tidiness: `profileId` wins over `useDefault`, so writing only
+   * one of them leaves the file describing a binding the user did not pick.
+   * Clearing `profileId` in the draft while persisting `useDefault: true` left
+   * the saved file still naming the OLD preset, and the next check kept routing
+   * through it — the reported "switch back to the working proxy, still
+   * unreachable". `bindingFields` expresses the three states in one place.
    */
   const bindRouteProfile = (id: string) => (value: string) => {
-    const profileId = value === DEFAULT_PROFILE_BINDING ? '' : value
-    edit(id, 'profileId', profileId)
-    if (profileId.length > 0) edit(id, 'useDefault', false)
+    // `bindingFields` is the SHARED mapping the Host reasons with, imported
+    // rather than re-spelled: a second copy is how the two halves drift into
+    // writing a binding the other one does not read the same way.
+    const fields = bindingFields(
+      value === DEFAULT_PROFILE_BINDING
+        ? { kind: 'default' }
+        : value.length === 0
+          ? { kind: 'own' }
+          : { kind: 'profile', profileId: value },
+    )
+    edit(id, 'profileId', fields.profileId)
+    edit(id, 'useDefault', fields.useDefault)
     invalidateTests([id])
     saveMany(
       `${id}\u0000*profile`,
       [
-        { op: 'set', path: ['providers', id, 'profileId'], value: profileId },
-        ...(profileId.length > 0
-          ? [{ op: 'set', path: ['providers', id, 'useDefault'], value: false }]
-          : []),
+        { op: 'set', path: ['providers', id, 'profileId'], value: fields.profileId },
+        { op: 'set', path: ['providers', id, 'useDefault'], value: fields.useDefault },
       ],
       `${id}.profileId`,
       () => {
         rollbackRouteField(id, 'profileId')
-        if (profileId.length > 0) rollbackRouteField(id, 'useDefault')
+        rollbackRouteField(id, 'useDefault')
       },
     )
   }
@@ -3083,16 +3097,17 @@ function renderPage(ctx: any): unknown {
                 value: boundProfile.length > 0 ? boundProfile : useDefault ? DEFAULT_PROFILE_BINDING : '',
                 onChange: (event: any) => {
                   const value = String(event.target.value)
-                  if (value === DEFAULT_PROFILE_BINDING) {
-                    edit(row.id, 'profileId', '')
-                    bind(row.id, 'useDefault')(true)
-                    return
-                  }
-                  if (value.length === 0) {
-                    edit(row.id, 'useDefault', false)
-                    bind(row.id, 'profileId')('')
-                    return
-                  }
+                  // Every branch writes BOTH binding fields.
+                  //
+                  // `profileId` wins over `useDefault` when both are present,
+                  // so clearing one in the draft while persisting the other
+                  // left the disk holding the OLD preset id: picking "default
+                  // preset" then still routed through the previous preset, and
+                  // picking "custom fields" still routed through a preset.
+                  // Two drafts + one write is the only shape with no such
+                  // half-applied window.
+                  if (value === DEFAULT_PROFILE_BINDING) return bindRouteProfile(row.id)(DEFAULT_PROFILE_BINDING)
+                  if (value.length === 0) return bindRouteProfile(row.id)('')
                   bindRouteProfile(row.id)(value)
                 },
               },
