@@ -4053,7 +4053,9 @@ test('N9: selecting a status chip leaves exactly one chip active', async () => {
       [false, true, false, false],
       'the previous chip must be released when another one is chosen',
     )
-    // And the visual state carries the same single answer.
+    // And the visual state carries the same single answer: a deselected chip is
+    // bare text with NO outline, which is what makes the one filled chip
+    // unmistakable.
     const active = after.filter(chip => String(chip.props.className).includes('chipActive'))
     assert.equal(active.length, 1, 'exactly one chip may carry the active class')
     assert.ok(
@@ -4061,26 +4063,29 @@ test('N9: selecting a status chip leaves exactly one chip active', async () => {
       'the chip the user clicked is the selected one',
     )
     for (const chip of after.filter(chip => chip !== active[0])) {
-      assert.notEqual(
-        chip.props.style.color,
-        'var(--dsw-alias-brand-primary)',
-        `${labelOf(chip)} must not keep the active colour`,
-      )
       assert.equal(
         chip.props.style.background,
-        'var(--dsw-alias-bg-layer-1)',
-        `${labelOf(chip)} must fall back to the resting surface`,
+        'transparent',
+        `${labelOf(chip)} must not keep a fill`,
+      )
+      assert.equal(
+        chip.props.style.border,
+        '1px solid transparent',
+        `${labelOf(chip)} must not keep an outline`,
       )
     }
+    // The selected chip is FILLED, so its own outline is the only one on screen.
+    assert.equal(active[0].props.style.background, 'var(--dsw-alias-brand-primary)')
   } finally {
     restore()
   }
 })
 
 test('N9: a hovered chip cannot be mistaken for the selected one', async () => {
-  // The hover rule used the SAME background token as the active rule, so a
-  // hovered-but-unselected chip was visually identical to the selected chip.
-  // Selection must own the tinted surface; hover may only shift the border.
+  // Two earlier versions of the hover rule were wrong in the same direction:
+  // first it painted the ACTIVE background, then it painted an OUTLINE. Both
+  // made a deselected chip look selected. Hover may only tint the surface
+  // faintly; the border and the solid fill belong to selection alone.
   // Strip comments first: the prose above the rule also names `.chipActive`, and
   // a regex over raw text would match THROUGH a comment into a later block.
   const cssRules = clientCss.replace(/\/\*[\s\S]*?\*\//g, '')
@@ -4088,16 +4093,20 @@ test('N9: a hovered chip cannot be mistaken for the selected one', async () => {
   assert.ok(hoverMatch, 'the hover rule must exist')
   const hover = hoverMatch[1]
   assert.ok(
-    !hover.includes('background: var(--dsw-alias-interactive-bg-hover)'),
-    'hover must not paint the selected surface',
+    !hover.includes('var(--dsw-alias-brand-primary)'),
+    'hover must not use the selection colour at all',
   )
-  assert.ok(hover.includes('border-color'), 'hover still gives its own feedback')
+  assert.ok(
+    hover.includes('border-color: transparent'),
+    'hover must not draw an outline on a bare chip',
+  )
+  assert.ok(hover.includes('background'), 'hover still gives its own feedback')
   const ruleMatch = /\.chipActive[^{}]*\{([^}]*)\}/.exec(cssRules)
   assert.ok(ruleMatch, 'the selected-chip rule must exist')
   const active = ruleMatch[1]
   assert.ok(
-    active.includes('background: var(--dsw-alias-interactive-bg-hover)'),
-    'the selected chip keeps the tinted surface',
+    active.includes('background: var(--dsw-alias-brand-primary)'),
+    'the selected chip is filled, not merely outlined',
   )
 })
 

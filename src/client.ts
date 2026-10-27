@@ -1086,18 +1086,26 @@ const S = {
     alignItems: 'center',
     padding: '3px 10px',
     borderRadius: '999px',
-    border: '1px solid var(--dsw-alias-border-l1)',
-    background: 'var(--dsw-alias-bg-layer-1)',
+    // An UNSELECTED chip is bare text: no outline, no fill.
+    //
+    // It used to carry a faint 1px border, which is the same shape as the
+    // selected chip's outline — so after switching filters the old chip still
+    // read as "selected, just with dimmer text". The border is kept in the
+    // declaration as `transparent` rather than removed, so selecting a chip
+    // cannot shift the row by a pixel.
+    border: '1px solid transparent',
+    background: 'transparent',
     color: 'var(--dsw-alias-label-secondary)',
     fontSize: '11px',
     fontWeight: '500',
     cursor: 'pointer',
     userSelect: 'none',
   },
+  /** The one selected chip: a solid fill, unmistakable at a glance. */
   chipActive: {
     borderColor: 'var(--dsw-alias-brand-primary)',
-    background: 'var(--dsw-alias-interactive-bg-hover)',
-    color: 'var(--dsw-alias-brand-primary)',
+    background: 'var(--dsw-alias-brand-primary)',
+    color: 'var(--dsw-alias-bg-base)',
     fontWeight: '600',
   },
   compactRow: {

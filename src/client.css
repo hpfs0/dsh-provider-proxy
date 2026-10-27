@@ -284,15 +284,16 @@
   transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
 }
 
-/* Hover may only shift the BORDER.
+/* Hover is a HINT, never a selection.
 
-   It used to set the same tinted background as `.chipActive`, at a higher
-   specificity, so any hovered chip (including the one that had just been
-   deselected) looked selected — and while the pointer rested on the old chip
-   the genuinely selected one lost its tint. Selection owns the surface;
-   hovering only says "this is clickable". */
+   Two earlier versions of this rule were wrong in the same direction:
+   it painted the active background (any hovered chip looked selected), and
+   then it painted an outline (a deselected chip still looked framed). An
+   unselected chip is bare text; hovering gives it a faint surface, nothing
+   more. Selection is the only state allowed a border and a solid fill. */
 .chip:hover:not(:disabled) {
-  border-color: var(--dsw-alias-border-l3) !important;
+  border-color: transparent !important;
+  background: var(--dsw-alias-interactive-bg-hover) !important;
   color: var(--dsw-alias-label-primary) !important;
 }
 
@@ -301,8 +302,8 @@
 .chipActive,
 .chip[aria-pressed='true'] {
   border-color: var(--dsw-alias-brand-primary) !important;
-  background: var(--dsw-alias-interactive-bg-hover) !important;
-  color: var(--dsw-alias-brand-primary) !important;
+  background: var(--dsw-alias-brand-primary) !important;
+  color: var(--dsw-alias-bg-base) !important;
   font-weight: 600;
 }
 
@@ -310,8 +311,9 @@
    which must not read as "about to become something else". */
 .chipActive:hover:not(:disabled),
 .chip[aria-pressed='true']:hover:not(:disabled) {
-  background: var(--dsw-alias-interactive-bg-hover) !important;
-  color: var(--dsw-alias-brand-primary) !important;
+  border-color: var(--dsw-alias-brand-primary) !important;
+  background: var(--dsw-alias-brand-primary) !important;
+  color: var(--dsw-alias-bg-base) !important;
 }
 
 /* ---- v0.8.0 N11 additions: form grid ---- */
