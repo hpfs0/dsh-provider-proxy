@@ -928,7 +928,7 @@ const S = {
   hint: {
     gridColumn: '1 / -1',
     fontSize: '11px',
-    color: 'var(--dsw-alias-label-secondary)',
+    color: 'var(--dsw-alias-state-warn-primary, #d29922)',
   },
   chipRow: {
     display: 'flex',
@@ -1659,8 +1659,7 @@ function renderPage(ctx: any): unknown {
             {
               className: styles.hint,
               style: {
-                gridColumn: '1 / -1',
-                fontSize: '11px',
+                ...S.hint,
                 marginTop: '2px',
                 // A warning that a value can never work is an answer, not
                 // decoration — same rule as the failed self-check text.
@@ -1847,7 +1846,7 @@ function renderPage(ctx: any): unknown {
         onChange: (event: any) => bindGlobal('testUrl')(event.target.value),
       }),
       globalTestUrlHint === undefined
-        ? h('span', { style: S.hint }, t.testUrlHint)
+        ? h('span', { className: styles.hint, style: S.hint }, t.testUrlHint)
         : h(
             'span',
             {
@@ -1886,7 +1885,7 @@ function renderPage(ctx: any): unknown {
     ),
     h(
       'p',
-      { style: S.hint },
+      { className: styles.hint, style: { ...S.hint, margin: '2px 0 0' } },
       globalLocalDirect ? t.localDirectOnHint : t.localDirectOffHint,
     ),
   )

@@ -173,7 +173,7 @@
   grid-column: 1 / -1;
   margin-top: 2px;
   font-size: 11px;
-  color: var(--dsw-alias-state-warn-primary);
+  color: var(--dsw-alias-state-warn-primary, #d29922);
 }
 
 .input {

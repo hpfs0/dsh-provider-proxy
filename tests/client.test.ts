@@ -4072,3 +4072,80 @@ test('N13: copy button copies text to clipboard and shows feedback', async () =>
     restore()
   }
 })
+
+test('N14: form hints such as hostHint and passwordHint carry the warning/tip color token and fallback in both inline style and stylesheet', async () => {
+  assert.match(
+    clientCss,
+    /\.hint\s*\{[^}]*color:\s*var\(--dsw-alias-state-warn-primary,\s*#d29922\)/,
+    'client.css defines .hint color with fallback #d29922',
+  )
+
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        defaultProxy: { protocol: 'http', host: '127.0.0.1', port: 7890 },
+        providers: {
+          sensenova: { enabled: true, protocol: 'http', host: '10.0.0.1', port: 7890 },
+        },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+
+    function findNodes(node: any, pred: (n: any) => boolean, out: any[] = []): any[] {
+      if (node === null || typeof node !== 'object') return out
+      if (Array.isArray(node)) {
+        node.forEach(n => findNodes(n, pred, out))
+        return out
+      }
+      if (pred(node)) out.push(node)
+      if (node.children) findNodes(node.children, pred, out)
+      return out
+    }
+
+    const tree = render()
+
+    const hostHintNodes = findNodes(
+      tree,
+      n => n.type === 'span' && textsOf(n).some(t => t.includes('仅限 IP 或域名')),
+    )
+    assert.ok(hostHintNodes.length >= 1, 'found host hint node')
+    for (const node of hostHintNodes) {
+      assert.strictEqual(
+        node.props?.style?.color,
+        'var(--dsw-alias-state-warn-primary, #d29922)',
+        'host hint carries state-warn-primary color with fallback',
+      )
+    }
+
+    const passwordHintNodes = findNodes(
+      tree,
+      n => n.type === 'span' && textsOf(n).some(t => t.includes('作为代理认证口令')),
+    )
+    assert.ok(passwordHintNodes.length >= 1, 'found password hint node')
+    for (const node of passwordHintNodes) {
+      assert.strictEqual(
+        node.props?.style?.color,
+        'var(--dsw-alias-state-warn-primary, #d29922)',
+        'password hint carries state-warn-primary color with fallback',
+      )
+    }
+
+    const globalTestUrlHintNodes = findNodes(
+      tree,
+      n => n.type === 'span' && textsOf(n).some(t => t.includes('逗号或空格分隔；按顺序尝试')),
+    )
+    assert.ok(globalTestUrlHintNodes.length >= 1, 'found global testUrl hint node')
+    for (const node of globalTestUrlHintNodes) {
+      assert.strictEqual(
+        node.props?.style?.color,
+        'var(--dsw-alias-state-warn-primary, #d29922)',
+        'global testUrl hint carries state-warn-primary color with fallback',
+      )
+    }
+  } finally {
+    restore()
+  }
+})
+
