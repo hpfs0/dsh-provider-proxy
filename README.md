@@ -297,8 +297,11 @@ npm run verify     # 上面三件事，按顺序
 ## 发布
 
 ```sh
-npm run verify          # 先确认全绿
-npm version patch       # 0.2.0 -> 0.2.1
+npm run verify              # 先确认全绿
+npm pack --dry-run          # 核对包内容（9 个文件）
+npm version patch           # 0.9.0 -> 0.9.1
 npm publish
 git push --follow-tags
 ```
+
+发布说明放在 `release_notes/`，文件名形如 `RELEASE_NOTES_090.md`。
