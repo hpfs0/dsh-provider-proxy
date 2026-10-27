@@ -116,6 +116,15 @@ export const ProviderProxyRoute = z.object({
   /** Whether this provider's calls are routed through the proxy below. */
   enabled: z.boolean().default(false),
   /**
+   * A named preset from the top-level `proxyProfiles` dictionary.
+   *
+   * Non-empty wins over `useDefault`: the route's TRANSPORT fields come from
+   * that preset. Empty (the default) keeps the 0.8.0 behaviour, where
+   * `useDefault` may borrow the top-level `defaultProxy`. Target-host rules and
+   * the self-check target are always the route's own.
+   */
+  profileId: z.string().default(''),
+  /**
    * When true, this route's TRANSPORT fields (protocol/host/port/username/
    * password) come from the top-level `defaultProxy` instead of its own, so the
    * same endpoint is configured once for every provider that shares it. The
@@ -153,6 +162,12 @@ export const Config = z.object({
   /** Per-provider proxy routes, keyed by provider route id (e.g. `sensenova`). */
   providers: vol(z.dict(ProviderProxyRoute).default({})),
   /**
+   * Named proxy endpoints, keyed by a user-chosen name. A route opts into one
+   * with `profileId`; the top-level `defaultProxy` remains the implicit
+   * "default preset" so an old configuration keeps working unchanged.
+   */
+  proxyProfiles: vol(z.dict(DefaultProxy).default({})),
+  /**
    * Shared endpoint for every route that sets `useDefault`. Volatile for the
    * same reason as `providers`: a settings write is committed into the running
    * fiber instead of remounting the plugin.
@@ -176,6 +191,7 @@ export const Config = z.object({
 
 export interface ProviderProxyRouteValue {
   enabled: boolean
+  profileId: string
   useDefault: boolean
   protocol: Protocol
   host: string
@@ -198,6 +214,7 @@ export interface DefaultProxyValue {
 
 export interface ConfigShape {
   providers: { readonly [provider: string]: ProviderProxyRouteValue }
+  proxyProfiles: { readonly [profile: string]: DefaultProxyValue }
   defaultProxy: DefaultProxyValue
   localDirect: boolean
   testUrl: string
@@ -246,6 +263,9 @@ export function normalizeRoute(
   const onlyHosts = value.onlyHosts.trim().toLowerCase()
   const bypassHosts = value.bypassHosts.trim().toLowerCase()
   const testTarget = value.testTarget.trim()
+  // A preset name is a dictionary key, so only surrounding whitespace is
+  // removed; case is preserved because the key is shown to the user.
+  const profileId = value.profileId.trim()
 
   // A disabled route is normally returned untouched: nothing has been asked of
   // it, so a half-typed endpoint must not be reported as a problem. The
@@ -253,7 +273,7 @@ export function normalizeRoute(
   // switched on yet — so it passes `requireEnabled: false` to get exactly the
   // validation routing would apply once the route is on.
   if (!value.enabled && options?.requireEnabled !== false) {
-    return { ...value, port: value.port || 0, onlyHosts, bypassHosts, testTarget }
+    return { ...value, profileId, port: value.port || 0, onlyHosts, bypassHosts, testTarget }
   }
 
   const host = value.host.trim()
@@ -270,5 +290,13 @@ export function normalizeRoute(
       `dsh-provider-proxy: provider "${provider}" 的代理端口无效（需为 1-65535 的整数）`,
     )
   }
-  return { ...value, host, username: value.username.trim(), onlyHosts, bypassHosts, testTarget }
+  return {
+    ...value,
+    profileId,
+    host,
+    username: value.username.trim(),
+    onlyHosts,
+    bypassHosts,
+    testTarget,
+  }
 }

@@ -13,8 +13,12 @@ import {
   normalizeDefaultProxy,
   normalizeRoute,
   parseHostList,
+  bindingFields,
+  profileNameProblem,
   proxyHostProblem,
   proxyUrl,
+  routeBindingOf,
+  routesBoundTo,
 } from '../lib/index.js'
 
 test('proxyUrl assembles host, port and protocol', () => {
@@ -748,5 +752,147 @@ test('buildRouteEntry resolves the shared endpoint for a disabled route too', as
   if (!built.ok) return
   assert.equal(built.entry.proxyOrigin, 'http://127.0.0.1:7890')
   await built.entry.dispatcher.close()
+})
+
+// ---- N14: named proxy presets ----
+
+const PROFILES = {
+  'HK-Proxy': { protocol: 'socks5' as const, host: '127.0.0.1', port: 7891 },
+  'US-Proxy': { protocol: 'http' as const, host: '10.0.0.2', port: 1080 },
+}
+
+test('N14: a route bound to a preset takes its transport from that preset', async () => {
+  const { entries, problems } = createProxyTable(
+    { p: { enabled: true, profileId: 'HK-Proxy', onlyHosts: 'api.example.com' } },
+    { profiles: PROFILES },
+  )
+  assert.equal(problems.size, 0)
+  assert.equal(entries.get('p').proxyOrigin, 'socks5://127.0.0.1:7891')
+  // Only the transport moves: the target-host rules stay the route's own.
+  assert.equal(entries.get('p').decide('api.example.com'), 'proxy')
+  assert.equal(entries.get('p').decide('other.test'), 'direct')
+  await closeTable(entries)
+})
+
+test('N14: two routes bound to different presets get different endpoints', async () => {
+  const { entries } = createProxyTable(
+    {
+      a: { enabled: true, profileId: 'HK-Proxy' },
+      b: { enabled: true, profileId: 'US-Proxy' },
+    },
+    { profiles: PROFILES },
+  )
+  assert.equal(entries.get('a').proxyOrigin, 'socks5://127.0.0.1:7891')
+  assert.equal(entries.get('b').proxyOrigin, 'http://10.0.0.2:1080')
+  assert.notEqual(entries.get('a').dispatcher, entries.get('b').dispatcher)
+  await closeTable(entries)
+})
+
+test('N14: a non-empty profileId wins over useDefault', async () => {
+  // The page clears useDefault when a preset is picked, but a hand-edited file
+  // may carry both. The preset is the more specific intent.
+  const { entries } = createProxyTable(
+    { p: { enabled: true, profileId: 'US-Proxy', useDefault: true } },
+    {
+      defaultProxy: { protocol: 'http', host: '127.0.0.1', port: 7890 },
+      profiles: PROFILES,
+    },
+  )
+  assert.equal(entries.get('p').proxyOrigin, 'http://10.0.0.2:1080')
+  await closeTable(entries)
+})
+
+test('N14: an empty profileId keeps the 0.8.0 useDefault behaviour', async () => {
+  const { entries } = createProxyTable(
+    { p: { enabled: true, profileId: '', useDefault: true } },
+    {
+      defaultProxy: { protocol: 'http', host: '127.0.0.1', port: 7890 },
+      profiles: PROFILES,
+    },
+  )
+  assert.equal(entries.get('p').proxyOrigin, 'http://127.0.0.1:7890')
+  await closeTable(entries)
+})
+
+test('N14: binding a preset that does not exist is refused, naming the preset', async () => {
+  const { entries, problems } = createProxyTable(
+    { p: { enabled: true, profileId: 'gone' } },
+    { profiles: PROFILES },
+  )
+  assert.equal(entries.size, 0, 'a missing preset must never fall back to the card fields')
+  assert.match(problems.get('p'), /gone/)
+  assert.match(problems.get('p'), /不存在/)
+})
+
+test('N14: a preset with a half-filled credential refuses every route bound to it', async () => {
+  const { entries, problems } = createProxyTable(
+    { p: { enabled: true, profileId: 'broken' } },
+    { profiles: { broken: { host: 'proxy.test', port: 8080, username: 'alice' } } },
+  )
+  assert.equal(entries.size, 0)
+  assert.match(problems.get('p'), /broken/)
+  assert.match(problems.get('p'), /密码/)
+})
+
+test('N14: credentials from a preset reach the route, guards included', async () => {
+  const withoutPassword = createProxyTable(
+    { p: { enabled: true, profileId: 'cred' } },
+    { profiles: { cred: { host: 'proxy.test', port: 8080, username: 'alice', password: '' } } },
+  )
+  assert.equal(withoutPassword.entries.size, 0)
+  assert.match(withoutPassword.problems.get('p'), /用户名但没有密码/)
+
+  const complete = createProxyTable(
+    { p: { enabled: true, profileId: 'cred' } },
+    { profiles: { cred: { host: 'proxy.test', port: 8080, username: 'alice', password: 's3cret' } } },
+  )
+  assert.equal(complete.problems.size, 0)
+  // The origin is always credential-free, even when the preset carries one.
+  assert.equal(complete.entries.get('p').proxyOrigin, 'http://proxy.test:8080')
+  await closeTable(complete.entries)
+})
+
+test('N14: editing a preset changes the route fingerprint, so its cache is invalidated', () => {
+  const route = { enabled: true, profileId: 'HK-Proxy' }
+  const before = routeFingerprint({ ...route, ...PROFILES['HK-Proxy'] })
+  const after = routeFingerprint({ ...route, ...PROFILES['HK-Proxy'], port: 7892 })
+  assert.notEqual(before, after, 'a preset edit must produce a new route token')
+})
+
+test('N14: the preset resolver is the same rule the browser applies', () => {
+  assert.deepEqual(routeBindingOf({ profileId: 'HK-Proxy', useDefault: true }), {
+    kind: 'profile',
+    profileId: 'HK-Proxy',
+  })
+  assert.deepEqual(routeBindingOf({ profileId: '  ', useDefault: true }), { kind: 'default' })
+  assert.deepEqual(routeBindingOf({ profileId: '', useDefault: false }), { kind: 'own' })
+  assert.deepEqual(routeBindingOf(undefined), { kind: 'own' })
+
+  assert.deepEqual(bindingFields({ kind: 'profile', profileId: 'x' }), {
+    profileId: 'x',
+    useDefault: false,
+  })
+  assert.deepEqual(bindingFields({ kind: 'default' }), { profileId: '', useDefault: true })
+  assert.deepEqual(bindingFields({ kind: 'own' }), { profileId: '', useDefault: false })
+})
+
+test('N14: a preset name is validated before it becomes a dictionary key', () => {
+  assert.equal(profileNameProblem('HK-Proxy'), undefined)
+  assert.match(profileNameProblem('   ') ?? '', /不能为空/)
+  assert.match(profileNameProblem('a'.repeat(41)) ?? '', /40/)
+  assert.match(profileNameProblem('默认预设 (Default)') ?? '', /保留/)
+  assert.match(profileNameProblem('__default__') ?? '', /保留/)
+  assert.match(profileNameProblem('bad\u0000name') ?? '', /控制字符/)
+})
+
+test('N14: routes bound to a preset are enumerable for cache invalidation', () => {
+  const routes = {
+    a: { profileId: 'HK-Proxy' },
+    b: { profileId: 'HK-Proxy ' },
+    c: { profileId: 'US-Proxy' },
+    d: {},
+  }
+  assert.deepEqual(routesBoundTo(routes, 'HK-Proxy'), ['a', 'b'])
+  assert.deepEqual(routesBoundTo(routes, 'none'), [])
 })
 

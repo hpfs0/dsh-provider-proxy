@@ -24,6 +24,7 @@ import {
 } from './config.js'
 import { hostMatches, normalizeHostRule, parseHostList } from './host-rules.js'
 import { defaultProxyProblem } from './proxy-address.js'
+import { resolveEndpoint, withEndpoint, type ProfileMap } from './presets.js'
 import type { DispatcherLike } from './fetch-router.js'
 
 export interface RouteEntry {
@@ -223,29 +224,6 @@ function buildDecide(
   }
 }
 
-/**
- * Apply the shared default endpoint to one route that opted into it.
- *
- * Only the TRANSPORT fields move; `onlyHosts`/`bypassHosts`/`testTarget` stay the
- * route's own, because they describe that provider's traffic, not the proxy. The
- * merge happens AFTER the endpoint is proven usable, so a route can never be
- * silently downgraded to its own (empty) fields while the user believes it is
- * using the default.
- */
-function withDefaultProxy(
-  route: Partial<ProviderProxyRouteValue>,
-  defaultProxy: DefaultProxyValue,
-): Partial<ProviderProxyRouteValue> {
-  return {
-    ...route,
-    protocol: defaultProxy.protocol,
-    host: defaultProxy.host,
-    port: defaultProxy.port,
-    username: defaultProxy.username,
-    password: defaultProxy.password,
-  }
-}
-
 /** One built route, or the reason it could not be built. */
 export type RouteBuildResult =
   | { ok: true; entry: RouteEntry }
@@ -255,6 +233,11 @@ export type RouteBuildResult =
 export interface RouteBuildOptions {
   /** The shared endpoint, already normalized. */
   defaultProxy: DefaultProxyValue
+  /**
+   * Named presets a route may bind with `profileId`. Partial values are
+   * normalized here, exactly like the shared default.
+   */
+  profiles?: ProfileMap
   /**
    * Forwarded to `normalizeRoute`. The table passes `true` — it skips a disabled
    * route before building it — while the self-check passes `false` to get exactly
@@ -279,10 +262,26 @@ export function buildRouteEntry(
   options: RouteBuildOptions,
 ): RouteBuildResult {
   let effective = raw
-  // A route that opted into the shared endpoint takes the proxy address from it.
-  // Checked BEFORE the merge so the refusal names the setting the user actually
-  // has to fix — the default block — instead of the card's empty fields.
-  if (raw?.useDefault === true) {
+  // A route bound to a preset, or opted into the shared endpoint, takes its
+  // proxy address from there. Checked BEFORE the merge so a refusal names the
+  // setting the user actually has to fix — the preset or the default block —
+  // instead of the card's empty fields.
+  const resolved = resolveEndpoint(provider, raw, options.defaultProxy, options.profiles)
+  if (!resolved.ok) return { ok: false, problem: resolved.problem }
+  if (resolved.binding.kind === 'profile') {
+    const preset = resolved.endpoint ?? {}
+    // The SAME predicate the default block uses: a preset is one endpoint, and
+    // a half-filled credential in it must refuse every card that binds it, with
+    // a message that points at the preset.
+    const why = defaultProxyProblem(preset)
+    if (why !== undefined) {
+      return {
+        ok: false,
+        problem: `dsh-provider-proxy: provider "${provider}" 绑定的预设「${resolved.binding.profileId}」不可用：${why}`,
+      }
+    }
+    effective = withEndpoint(raw, normalizeDefaultProxy(preset))
+  } else if (resolved.binding.kind === 'default') {
     const why = defaultProxyProblem(options.defaultProxy)
     if (why !== undefined) {
       return {
@@ -290,7 +289,12 @@ export function buildRouteEntry(
         problem: `dsh-provider-proxy: provider "${provider}" 启用了「使用默认代理」，但顶层默认代理不可用：${why}`,
       }
     }
-    effective = withDefaultProxy(raw, options.defaultProxy)
+    // Only the TRANSPORT fields move; `onlyHosts`/`bypassHosts`/`testTarget` stay
+    // the route's own, because they describe that provider's traffic, not the
+    // proxy. The merge happens AFTER the endpoint is proven usable, so a route
+    // can never be silently downgraded to its own (empty) fields while the user
+    // believes it is using the default.
+    effective = withEndpoint(raw, options.defaultProxy)
   }
 
   let route: ProviderProxyRouteValue
@@ -376,6 +380,8 @@ export function buildRouteEntry(
 export interface ProxyTableOptions {
   /** The shared endpoint a route may opt into with `useDefault`. */
   defaultProxy?: Partial<DefaultProxyValue>
+  /** Named presets a route may bind with `profileId`. */
+  profiles?: ProfileMap
   /**
    * Whether a loopback/private target is sent direct instead of through the
    * proxy. Defaults to true; `undefined`/absent means "on".
@@ -403,6 +409,7 @@ export function createProxyTable(
   const problems = new Map<string, string>()
   const buildOptions: RouteBuildOptions = {
     defaultProxy: normalizeDefaultProxy(options.defaultProxy),
+    profiles: options.profiles,
     requireEnabled: true,
     localDirect: options.localDirect !== false,
   }

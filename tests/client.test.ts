@@ -4149,3 +4149,408 @@ test('N14: form hints such as hostHint and passwordHint carry the warning/tip co
   }
 })
 
+// ---- N14: named proxy presets ----
+
+/** The preset manager block, by its summary text. */
+function profileManagerOf(tree) {
+  let found
+  const walk = node => {
+    if (found !== undefined || node === null || typeof node !== 'object') return
+    if (Array.isArray(node)) return node.forEach(walk)
+    if (node.type === 'details' && textsOf(node).includes('代理预设 (0)')) found = node
+    if (found === undefined && node.type === 'details') {
+      const summary = textsOf(node.children?.[0]).join('')
+      if (summary.startsWith('代理预设')) found = node
+    }
+    if (node.children) walk(node.children)
+  }
+  walk(tree)
+  return found
+}
+
+/** The `<select>` a card uses to pick its endpoint source. */
+function profileSelectOf(card) {
+  const selects = []
+  const walk = node => {
+    if (node === null || typeof node !== 'object') return
+    if (Array.isArray(node)) return node.forEach(walk)
+    if (node.type === 'select') selects.push(node)
+    if (node.children) walk(node.children)
+  }
+  walk(card)
+  return selects.find(select => textsOf(select).some(text => text.includes('独立自定义配置')))
+}
+
+test('N14: the preset manager is a details block that lists the built-in default', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [tree] = renderPage(mod, harness)
+    const manager = profileManagerOf(tree)
+    assert.ok(manager, 'the page must offer a preset manager block')
+    assert.equal(manager.type, 'details')
+    assert.ok(
+      textsOf(manager).some(text => text.includes('默认预设 (Default)')),
+      'the built-in default preset must be discoverable from the manager',
+    )
+    assert.ok(
+      findButtons(manager).some(button => textsOf(button).includes('添加预设')),
+      'the manager must offer an add button',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('N14: with no named presets a card keeps the 0.8.0 use-default checkbox', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [tree] = renderPage(mod, harness)
+    const card = cardFor(tree, 'sensenova')
+    assert.equal(findCheckboxes(card).length, 2, 'the two switches are unchanged')
+    assert.equal(profileSelectOf(card), undefined, 'no picker is offered with nothing to pick')
+  } finally {
+    restore()
+  }
+})
+
+test('N14: once a preset exists, a card picks its endpoint source from a list', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: { enabled: true, protocol: 'http', host: '10.0.0.1', port: 7890 },
+        },
+        proxyProfiles: { 'HK-Proxy': { protocol: 'socks5', host: '127.0.0.1', port: 7891 } },
+      },
+    })
+    const [tree] = renderPage(mod, harness)
+    const card = cardFor(tree, 'sensenova')
+    const select = profileSelectOf(card)
+    assert.ok(select, 'the card must offer a preset picker')
+    const options = textsOf(select)
+    assert.ok(options.some(text => text.includes('独立自定义配置')), 'the own-fields option is offered')
+    assert.ok(options.some(text => text.includes('默认预设 (Default)')), 'the default preset is offered')
+    assert.ok(options.some(text => text.includes('HK-Proxy')), 'each named preset is offered')
+    assert.equal(select.props.value, '', 'a route with no binding starts on its own fields')
+  } finally {
+    restore()
+  }
+})
+
+test('N14: binding a card to a preset writes both binding fields in one go', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: { enabled: true, protocol: 'http', host: '10.0.0.1', port: 7890 },
+        },
+        proxyProfiles: { 'HK-Proxy': { protocol: 'socks5', host: '127.0.0.1', port: 7891 } },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const select = profileSelectOf(cardFor(render(), 'sensenova'))
+    select.props.onChange({ target: { value: 'HK-Proxy' } })
+    await writeSettle()
+    assert.deepEqual(harness.writes[0].ops, [
+      { op: 'set', path: ['providers', 'sensenova', 'profileId'], value: 'HK-Proxy' },
+      { op: 'set', path: ['providers', 'sensenova', 'useDefault'], value: false },
+    ])
+  } finally {
+    restore()
+  }
+})
+
+test('N14: a card bound to a preset hides its own inputs and names the endpoint', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: { enabled: true, profileId: 'HK-Proxy', protocol: 'http', host: '', port: 0 },
+        },
+        proxyProfiles: { 'HK-Proxy': { protocol: 'socks5', host: '127.0.0.1', port: 7891 } },
+      },
+    })
+    const [tree] = renderPage(mod, harness)
+    const card = cardFor(tree, 'sensenova')
+    assert.ok(
+      textsOf(card).includes('使用预设 HK-Proxy：socks5://127.0.0.1:7891'),
+      'the card must name the endpoint it will actually use',
+    )
+    assert.ok(
+      !textsOf(card).includes('IP / 主机'),
+      'a bound card must not render inputs that do not apply',
+    )
+    assert.equal(pillTextOf(card), '走代理', 'a resolvable preset is not a refusal')
+  } finally {
+    restore()
+  }
+})
+
+test('N14: a card bound to a missing preset is refused and names it', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: { enabled: true, profileId: 'deleted-one', protocol: 'http', host: '', port: 0 },
+        },
+        proxyProfiles: {},
+      },
+    })
+    const [tree] = renderPage(mod, harness)
+    const card = cardFor(tree, 'sensenova')
+    assert.equal(pillTextOf(card), '配置被拒')
+    assert.ok(
+      textsOf(card).some(text => text.includes('绑定的预设「deleted-one」已不存在')),
+      'the refusal must name the missing preset, not the card fields',
+    )
+    // The Test button stays, exactly as it does for any enabled route: the Host
+    // is the one that can explain WHY the route was refused, and it answers with
+    // the same missing-preset reason.
+    assert.ok(findTestButton(card), 'an enabled route always offers the check')
+  } finally {
+    restore()
+  }
+})
+
+test('N14: a card bound to an unusable preset says the PRESET is at fault', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: { enabled: true, profileId: 'HK-Proxy', protocol: 'http', host: '', port: 0 },
+        },
+        proxyProfiles: { 'HK-Proxy': { protocol: 'http', host: '127.0.0.1', port: 0 } },
+      },
+    })
+    const [tree] = renderPage(mod, harness)
+    const card = cardFor(tree, 'sensenova')
+    assert.ok(
+      textsOf(card).some(text => text.includes('绑定的预设「HK-Proxy」不可用')),
+      'the refusal must point at the preset',
+    )
+    assert.ok(
+      textsOf(card).some(text => text.includes('代理端口无效')),
+      'and it must still name the actual problem',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('N14: adding a preset writes the whole preset dictionary', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    globalThis.window = { ...globalThis.window, prompt: () => 'HK-Proxy' }
+    const add = findButtons(profileManagerOf(render())).find(button =>
+      textsOf(button).includes('添加预设'),
+    )
+    add.props.onClick()
+    await writeSettle()
+    assert.deepEqual(harness.writes[0].ops, [
+      {
+        op: 'set',
+        path: ['proxyProfiles'],
+        value: { 'HK-Proxy': { protocol: 'http', host: '', port: 0, username: '', password: '' } },
+      },
+    ])
+    assert.ok(
+      textsOf(render()).some(text => text.includes('HK-Proxy')),
+      'the new preset must appear immediately, before a remount',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('N14: a duplicate preset name is refused without a write', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {},
+        proxyProfiles: { 'HK-Proxy': { protocol: 'http', host: '127.0.0.1', port: 7891 } },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    globalThis.window = { ...globalThis.window, prompt: () => 'HK-Proxy' }
+    findButtons(profileManagerOf(render()))
+      .find(button => textsOf(button).includes('添加预设'))
+      .props.onClick()
+    await writeSettle()
+    assert.equal(harness.writes.length, 0, 'a duplicate name must not reach the Host')
+    assert.ok(textsOf(render()).some(text => text.includes('已存在同名预设')))
+  } finally {
+    restore()
+  }
+})
+
+test('N14: editing a preset field writes its own path and clears bound checks', async () => {
+  const { mod, restore } = loadBundle(async url => ({
+    ok: true,
+    status: 200,
+    json: async () =>
+      String(url).includes('/test')
+        ? { ok: true, ms: 120, status: 200 }
+        : {
+            providers: [
+              { id: 'sensenova', name: 'SenseNova', live: true },
+              { id: 'openai', name: 'OpenAI', live: true },
+            ],
+          },
+  }))
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: { enabled: true, profileId: 'HK-Proxy', protocol: 'http', host: '', port: 0 },
+          openai: { enabled: true, protocol: 'http', host: '10.0.0.1', port: 7890 },
+        },
+        proxyProfiles: { 'HK-Proxy': { protocol: 'http', host: '127.0.0.1', port: 7891 } },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    for (const id of ['sensenova', 'openai']) {
+      findTestButton(cardFor(render(), id)).props.onClick()
+    }
+    await settle()
+    assert.ok(JSON.stringify(cardFor(render(), 'sensenova')).includes('120 ms'))
+    assert.ok(JSON.stringify(cardFor(render(), 'openai')).includes('120 ms'))
+
+    const manager = profileManagerOf(render())
+    const host = findInputsByPlaceholder(manager, '127.0.0.1')[0]
+    assert.ok(host, 'the preset manager exposes the preset host input')
+    host.props.onChange({ target: { value: '10.0.0.9' } })
+    const tree = render()
+    assert.ok(
+      !JSON.stringify(cardFor(tree, 'sensenova')).includes('120 ms'),
+      'a card bound to the edited preset must lose its check result',
+    )
+    assert.ok(
+      JSON.stringify(cardFor(tree, 'openai')).includes('120 ms'),
+      'a card with its own endpoint is unaffected',
+    )
+    await writeSettle()
+    assert.deepEqual(harness.writes[0].ops, [
+      { op: 'set', path: ['proxyProfiles', 'HK-Proxy', 'host'], value: '10.0.0.9' },
+    ])
+  } finally {
+    restore()
+  }
+})
+
+test('N14: deleting a preset in use warns and carries the bound providers with it', async () => {
+  let confirmText
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: { enabled: true, profileId: 'HK-Proxy', protocol: 'http', host: '', port: 0 },
+        },
+        proxyProfiles: { 'HK-Proxy': { protocol: 'http', host: '127.0.0.1', port: 7891 } },
+      },
+    })
+    // The real settings store republishes the value after a write; this harness
+    // records writes only, so the delete is mirrored here to observe the page
+    // AFTER the preset is gone.
+    const mutate = harness.form.mutate
+    harness.form.mutate = async (ops, revision) => {
+      await mutate(ops, revision)
+      for (const op of ops) {
+        if (op.op === 'set' && op.path[0] === 'proxyProfiles') harness.snapshot.value.proxyProfiles = op.value
+      }
+    }
+    const [, render] = renderPage(mod, harness)
+    globalThis.window = {
+      ...globalThis.window,
+      confirm: text => {
+        confirmText = text
+        return true
+      },
+    }
+    const remove = findButtons(profileManagerOf(render())).find(button =>
+      textsOf(button).includes('删除'),
+    )
+    assert.ok(remove, 'each preset row offers a delete button')
+    remove.props.onClick()
+    assert.ok(
+      String(confirmText).includes('sensenova'),
+      'the warning must name the providers that depend on the preset',
+    )
+    await writeSettle()
+    assert.deepEqual(harness.writes[0].ops, [{ op: 'set', path: ['proxyProfiles'], value: {} }])
+    const card = cardFor(render(), 'sensenova')
+    assert.equal(pillTextOf(card), '配置被拒', 'the bound card is now refused')
+    assert.ok(textsOf(card).some(text => text.includes('已不存在')))
+  } finally {
+    restore()
+  }
+})
+
+test('N14: a cancelled delete writes nothing', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {},
+        proxyProfiles: { 'HK-Proxy': { protocol: 'http', host: '127.0.0.1', port: 7891 } },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    globalThis.window = { ...globalThis.window, confirm: () => false }
+    findButtons(profileManagerOf(render()))
+      .find(button => textsOf(button).includes('删除'))
+      .props.onClick()
+    await writeSettle()
+    assert.equal(harness.writes.length, 0)
+  } finally {
+    restore()
+  }
+})
+
+test('N14: renaming a preset moves the key and rebinds every route using it', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: { enabled: true, profileId: 'HK-Proxy', protocol: 'http', host: '', port: 0 },
+        },
+        proxyProfiles: { 'HK-Proxy': { protocol: 'http', host: '127.0.0.1', port: 7891 } },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    globalThis.window = { ...globalThis.window, prompt: () => 'HK-Fast' }
+    findButtons(profileManagerOf(render()))
+      .find(button => textsOf(button).includes('重命名'))
+      .props.onClick()
+    await writeSettle()
+    assert.deepEqual(harness.writes[0].ops, [
+      {
+        op: 'set',
+        path: ['proxyProfiles'],
+        value: { 'HK-Fast': { protocol: 'http', host: '127.0.0.1', port: 7891, username: '', password: '' } },
+      },
+      { op: 'set', path: ['providers', 'sensenova', 'profileId'], value: 'HK-Fast' },
+    ])
+    assert.ok(
+      textsOf(cardFor(render(), 'sensenova')).some(text => text.includes('使用预设 HK-Fast')),
+      'the card follows the rename without a remount',
+    )
+  } finally {
+    restore()
+  }
+})
+

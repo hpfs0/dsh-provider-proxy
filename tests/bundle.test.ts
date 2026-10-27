@@ -87,3 +87,59 @@ test('applying the schema produces defaults for omitted fields', () => {
   assert.equal(snapshot.p.username, '')
   assert.equal(snapshot.p.password, '')
 })
+
+// ---- N14: named proxy presets ----
+
+const read = value => (typeof value?.get === 'function' ? value.get() : value)
+
+test('N14: proxyProfiles defaults to an empty dictionary', () => {
+  const parsed = Config({ providers: {} })
+  assert.deepEqual(read(parsed.proxyProfiles), {})
+})
+
+test('N14: profileId defaults to an empty string on every route', () => {
+  const parsed = Config({ providers: { p: { enabled: true, host: 'h', port: 1 } } })
+  assert.equal(read(parsed.providers).p.profileId, '')
+})
+
+test('N14: a preset dictionary is parsed with the DefaultProxy shape', () => {
+  const parsed = Config({
+    providers: {},
+    proxyProfiles: { 'HK-Proxy': { protocol: 'socks5', host: '10.0.0.2', port: 1080 } },
+  })
+  assert.deepEqual(read(parsed.proxyProfiles), {
+    'HK-Proxy': { protocol: 'socks5', host: '10.0.0.2', port: 1080, username: '', password: '' },
+  })
+})
+
+test('N14: an explicit profileId survives parsing', () => {
+  const parsed = Config({
+    providers: { p: { enabled: false, profileId: ' HK-Proxy ', host: '', port: 0 } },
+    proxyProfiles: { 'HK-Proxy': { host: '10.0.0.2', port: 1080 } },
+  })
+  assert.equal(read(parsed.providers).p.profileId, ' HK-Proxy ', 'the schema does not trim; normalizeRoute does')
+  assert.equal(normalizeRoute('p', read(parsed.providers).p).profileId, 'HK-Proxy')
+})
+
+test('N14: a 0.8.0 configuration object still parses, with no preset loss', () => {
+  // Exactly what a shipped v0.8.0 cordis.patch.yml holds: no profileId, no
+  // proxyProfiles, and a useDefault route pointing at the top-level endpoint.
+  const legacy = {
+    providers: {
+      sensenova: { enabled: true, useDefault: true, onlyHosts: 'api.example.com' },
+    },
+    defaultProxy: { protocol: 'http', host: '127.0.0.1', port: 7890 },
+    localDirect: true,
+    testUrl: 'https://api.ipify.org?format=json',
+  }
+  const parsed = Config(legacy)
+  const providers = read(parsed.providers)
+  assert.deepEqual(read(parsed.proxyProfiles), {}, 'the absent dictionary becomes empty')
+  assert.equal(providers.sensenova.profileId, '')
+  assert.equal(providers.sensenova.useDefault, true, 'the old binding is untouched')
+  assert.deepEqual(
+    read(parsed.defaultProxy),
+    { protocol: 'http', host: '127.0.0.1', port: 7890, username: '', password: '' },
+    'the default endpoint is not migrated away',
+  )
+})

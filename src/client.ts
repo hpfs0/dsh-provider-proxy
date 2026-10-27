@@ -23,11 +23,22 @@
 import styles from './client.css'
 import { deadRuleEntries } from './host-rules.js'
 import { defaultProxyProblem, proxyHostProblem } from './proxy-address.js'
+import {
+  DEFAULT_PROFILE_LABEL,
+  DEFAULT_PROFILE_BINDING,
+  endpointSummary,
+  profileNameProblem,
+  profileNames,
+  routeBindingOf,
+  routesBoundTo,
+} from './presets.js'
 
 type Protocol = 'http' | 'https' | 'socks5'
 
 type RouteValue = {
   enabled: boolean
+  /** Non-empty binds the route's transport fields to one named preset. */
+  profileId: string
   useDefault: boolean
   protocol: Protocol
   host: string
@@ -37,6 +48,15 @@ type RouteValue = {
   onlyHosts: string
   bypassHosts: string
   testTarget: string
+}
+
+/** One named preset, as the page holds it. */
+type ProfileValue = {
+  protocol: Protocol
+  host: string
+  port: number
+  username: string
+  password: string
 }
 
 /** The provider rows we know about, and which of them are actually live. */
@@ -529,6 +549,7 @@ const byName = (a: ProviderRow, b: ProviderRow): number => a.name.localeCompare(
 function view(route: Partial<RouteValue> | undefined): RouteValue {
   return {
     enabled: route?.enabled === true,
+    profileId: typeof route?.profileId === 'string' ? route.profileId : '',
     useDefault: route?.useDefault === true,
     protocol: PROTOCOLS.includes(route?.protocol as Protocol) ? (route!.protocol as Protocol) : 'http',
     host: route?.host ?? '',
@@ -538,6 +559,19 @@ function view(route: Partial<RouteValue> | undefined): RouteValue {
     onlyHosts: route?.onlyHosts ?? '',
     bypassHosts: route?.bypassHosts ?? '',
     testTarget: route?.testTarget ?? '',
+  }
+}
+
+/** Schema defaults for one preset, so a half-filled one still renders. */
+function profileView(profile: Partial<ProfileValue> | undefined): ProfileValue {
+  return {
+    protocol: PROTOCOLS.includes(profile?.protocol as Protocol)
+      ? (profile!.protocol as Protocol)
+      : 'http',
+    host: typeof profile?.host === 'string' ? profile.host : '',
+    port: typeof profile?.port === 'number' ? profile.port : 0,
+    username: typeof profile?.username === 'string' ? profile.username : '',
+    password: typeof profile?.password === 'string' ? profile.password : '',
   }
 }
 
@@ -1144,6 +1178,20 @@ function renderPage(ctx: any): unknown {
     setDefaultDraft((current: any) => ({ ...current, [field]: value }))
 
   /**
+   * Named presets: their own draft, keyed by preset name.
+   *
+   * Kept separate from `draft` (keyed by provider id) so a preset can never be
+   * mistaken for a provider row, and separate from `defaultDraft` because the
+   * built-in default preset is edited in its own block.
+   */
+  const [profileDraft, setProfileDraft] = (React.useState ?? ((v: any) => [v, () => {}]))({})
+  const editProfile = (name: string, field: string, value: unknown) =>
+    setProfileDraft((current: any) => ({
+      ...current,
+      [name]: { ...current[name], [field]: value },
+    }))
+
+  /**
    * Whether each password input is temporarily shown as plain text.
    *
    * Provider cards are keyed by id; the shared default has its own state so a
@@ -1697,6 +1745,257 @@ function renderPage(ctx: any): unknown {
     : proxyHostProblem(defaultView.host)
   const defaultComplete = defaultWhy === undefined
   const defaultOrigin = `${defaultView.protocol}://${defaultView.host}:${defaultView.port}`
+
+  /**
+   * What one card will actually use, and whether that is usable.
+   *
+   * One function for every card, because the question "which endpoint does this
+   * card take" is asked in five places (state pill, test gate, refusal text,
+   * compact row, promote button). Answers that disagreed produced the classic
+   * bug: a green pill on a card the Host refused.
+   */
+  const cardEndpoint = (
+    route: RouteValue,
+  ): {
+    binding: ReturnType<typeof routeBindingOf>
+    endpoint?: ProfileValue
+    /** Set when the bound preset no longer exists. */
+    missingProfile?: string
+    /** Why the resolved endpoint cannot carry a request. */
+    why?: string
+    /** Whether this card has an endpoint worth testing. */
+    complete: boolean
+  } => {
+    const binding = routeBindingOf(route)
+    if (binding.kind === 'profile') {
+      const endpoint = profileValueOf(binding.profileId)
+      if (endpoint === undefined) return { binding, missingProfile: binding.profileId, complete: false }
+      const why = defaultProxyProblem(endpoint)
+      return { binding, endpoint, why, complete: why === undefined }
+    }
+    if (binding.kind === 'default') {
+      return { binding, endpoint: defaultView, why: defaultWhy, complete: defaultComplete }
+    }
+    const complete =
+      route.host.trim().length > 0 &&
+      Number.isInteger(route.port) &&
+      route.port >= 1 &&
+      route.port <= 65535
+    return { binding, why: defaultProxyProblem(route), complete }
+  }
+
+  /**
+   * The refusal text for one card, or `undefined` when it will be built.
+   *
+   * The wording distinguishes the three ways an endpoint can be unusable — a
+   * missing preset, a preset/default that is itself incomplete, and the card's
+   * own half-typed fields — because each one sends the user to a different
+   * place to fix it.
+   */
+  const cardProblemText = (state: ReturnType<typeof cardEndpoint>): string | undefined => {
+    if (state.missingProfile !== undefined) {
+      return `${t.profileMissing}${state.missingProfile}${t.profileMissingSuffix}`
+    }
+    if (state.why === undefined) return undefined
+    if (state.binding.kind === 'profile') {
+      return `${t.profileUnusable}${state.binding.profileId}${t.profileUnusableSuffix}${state.why}`
+    }
+    if (state.binding.kind === 'default') return `${t.defaultMissing}${state.why}`
+    return state.why
+  }
+
+  /**
+   * The named presets, stored and drafted.
+   *
+   * `stored` is what the Host has; `profileDraft` overlays edits that have not
+   * been written yet, exactly like a card's draft. The union of both is what the
+   * page renders, so a just-added preset appears before its write lands.
+   */
+  const storedProfiles = (snapshot.value?.proxyProfiles ?? {}) as Record<string, Partial<ProfileValue>>
+  const profileEntries = profileNames({ ...storedProfiles, ...profileDraft }).map(name => ({
+    name,
+    value: profileView({ ...storedProfiles[name], ...profileDraft[name] }),
+  }))
+  const profileValueOf = (name: string): ProfileValue | undefined => {
+    if (storedProfiles[name] === undefined && profileDraft[name] === undefined) return undefined
+    return profileView({ ...storedProfiles[name], ...profileDraft[name] })
+  }
+
+  /**
+   * Persist the WHOLE preset dictionary in one write.
+   *
+   * Add, rename and delete all use this: a dictionary-level `set` can express a
+   * rename (which a per-field write cannot, because the key itself changes) and
+   * guarantees the Host sees one consistent dictionary rather than a moment
+   * where both the old and the new name exist.
+   */
+  const writeProfiles = (
+    key: string,
+    next: Record<string, Partial<ProfileValue>>,
+    label: string,
+    onRefused: () => void,
+  ): void => {
+    // Every entry is normalized before it is written: the draft may hold a
+    // single field of a preset, and a half object would make the file depend on
+    // schema defaults the user never sees.
+    const full: Record<string, ProfileValue> = {}
+    for (const [name, value] of Object.entries(next)) full[name] = profileView(value)
+    saveMany(key, [{ op: 'set', path: ['proxyProfiles'], value: full }], label, onRefused)
+  }
+
+  /** Add a preset, then focus its rows by name. */
+  const addProfile = (): void => {
+    const raw = globalThis.window?.prompt?.(t.profileNamePrompt) ?? null
+    if (raw === null) return
+    const name = raw.trim()
+    const problem = profileNameProblem(name)
+    if (problem !== undefined) {
+      setSaveError({ label: t.profileNameLabel, message: problem })
+      return
+    }
+    if (storedProfiles[name] !== undefined || profileDraft[name] !== undefined) {
+      setSaveError({ label: t.profileNameLabel, message: t.profileNameTaken })
+      return
+    }
+    const next: Record<string, ProfileValue> = { ...storedProfiles, ...profileDraft } as Record<
+      string,
+      ProfileValue
+    >
+    next[name] = profileView({})
+    setProfileDraft((current: any) => ({ ...current, [name]: profileView({}) }))
+    writeProfiles(`\u0000profile\u0000add`, next, `${t.profileNameLabel} ${name}`, () => {
+      setProfileDraft((current: any) => {
+        if (current[name] === undefined) return current
+        const nextDraft = { ...current }
+        delete nextDraft[name]
+        return nextDraft
+      })
+    })
+  }
+
+  /** Rename one preset, carrying its fields and every binding with it. */
+  const renameProfile = (from: string): void => {
+    const raw = globalThis.window?.prompt?.(t.profileRenamePrompt, from) ?? null
+    if (raw === null) return
+    const to = raw.trim()
+    if (to === from) return
+    const problem = profileNameProblem(to)
+    if (problem !== undefined) {
+      setSaveError({ label: t.profileNameLabel, message: problem })
+      return
+    }
+    if (storedProfiles[to] !== undefined || profileDraft[to] !== undefined) {
+      setSaveError({ label: t.profileNameLabel, message: t.profileNameTaken })
+      return
+    }
+    const source = profileValueOf(from) ?? profileView({})
+    const next: Record<string, ProfileValue> = { ...storedProfiles, ...profileDraft } as Record<
+      string,
+      ProfileValue
+    >
+    delete next[from]
+    next[to] = source
+    const bound = routesBoundTo({ ...configured, ...draft }, from)
+    setProfileDraft((current: any) => {
+      const nextDraft = { ...current }
+      delete nextDraft[from]
+      nextDraft[to] = source
+      return nextDraft
+    })
+    if (bound.length > 0) {
+      setDraft((current: any) => {
+        const nextDraft = { ...current }
+        for (const id of bound) nextDraft[id] = { ...nextDraft[id], profileId: to }
+        return nextDraft
+      })
+    }
+    invalidateTests(bound)
+    saveMany(
+      '\u0000profile\u0000rename',
+      [
+        { op: 'set', path: ['proxyProfiles'], value: next },
+        ...bound.map(id => ({ op: 'set', path: ['providers', id, 'profileId'], value: to })),
+      ],
+      `${t.profileNameLabel} ${from} → ${to}`,
+      () => undefined,
+    )
+  }
+
+  /** Delete one preset. Routes bound to it keep their id, and say it is gone. */
+  const deleteProfile = (name: string): void => {
+    const bound = routesBoundTo({ ...configured, ...draft }, name)
+    if (
+      globalThis.window?.confirm?.(
+        bound.length === 0 ? t.profileDeleteConfirm : `${t.profileDeleteInUse}${bound.join('、')}\n\n${t.profileDeleteConfirm}`,
+      ) !== true
+    ) {
+      return
+    }
+    const next: Record<string, ProfileValue> = { ...storedProfiles, ...profileDraft } as Record<
+      string,
+      ProfileValue
+    >
+    delete next[name]
+    setProfileDraft((current: any) => {
+      const nextDraft = { ...current }
+      delete nextDraft[name]
+      return nextDraft
+    })
+    invalidateTests(bound)
+    writeProfiles(`\u0000profile\u0000delete`, next, `${t.profileNameLabel} ${name}`, () => undefined)
+  }
+
+  /** One preset control: draft first, then a debounced write to its own key. */
+  const bindProfile = (name: string, field: string) => (value: unknown) => {
+    editProfile(name, field, value)
+    invalidateTests(routesBoundTo({ ...configured, ...draft }, name))
+    save(
+      `\u0000profile\u0000${name}\u0000${field}`,
+      ['proxyProfiles', name, field],
+      `${name}.${field}`,
+      value,
+      () => {
+        setProfileDraft((current: any) => {
+          const entry = current[name]
+          if (entry === undefined || entry[field] === undefined) return current
+          const nextEntry = { ...entry }
+          delete nextEntry[field]
+          const nextDraft = { ...current }
+          if (Object.keys(nextEntry).length === 0) delete nextDraft[name]
+          else nextDraft[name] = nextEntry
+          return nextDraft
+        })
+      },
+    )
+  }
+
+  /**
+   * Point one card at a preset, or back at its own fields.
+   *
+   * Both binding fields are written together: `profileId` alone would leave a
+   * stale `useDefault: true` behind, and a hand-edited file that carries both
+   * resolves to the preset anyway — writing both keeps the file honest.
+   */
+  const bindRouteProfile = (id: string) => (value: string) => {
+    const profileId = value === DEFAULT_PROFILE_BINDING ? '' : value
+    edit(id, 'profileId', profileId)
+    if (profileId.length > 0) edit(id, 'useDefault', false)
+    invalidateTests([id])
+    saveMany(
+      `${id}\u0000*profile`,
+      [
+        { op: 'set', path: ['providers', id, 'profileId'], value: profileId },
+        ...(profileId.length > 0
+          ? [{ op: 'set', path: ['providers', id, 'useDefault'], value: false }]
+          : []),
+      ],
+      `${id}.profileId`,
+      () => {
+        rollbackRouteField(id, 'profileId')
+        if (profileId.length > 0) rollbackRouteField(id, 'useDefault')
+      },
+    )
+  }
   const defaultBlock = h(
     'div',
     { className: styles.defaultCard, style: S.defaultCard, key: 'default-proxy' },
@@ -1818,6 +2117,196 @@ function renderPage(ctx: any): unknown {
 
   const storedTestUrl =
     typeof snapshot.value?.testUrl === 'string' ? snapshot.value.testUrl : DEFAULT_TEST_URL
+
+  /**
+   * The preset manager.
+   *
+   * Collapsed by default: a user with one proxy never needs it, and the block
+   * otherwise competes with the default endpoint for attention. It always
+   * lists the built-in default preset — that is what makes the top-level
+   * `defaultProxy` discoverable as "just another preset" instead of a second
+   * concept.
+   */
+  const profileManager = h(
+    'details',
+    {
+      className: styles.diag,
+      style: { ...S.diag, marginTop: '0' },
+      key: 'profile-manager',
+    },
+    h(
+      'summary',
+      { className: styles.diagSummary },
+      `${t.profileManagerTitle} (${profileEntries.length})`,
+    ),
+    h('p', { className: styles.defaultLead, style: S.defaultLead }, t.profileManagerLead),
+    h(
+      'div',
+      { style: S.testRow, key: 'profile:add' },
+      h(
+        'button',
+        {
+          className: styles.testButton,
+          style: S.testButton,
+          type: 'button',
+          onClick: addProfile,
+        },
+        t.profileAdd,
+      ),
+    ),
+    // The built-in preset is EDITED in the default block above (one source of
+    // truth); here it is only listed, so the picker's options and this list
+    // agree.
+    h(
+      'div',
+      { key: 'profile:builtin', style: S.inheritNote },
+      `${DEFAULT_PROFILE_LABEL} — ${endpointSummary(defaultView)}`,
+    ),
+    ...profileEntries.map(entry => {
+      const bound = routesBoundTo({ ...configured, ...draft }, entry.name)
+      const why = defaultProxyProblem(entry.value)
+      return h(
+        'div',
+        {
+          key: `profile:${entry.name}`,
+          className: styles.profileCard,
+          style: {
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '8px',
+            padding: '10px 12px',
+            marginTop: '8px',
+            border: '1px solid var(--dsw-alias-border-l1)',
+            borderRadius: '8px',
+            background: 'var(--dsw-alias-bg-layer-1)',
+          },
+        },
+        h(
+          'div',
+          { style: S.head },
+          h(
+            'div',
+            { style: S.titles },
+            h('span', { style: S.name }, entry.name),
+            h(
+              'span',
+              {
+                className: why === undefined ? styles.pillOn : styles.pillOff,
+                style: { ...S.pill, ...(why === undefined ? S.pillOn : S.pillOff) },
+              },
+              why === undefined ? t.complete : t.notConfigured,
+            ),
+          ),
+          h(
+            'div',
+            { style: { display: 'flex', gap: '6px', flex: 'none' } },
+            h(
+              'button',
+              {
+                className: styles.testButton,
+                style: { ...S.testButton, padding: '3px 8px', fontSize: '11px' },
+                type: 'button',
+                onClick: () => renameProfile(entry.name),
+              },
+              t.profileRename,
+            ),
+            h(
+              'button',
+              {
+                className: styles.testButton,
+                style: { ...S.testButton, padding: '3px 8px', fontSize: '11px' },
+                type: 'button',
+                onClick: () => deleteProfile(entry.name),
+              },
+              t.profileDelete,
+            ),
+          ),
+        ),
+        bound.length === 0
+          ? null
+          : h('p', { style: S.inheritNote }, `${t.profileUsedBy}${bound.join('、')}`),
+        h(
+          'div',
+          { className: styles.formGrid, style: S.formGrid },
+          field(
+            t.protocol,
+            h(
+              'select',
+              {
+                className: styles.input,
+                style: S.input,
+                value: entry.value.protocol,
+                onChange: (event: any) => bindProfile(entry.name, 'protocol')(event.target.value),
+              },
+              ...PROTOCOLS.map(protocol =>
+                h('option', { key: protocol, value: protocol }, protocol.toUpperCase()),
+              ),
+            ),
+            undefined,
+          ),
+          field(
+            t.host,
+            h('input', {
+              className: styles.input,
+              style: S.input,
+              placeholder: '127.0.0.1',
+              value: entry.value.host,
+              onChange: (event: any) => bindProfile(entry.name, 'host')(event.target.value),
+            }),
+            entry.value.host.trim().length === 0 ? undefined : proxyHostProblem(entry.value.host),
+            entry.value.host.trim().length > 0 && proxyHostProblem(entry.value.host) !== undefined,
+          ),
+          field(
+            t.port,
+            h('input', {
+              className: styles.input,
+              style: S.input,
+              type: 'number',
+              min: 1,
+              max: 65535,
+              placeholder: '7891',
+              value: entry.value.port === 0 ? '' : String(entry.value.port),
+              onChange: (event: any) => {
+                const parsed = Number.parseInt(event.target.value, 10)
+                bindProfile(entry.name, 'port')(Number.isNaN(parsed) ? 0 : parsed)
+              },
+            }),
+            undefined,
+          ),
+          field(
+            t.username,
+            h('input', {
+              className: styles.input,
+              style: S.input,
+              autoComplete: 'off',
+              value: entry.value.username,
+              onChange: (event: any) => bindProfile(entry.name, 'username')(event.target.value),
+            }),
+            undefined,
+          ),
+          field(
+            t.password,
+            h(
+              'div',
+              { style: S.passwordControl },
+              h('input', {
+                className: styles.input,
+                style: { ...S.input, paddingRight: '36px' },
+                type: 'password',
+                autoComplete: 'off',
+                value: entry.value.password,
+                onChange: (event: any) => bindProfile(entry.name, 'password')(event.target.value),
+              }),
+            ),
+            t.passwordHintProxy,
+            false,
+            true,
+          ),
+        ),
+      )
+    }),
+  )
+
   const storedLocalDirect = snapshot.value?.localDirect !== false
   const globalTestUrl = typeof globalDraft.testUrl === 'string' ? globalDraft.testUrl : storedTestUrl
   const globalLocalDirect =
@@ -1893,12 +2382,12 @@ function renderPage(ctx: any): unknown {
   const routeStateOf = (row: ProviderRow): 'proxied' | 'direct' | 'rejected' => {
     const route = view({ ...configured[row.id], ...draft[row.id] })
     const recorded = problems[row.id]
-    const useDefault = route.useDefault === true
+    const state = cardEndpoint(route)
     const problemText = recorded !== undefined
       ? recorded
-      : useDefault
-        ? (defaultComplete ? undefined : `${t.defaultMissing}${defaultWhy}`)
-        : (route.enabled ? defaultProxyProblem(route) : undefined)
+      : route.enabled
+        ? cardProblemText(state)
+        : undefined
     if (route.enabled && problemText !== undefined) return 'rejected'
     if (route.enabled) return 'proxied'
     return 'direct'
@@ -2052,15 +2541,12 @@ function renderPage(ctx: any): unknown {
         const onlyDead = deadRuleEntries(route.onlyHosts)
         const bypassDead = deadRuleEntries(route.bypassHosts)
         const useDefault = route.useDefault === true
+        const boundProfile = route.profileId.trim()
+        const endpointState = cardEndpoint(route)
         // Whether this card has an endpoint worth checking: an inheriting card
         // depends on the shared default being configured, an own-endpoint card on
         // its host and port being complete. Mirrors the Host's own build gate.
-        const endpointStored = route.useDefault
-          ? defaultComplete
-          : route.host.trim().length > 0 &&
-            Number.isInteger(route.port) &&
-            route.port >= 1 &&
-            route.port <= 65535
+        const endpointStored = endpointState.complete
         const showTest = route.enabled || endpointStored
         // The Host's recorded problem is authoritative (it also covers dispatcher
         // construction); until the next catalogue poll, the shared predicate can
@@ -2069,8 +2555,7 @@ function renderPage(ctx: any): unknown {
         const problemText = ((): string | undefined => {
           const recorded = problems[row.id]
           if (recorded !== undefined) return recorded
-          if (useDefault) return defaultComplete ? undefined : `${t.defaultMissing}${defaultWhy}`
-          return route.enabled ? defaultProxyProblem(route) : undefined
+          return route.enabled ? cardProblemText(endpointState) : undefined
         })()
         const rejected = route.enabled && problemText !== undefined
         // Built once and either rendered (this route carries its own address) or
@@ -2220,30 +2705,87 @@ function renderPage(ctx: any): unknown {
             }),
             h('span', null, t.useProxy),
           ),
-          // Opting into the shared endpoint. The card then shows the address it
-          // will actually use — or, when the default is not configured, why the
-          // route is refused — instead of a set of empty inputs the user never
-          // filled and cannot interpret.
-          h(
-            'label',
-            { className: styles.toggle, style: S.toggle, key: `${row.id}:usedefault` },
-            h('input', {
-              type: 'checkbox',
-              checked: useDefault,
-              onChange: (event: any) => bind(row.id, 'useDefault')(event.target.checked === true),
-            }),
-            h('span', null, t.useDefault),
-          ),
+          // Which endpoint this card takes. With no named preset there is only
+          // one alternative to the card's own fields, so the 0.8.0 checkbox is
+          // kept byte-for-byte. Once presets exist, the same decision becomes a
+          // picker — a checkbox cannot express "which of four presets".
+          profileEntries.length === 0 && boundProfile.length === 0
+            ? h(
+                'label',
+                { className: styles.toggle, style: S.toggle, key: `${row.id}:usedefault` },
+                h('input', {
+                  type: 'checkbox',
+                  checked: useDefault,
+                  onChange: (event: any) => bind(row.id, 'useDefault')(event.target.checked === true),
+                }),
+                h('span', null, t.useDefault),
+              )
+            : h(
+                'label',
+                { className: styles.field, style: S.field, key: `${row.id}:profile` },
+                h('span', { className: styles.label, style: S.label }, t.profileBinding),
+                h(
+                  'select',
+                  {
+                    className: styles.input,
+                    style: S.input,
+                    value: boundProfile.length > 0 ? boundProfile : useDefault ? DEFAULT_PROFILE_BINDING : '',
+                    onChange: (event: any) => {
+                      const value = String(event.target.value)
+                      if (value === DEFAULT_PROFILE_BINDING) {
+                        edit(row.id, 'profileId', '')
+                        bind(row.id, 'useDefault')(true)
+                        return
+                      }
+                      if (value.length === 0) {
+                        edit(row.id, 'useDefault', false)
+                        bind(row.id, 'profileId')('')
+                        return
+                      }
+                      bindRouteProfile(row.id)(value)
+                    },
+                  },
+                  h('option', { key: 'own', value: '' }, t.profileBindingOwn),
+                  h(
+                    'option',
+                    { key: 'default', value: DEFAULT_PROFILE_BINDING },
+                    `${t.profileBindingPrefix}${DEFAULT_PROFILE_LABEL}`,
+                  ),
+                  ...profileEntries.map(entry =>
+                    h(
+                      'option',
+                      { key: entry.name, value: entry.name },
+                      `${t.profileBindingPrefix}${entry.name}`,
+                    ),
+                  ),
+                  // A route may still point at a preset that was deleted while
+                  // this page was open. Without an option for it the select
+                  // would render blank, which reads as "no choice made".
+                  boundProfile.length > 0 && !profileEntries.some(entry => entry.name === boundProfile)
+                    ? h(
+                        'option',
+                        { key: `missing:${boundProfile}`, value: boundProfile },
+                        `${t.profileBindingPrefix}${boundProfile}${t.profileMissingOption}`,
+                      )
+                    : null,
+                ),
+              ),
           problemText !== undefined
             ? h('p', { key: `${row.id}:problem`, style: S.inheritWarning }, problemText)
-            : useDefault
+            : boundProfile.length > 0
+              ? h(
+                  'p',
+                  { key: `${row.id}:profile-note`, style: S.inheritNote },
+                  `${t.inheritingProfile}${boundProfile}：${endpointSummary(endpointState.endpoint ?? {})}`,
+                )
+              : useDefault
               ? h(
                   'p',
                   { key: `${row.id}:inherit`, style: S.inheritNote },
                   `${t.inheritingDefault}${defaultOrigin}`,
                 )
               : null,
-          ...(useDefault
+          ...(useDefault || boundProfile.length > 0
             ? []
             : [h('div', { className: styles.formGrid, style: S.formGrid, key: `${row.id}:form-grid` }, ...endpointFields)]),
           // The self-check is offered whenever there is something to check: an
@@ -2360,7 +2902,7 @@ function renderPage(ctx: any): unknown {
                 // Promote this card's endpoint to the shared default. Offered only
                 // when the card carries its OWN endpoint: an inheriting card would
                 // just be copying the default onto itself.
-                endpointStored && !useDefault
+                endpointStored && !useDefault && boundProfile.length === 0
                   ? h(
                       'button',
                       {
@@ -2442,9 +2984,15 @@ function renderPage(ctx: any): unknown {
             }),
             h('span', { className: styles.name, style: { ...S.name, maxWidth: '140px' } }, row.name),
             h('span', { className: styles.id, style: S.id }, row.id),
-            useDefault
-              ? h('span', { style: S.compactEndpoint }, `${t.useDefault}: ${defaultOrigin}`)
-              : h('span', { style: S.compactEndpoint }, `${route.protocol.toUpperCase()}://${route.host || '—'}:${route.port || '—'}`),
+            boundProfile.length > 0
+              ? h(
+                  'span',
+                  { style: S.compactEndpoint },
+                  `${t.profileBindingPrefix}${boundProfile}: ${endpointSummary(endpointState.endpoint ?? {})}`,
+                )
+              : useDefault
+                ? h('span', { style: S.compactEndpoint }, `${t.useDefault}: ${defaultOrigin}`)
+                : h('span', { style: S.compactEndpoint }, `${route.protocol.toUpperCase()}://${route.host || '—'}:${route.port || '—'}`),
           ),
           h(
             'div',
@@ -2532,6 +3080,7 @@ function renderPage(ctx: any): unknown {
           ),
         ),
     defaultBlock,
+    profileManager,
     globalBlock,
     catalogueNotice,
     chipRow,
@@ -2668,6 +3217,29 @@ const EN = {
   close: 'Close',
   copy: 'Copy',
   copied: 'Copied',
+  profileManagerTitle: 'Proxy presets',
+  profileManagerLead:
+    'Named endpoints you can reuse across providers. The built-in "Default preset" is the default proxy block above; edit it there.',
+  profileAdd: 'Add preset',
+  profileRename: 'Rename',
+  profileDelete: 'Delete',
+  profileNameLabel: 'Preset name',
+  profileNamePrompt: 'Name for the new proxy preset:',
+  profileRenamePrompt: 'New name for this proxy preset:',
+  profileNameTaken: 'A preset with that name already exists.',
+  profileDeleteConfirm: 'Delete this proxy preset?',
+  profileDeleteInUse:
+    'These providers are bound to this preset and will stop being proxied until they are rebound:\n',
+  profileUsedBy: 'Used by: ',
+  profileBinding: 'Endpoint',
+  profileBindingOwn: 'Custom (this card)',
+  profileBindingPrefix: 'Preset: ',
+  inheritingProfile: 'Using preset ',
+  profileMissing: 'The bound preset "',
+  profileMissingSuffix: '" no longer exists, so this provider is not proxied.',
+  profileMissingOption: ' (missing)',
+  profileUnusable: 'The bound preset "',
+  profileUnusableSuffix: '" is not usable, so this provider is not proxied: ',
 }
 
 const ZH = {
@@ -2762,6 +3334,28 @@ const ZH = {
   close: '关闭',
   copy: '复制',
   copied: '已复制',
+  profileManagerTitle: '代理预设',
+  profileManagerLead:
+    '可被多个 provider 复用的命名端点。内置的「默认预设」就是上方「默认代理」区块，直接在那里编辑。',
+  profileAdd: '添加预设',
+  profileRename: '重命名',
+  profileDelete: '删除',
+  profileNameLabel: '预设名称',
+  profileNamePrompt: '新代理预设的名称：',
+  profileRenamePrompt: '该代理预设的新名称：',
+  profileNameTaken: '已存在同名预设。',
+  profileDeleteConfirm: '确认删除该代理预设？',
+  profileDeleteInUse: '以下 provider 绑定在该预设上，删除后将不再走代理，直到重新绑定：\n',
+  profileUsedBy: '被以下 provider 使用：',
+  profileBinding: '端点来源',
+  profileBindingOwn: '独立自定义配置',
+  profileBindingPrefix: '预设：',
+  inheritingProfile: '使用预设 ',
+  profileMissing: '绑定的预设「',
+  profileMissingSuffix: '」已不存在，该 provider 不会走代理。',
+  profileMissingOption: '（已缺失）',
+  profileUnusable: '绑定的预设「',
+  profileUnusableSuffix: '」不可用，该 provider 不会走代理：',
 }
 
 /**

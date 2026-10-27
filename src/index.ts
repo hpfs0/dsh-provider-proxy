@@ -23,6 +23,7 @@ import {
   type DefaultProxyValue,
   type ProviderProxyRouteValue,
 } from './config.js'
+import { effectiveRoute, type ProfileMap } from './presets.js'
 
 export const name = 'dsh-provider-proxy'
 export const inject = ['llm']
@@ -48,6 +49,8 @@ export const WEB_SEARCH_KEY = 'web-search'
 interface ProxyConfig {
   /** The provider dictionary, or the Volatile wrapper around it. */
   readonly providers?: unknown
+  /** The named preset dictionary, or the Volatile wrapper around it. */
+  readonly proxyProfiles?: unknown
   /** The shared default endpoint, or the Volatile wrapper around it. */
   readonly defaultProxy?: unknown
   /** Whether loopback/private targets stay direct, or the Volatile wrapper. */
@@ -59,13 +62,23 @@ interface ProxyConfig {
 function plainProviders(
   config: ProxyConfig | undefined,
 ): Record<string, Partial<ProviderProxyRouteValue>> {
-  const raw = config?.providers
-  if (raw === undefined) return {}
+  return plainDict<Partial<ProviderProxyRouteValue>>(config?.providers, {})
+}
+
+/** Read one Volatile dictionary field; absent means an empty dictionary. */
+function plainDict<T>(field: unknown, fallback: Record<string, T>): Record<string, T> {
+  const raw = field
+  if (raw === undefined) return fallback
   // Under the Loader this is a Volatile reference; read it fresh every time so
   // a settings write is visible to the next request without a remount.
   const snapshot = (raw as { get?: () => unknown }).get
   const value = typeof snapshot === 'function' ? snapshot.call(raw) : raw
-  return (value ?? {}) as Record<string, Partial<ProviderProxyRouteValue>>
+  return (value ?? fallback) as Record<string, T>
+}
+
+/** Read the named presets, which are Volatile like every other setting. */
+function plainProfiles(config: ProxyConfig | undefined): ProfileMap {
+  return plainDict<Partial<DefaultProxyValue>>(config?.proxyProfiles, {})
 }
 
 /** Read the shared default endpoint, which is Volatile under the Loader too. */
@@ -600,10 +613,10 @@ export function apply(ctx: any, config?: ProxyConfig): void {
    */
   const selfCheckKey = (provider: string): string => {
     const raw = plainProviders(config)[provider] ?? {}
-    const endpoint =
-      raw.useDefault === true
-        ? (plainDefaultProxy(config) as Partial<ProviderProxyRouteValue>)
-        : raw
+    // The key must describe the endpoint a request would ACTUALLY take, so a
+    // route bound to a preset folds in that preset's fields — editing the
+    // preset then re-checks instead of answering from a pre-edit verdict.
+    const endpoint = effectiveRoute(raw, plainDefaultProxy(config), plainProfiles(config))
     return JSON.stringify([
       provider,
       endpoint.protocol ?? 'http',
@@ -646,6 +659,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
       }
       const built = buildRouteEntry(provider, configured, {
         defaultProxy: normalizeDefaultProxy(plainDefaultProxy(config)),
+        profiles: plainProfiles(config),
         requireEnabled: false,
         localDirect: plainLocalDirect(config),
       })
@@ -689,8 +703,9 @@ export function apply(ctx: any, config?: ProxyConfig): void {
     // Reading the Volatile fields more than once could mix two settings writes.
     const providers = plainProviders(config)
     const defaultProxy = plainDefaultProxy(config)
+    const profiles = plainProfiles(config)
     const localDirect = plainLocalDirect(config)
-    const next = createProxyTable(providers, { defaultProxy, localDirect })
+    const next = createProxyTable(providers, { defaultProxy, profiles, localDirect })
     const previous = current
     current = next.entries
     problems = next.problems
@@ -704,10 +719,10 @@ export function apply(ctx: any, config?: ProxyConfig): void {
     }
 
     for (const [provider, raw] of Object.entries(providers)) {
-      const effective =
-        raw?.useDefault === true
-          ? { ...raw, ...defaultProxy }
-          : raw
+      // Fingerprints describe the EFFECTIVE endpoint, so editing a preset a
+      // route is bound to invalidates that route's token and self-check cache
+      // exactly as editing its own fields would.
+      const effective = effectiveRoute(raw, defaultProxy, profiles)
       const fingerprint = routeFingerprint({
         ...effective,
         localDirect,
@@ -797,6 +812,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
     out.sort((a, b) => a.name.localeCompare(b.name))
     return { providers: out }
   }
+
 
   // The page reads this same-origin JSON endpoint for the provider list. Mounted
   // inside an optional child so a composition without a web server still runs.
@@ -1067,4 +1083,22 @@ export {
 } from './proxy-table.js'
 export { Config, ProviderProxyRoute, normalizeRoute, normalizeDefaultProxy, PROTOCOLS } from './config.js'
 export { defaultProxyProblem, proxyHostProblem } from './proxy-address.js'
-export { deadRuleEntries, hostMatches, hostRuleProblem, parseHostList, splitHostRules } from './host-rules.js'
+export {
+  deadRuleEntries,
+  hostMatches,
+  hostRuleProblem,
+  parseHostList,
+  splitHostRules,
+} from './host-rules.js'
+export {
+  DEFAULT_PROFILE_LABEL,
+  bindingFields,
+  endpointSummary,
+  effectiveRoute,
+  profileNameProblem,
+  profileNames,
+  resolveEndpoint,
+  routeBindingOf,
+  routesBoundTo,
+  withEndpoint,
+} from './presets.js'

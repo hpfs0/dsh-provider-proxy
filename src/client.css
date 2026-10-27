@@ -354,3 +354,23 @@
   background: var(--dsw-alias-interactive-bg-hover) !important;
   color: var(--dsw-alias-label-primary) !important;
 }
+
+/* ---- v0.9.0 N14 additions: named proxy presets ----
+   The manager reuses the diagnostics/details shell, so only the per-preset row
+   needs its own rules: an inset card whose border lights up while it is being
+   edited, which is the only way to tell several identical rows apart. */
+
+.profileCard {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-1);
+  transition: border-color 120ms ease;
+}
+
+.profileCard:focus-within {
+  border-color: var(--dsw-alias-brand-primary) !important;
+}
