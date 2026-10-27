@@ -1,6 +1,6 @@
 {
   "name": "dsh-provider-proxy",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "DSH 插件：在设置里为每个已启用的 provider 单独配置正向代理（类型 + IP + 端口），未配置的 provider 与其它流量保持直连。",
   "keywords": [
     "dsh",
