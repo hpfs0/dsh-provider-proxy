@@ -847,6 +847,90 @@ test('a configuration change inside the cooldown is re-checked, not answered fro
   }
 })
 
+test('a check right after an endpoint change never runs through the OLD endpoint', async () => {
+  // Reported: a new preset pointed at a dead port (127.0.0.1:8888), the card was
+  // bound to it, Test was clicked — and the card said OK with HTTP 401. The
+  // probe had gone through the PREVIOUS, still-working dispatcher, because the
+  // Host rebuilds its table asynchronously after a settings write. A check must
+  // answer for the configuration it was asked about, never for a stale one.
+  //
+  // The "old" proxy answers 401, exactly like an unauthenticated GET to
+  // api.deepseek.com, so a stale route produces the reported false positive.
+  const oldProxy = createServer((req, res) => {
+    res.writeHead(401, { 'content-type': 'application/json' })
+    res.end('{"error":"unauthorized"}')
+  })
+  await new Promise(resolve => oldProxy.listen(0, '127.0.0.1', resolve))
+  try {
+    const providers = {
+      'deepseek-account': {
+        enabled: true,
+        protocol: 'http',
+        host: '127.0.0.1',
+        port: oldProxy.address().port,
+      },
+    }
+    const profiles = {}
+    const { routes } = mountHost({
+      providers: { get: () => providers },
+      proxyProfiles: { get: () => profiles },
+      localDirect: { get: () => true },
+      testUrl: 'http://api.deepseek.com/',
+    })
+
+    // A working baseline through the reachable proxy.
+    const before = await selfCheck(routes, { provider: 'deepseek-account' })
+    assert.equal(before.body.ok, true)
+    assert.equal(before.body.status, 401, 'the reachable proxy answers 401')
+
+    // Now the user saves the new preset and binds the card to it, and clicks
+    // Test immediately — before the Host's `loader/volatile-update` rebuild.
+    delete providers['deepseek-account']
+    providers['deepseek-account'] = { enabled: true, profileId: 'clash2' }
+    profiles.clash2 = { protocol: 'http', host: '127.0.0.1', port: 8888 }
+
+    const after = await selfCheck(routes, { provider: 'deepseek-account' })
+    assert.equal(
+      after.body.ok,
+      false,
+      'the dead endpoint must fail even while the old dispatcher is still in memory',
+    )
+    assert.equal(after.body.kind, 'proxy-unreachable')
+    assert.match(after.body.error, /代理不可达/, 'the report must name the new proxy')
+  } finally {
+    await new Promise(resolve => oldProxy.close(resolve))
+  }
+})
+
+test('a preset edit is picked up by the very next check, without waiting for a rebuild', async () => {
+  // The mirror image: the OLD endpoint is dead and the NEW one works. A stale
+  // route would report a failure for a preset that is in fact usable.
+  const proxy = await startEchoProxy()
+  try {
+    const providers = { p: { enabled: true, profileId: 'preset' } }
+    const profiles = { preset: { protocol: 'http', host: '127.0.0.1', port: 65533 } }
+    const { routes } = mountHost({
+      providers: { get: () => providers },
+      proxyProfiles: { get: () => profiles },
+      localDirect: { get: () => true },
+      testUrl: 'http://echo.invalid/ip',
+    })
+
+    const broken = await selfCheck(routes, { provider: 'p' })
+    assert.equal(broken.body.ok, false)
+    assert.equal(broken.body.kind, 'proxy-unreachable')
+
+    // Fix the PRESET (not the card), then check again immediately.
+    profiles.preset = { protocol: 'http', host: '127.0.0.1', port: proxy.port }
+    const fixed = await selfCheck(routes, { provider: 'p' })
+    assert.equal(fixed.body.ok, true, 'the edited preset must be what the check uses')
+    assert.equal(fixed.body.status, 200)
+    assert.deepEqual(proxy.seen.map(entry => entry.url), ['http://echo.invalid/ip'])
+  } finally {
+    await proxy.close()
+  }
+})
+
 test('the cooldown key covers the routing rules, not just the proxy address', async () => {
   // `bypassHosts`/`onlyHosts`/`localDirect` decide whether the probe is proxied or
   // direct, which is exactly what `viaProxy` — and therefore the whole diagnosis —

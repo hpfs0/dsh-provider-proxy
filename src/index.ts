@@ -645,25 +645,59 @@ export function apply(ctx: any, config?: ProxyConfig): void {
   const runSelfCheck = async (provider: string): Promise<Record<string, unknown>> => {
     let route = current.get(provider)
     let temporary = false
+    const saved = plainProviders(config)[provider]
+    const buildOptions = {
+      defaultProxy: normalizeDefaultProxy(plainDefaultProxy(config)),
+      profiles: plainProfiles(config),
+      requireEnabled: false,
+      localDirect: plainLocalDirect(config),
+    }
+    /**
+     * Whether the table's route belongs to an OLDER configuration.
+     *
+     * The table is rebuilt on `loader/volatile-update`, which lands
+     * asynchronously after a settings write. A user who saves a preset and
+     * immediately clicks Test therefore hits the PREVIOUS configuration's
+     * dispatcher, and a probe carried by a still-working OLD proxy answers
+     * 401/200 — which reads as "the new proxy is fine" even when the newly
+     * saved endpoint is a dead port. A check must never answer a question about
+     * a configuration it is not using, so the live route is reused only while
+     * it still matches what the settings say right now.
+     */
+    let staleRoute = false
+    if (route !== undefined) {
+      // Comparing the resolved ORIGIN is enough to tell two configurations
+      // apart for this purpose, and it never touches a credential. A provider
+      // deleted from the settings is stale for the same reason.
+      const expected =
+        saved === undefined || saved.enabled !== true
+          ? undefined
+          : buildRouteEntry(provider, saved, buildOptions)
+      if (expected === undefined || !expected.ok || expected.entry.proxyOrigin !== route.proxyOrigin) {
+        route = undefined
+        staleRoute = true
+      }
+    }
     if (route === undefined) {
-      // Two very different reasons land here. A route the guards REJECTED (a bad
-      // port, an HTTP password with no username) is missing from the table too,
-      // and answering "not enabled" for it names a cause that is not the case —
-      // the setting IS on. The problem the table recorded is what explains it.
-      const problem = problems.get(provider)
+      // A route the guards REJECTED (a bad port, an HTTP password with no
+      // username) is missing from the table too, and answering "not enabled"
+      // for it names a cause that is not the case — the setting IS on. The
+      // problem the table recorded explains it, but only while that record
+      // belongs to the SAME configuration: a stale route whose replacement was
+      // never rebuilt has no meaningful entry in `problems`.
+      const problem = staleRoute ? undefined : problems.get(provider)
       if (problem !== undefined) {
         return { ok: false, kind: 'route-rejected', error: bareMessage(problem) }
       }
-      const configured = plainProviders(config)[provider]
-      if (configured === undefined || configured.enabled === true) {
+      const configured = saved
+      if (configured === undefined) {
         return { ok: false, kind: 'no-route', error: `provider "${provider}" 未启用代理` }
       }
-      const built = buildRouteEntry(provider, configured, {
-        defaultProxy: normalizeDefaultProxy(plainDefaultProxy(config)),
-        profiles: plainProfiles(config),
-        requireEnabled: false,
-        localDirect: plainLocalDirect(config),
-      })
+      // `enabled` gates ROUTING, not the check: an enabled route whose saved
+      // endpoint differs from the table's is exactly the case this rebuild
+      // exists for, so it is built here like a disabled one and released when
+      // the check ends.
+      const built = buildRouteEntry(provider, configured, buildOptions)
       if (!built.ok) {
         return { ok: false, kind: 'route-rejected', error: bareMessage(built.problem) }
       }
