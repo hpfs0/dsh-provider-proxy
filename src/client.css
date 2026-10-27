@@ -4,8 +4,8 @@
 .root {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  max-width: 640px;
+  gap: 14px;
+  max-width: 760px;
 }
 
 .lead {
@@ -32,8 +32,8 @@
 .cardRejected {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 12px 14px;
+  gap: 12px;
+  padding: 14px 16px;
   border: 1px solid var(--dsw-alias-border-l1);
   border-radius: 10px;
   background: var(--dsw-alias-bg-layer-1);
@@ -57,7 +57,7 @@
 .defaultCard {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
   padding: 14px 16px;
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 10px;
@@ -252,10 +252,9 @@
 /* ---- diagnostics ---- */
 
 .diag {
-  margin-top: 2px;
-  padding: 8px 10px;
+  padding: 10px 14px;
   border: 1px solid var(--dsw-alias-border-l1);
-  border-radius: 8px;
+  border-radius: 10px;
   font-size: 11px;
   color: var(--dsw-alias-label-secondary);
 }
@@ -285,14 +284,32 @@
   transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
 }
 
+/* Hover may only shift the BORDER.
+
+   It used to set the same tinted background as `.chipActive`, at a higher
+   specificity, so any hovered chip (including the one that had just been
+   deselected) looked selected — and while the pointer rested on the old chip
+   the genuinely selected one lost its tint. Selection owns the surface;
+   hovering only says "this is clickable". */
 .chip:hover:not(:disabled) {
   border-color: var(--dsw-alias-border-l3) !important;
-  background: var(--dsw-alias-interactive-bg-hover) !important;
   color: var(--dsw-alias-label-primary) !important;
 }
 
-.chipActive {
+/* The selected chip, driven by STATE rather than by class precedence, so it
+   cannot be outranked by `:hover` on a sibling. */
+.chipActive,
+.chip[aria-pressed='true'] {
   border-color: var(--dsw-alias-brand-primary) !important;
+  background: var(--dsw-alias-interactive-bg-hover) !important;
+  color: var(--dsw-alias-brand-primary) !important;
+  font-weight: 600;
+}
+
+/* A selected chip keeps its own surface while hovered: the pointer is on it,
+   which must not read as "about to become something else". */
+.chipActive:hover:not(:disabled),
+.chip[aria-pressed='true']:hover:not(:disabled) {
   background: var(--dsw-alias-interactive-bg-hover) !important;
   color: var(--dsw-alias-brand-primary) !important;
 }
@@ -317,6 +334,15 @@
   .formGridFull {
     grid-column: auto !important;
   }
+  /* The endpoint-source picker and the enable switch stack too, instead of
+     shrinking the picker until its option text is unreadable. */
+  .controlRow {
+    grid-template-columns: 1fr !important;
+  }
+  /* The list toolbar's buttons drop below the search box at this width. */
+  .toolbarRow > * {
+    flex: 1 1 100% !important;
+  }
 }
 
 /* ---- v0.8.0 N10 additions: compact view ---- */
@@ -328,11 +354,10 @@
   flex-direction: column;
   align-items: stretch;
   gap: 8px;
-  padding: 10px 14px;
+  padding: 12px 16px;
   border: 1px solid var(--dsw-alias-border-l1);
-  border-radius: 8px;
+  border-radius: 10px;
   background: var(--dsw-alias-bg-layer-1);
-  margin-bottom: 8px;
 }
 
 .compactRowActive {
@@ -364,13 +389,25 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 10px 12px;
+  padding: 12px 14px;
   border: 1px solid var(--dsw-alias-border-l1);
-  border-radius: 8px;
+  border-radius: 10px;
   background: var(--dsw-alias-bg-layer-1);
   transition: border-color 120ms ease;
 }
 
 .profileCard:focus-within {
   border-color: var(--dsw-alias-brand-primary) !important;
+}
+
+/* ---- v0.9.0 N19 additions: one layout scale ----
+   These classes exist only so the narrow-screen rules above can reach the
+   containers. Their visible properties stay inline, for the same reason every
+   other box on this page does: the stylesheet has silently failed to bind here
+   before, and layout must survive that. */
+
+.controlRow,
+.toolbarRow,
+.panel {
+  min-width: 0;
 }

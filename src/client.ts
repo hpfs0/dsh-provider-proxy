@@ -775,15 +775,37 @@ const S = {
   root: {
     display: 'flex',
     flexDirection: 'column',
-    gap: '12px',
-    maxWidth: '720px',
+    gap: '14px',
+    maxWidth: '760px',
+  },
+  /**
+   * One vertical group of page-level blocks.
+   *
+   * Page settings (default endpoint, presets, backup, advanced) are one visual
+   * unit; the provider list is another. Without the grouping every block was a
+   * sibling at the same level, so the list controls ended up four blocks below
+   * the list they operate on.
+   */
+  group: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '10px',
+    minWidth: '0',
+  },
+  /** A small heading that separates the page's groups. */
+  groupTitle: {
+    margin: '6px 0 -2px',
+    fontSize: '11px',
+    fontWeight: '600',
+    letterSpacing: '0.04em',
+    textTransform: 'uppercase',
+    color: 'var(--dsw-alias-label-secondary)',
   },
   card: {
     display: 'flex',
     flexDirection: 'column',
     gap: '12px',
     padding: '14px 16px',
-    marginBottom: '12px',
     border: '1px solid var(--dsw-alias-border-l1)',
     borderRadius: '10px',
     background: 'var(--dsw-alias-bg-layer-1)',
@@ -934,7 +956,7 @@ const S = {
   defaultCard: {
     display: 'flex',
     flexDirection: 'column',
-    gap: '10px',
+    gap: '12px',
     padding: '14px 16px',
     border: '1px solid var(--dsw-alias-border-l2)',
     borderRadius: '10px',
@@ -975,6 +997,21 @@ const S = {
     fontSize: '12px',
     minWidth: '0',
   },
+  /** A row of peer controls, each with its own label above it. */
+  controlRow: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+    alignItems: 'end',
+    gap: '10px 14px',
+  },
+  /** One cell of `controlRow`: a small label over its control. */
+  controlCell: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '4px',
+    fontSize: '12px',
+    minWidth: '0',
+  },
   label: { color: 'var(--dsw-alias-label-secondary)' },
   input: {
     boxSizing: 'border-box',
@@ -990,10 +1027,9 @@ const S = {
     fontSize: '12px',
   },
   diag: {
-    marginTop: '4px',
-    padding: '8px 10px',
+    padding: '10px 14px',
     border: '1px solid var(--dsw-alias-border-l1)',
-    borderRadius: '8px',
+    borderRadius: '10px',
     fontSize: '11px',
     color: 'var(--dsw-alias-label-secondary)',
   },
@@ -1001,6 +1037,42 @@ const S = {
     gridColumn: '1 / -1',
     fontSize: '11px',
     color: 'var(--dsw-alias-state-warn-primary, #d29922)',
+  },
+  /** The shared shell of every collapsible panel on the page. */
+  panelBody: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '10px',
+    marginTop: '8px',
+  },
+  /** The bordered block of list controls, directly above the list. */
+  toolbar: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '8px',
+    padding: '10px 12px',
+    border: '1px solid var(--dsw-alias-border-l1)',
+    borderRadius: '10px',
+    background: 'var(--dsw-alias-bg-layer-1)',
+  },
+  toolbarRow: {
+    display: 'flex',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: '8px',
+    minWidth: '0',
+  },
+  /** The backup bar: explanation on the left, its two actions on the right. */
+  backupBar: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    flexWrap: 'wrap',
+    gap: '10px',
+    padding: '10px 12px',
+    border: '1px solid var(--dsw-alias-border-l1)',
+    borderRadius: '10px',
+    background: 'var(--dsw-alias-bg-layer-1)',
   },
   chipRow: {
     display: 'flex',
@@ -1032,11 +1104,10 @@ const S = {
     display: 'flex',
     flexDirection: 'column',
     gap: '8px',
-    padding: '10px 14px',
+    padding: '12px 16px',
     border: '1px solid var(--dsw-alias-border-l1)',
-    borderRadius: '8px',
+    borderRadius: '10px',
     background: 'var(--dsw-alias-bg-layer-1)',
-    marginBottom: '8px',
   },
   /** Row 1 of a compact entry: identity and the proxy it uses. */
   compactLine: {
@@ -1878,6 +1949,49 @@ function renderPage(ctx: any): unknown {
     )
 
   /**
+   * A collapsible panel: summary line, optional lead, then the content.
+   *
+   * Four panels used to be spelled out separately, which is how they drifted
+   * into three different paddings and two different corner radii. One
+   * constructor keeps them identical, and `open` is controlled so a panel can
+   * open itself (adding a preset must reveal the new row).
+   */
+  const panel = (options: {
+    key: string
+    summary: string
+    lead?: string
+    open?: boolean
+    onToggle?: (open: boolean) => void
+    children: unknown[]
+  }): unknown =>
+    h(
+      'details',
+      {
+        className: `${styles.diag} ${styles.panel}`,
+        style: S.diag,
+        key: options.key,
+        ...(options.open === undefined ? {} : { open: options.open }),
+        ...(options.onToggle === undefined
+          ? {}
+          : {
+              onToggle: (event: any) => {
+                const open = event?.currentTarget?.open
+                if (typeof open === 'boolean') options.onToggle?.(open)
+              },
+            }),
+      },
+      h('summary', { className: styles.diagSummary }, options.summary),
+      h(
+        'div',
+        { style: S.panelBody },
+        options.lead === undefined
+          ? null
+          : h('p', { className: styles.defaultLead, style: S.defaultLead }, options.lead),
+        ...options.children,
+      ),
+    )
+
+  /**
    * The shared endpoint block, always rendered.
    *
    * It is the only place the address can be entered, so hiding it until some
@@ -2308,24 +2422,13 @@ function renderPage(ctx: any): unknown {
    * `defaultProxy` discoverable as "just another preset" instead of a second
    * concept.
    */
-  const profileManager = h(
-    'details',
-    {
-      className: styles.diag,
-      style: { ...S.diag, marginTop: '0' },
-      key: 'profile-manager',
-      open: profileManagerOpen === true,
-      onToggle: (event: any) => {
-        const open = event?.currentTarget?.open
-        if (typeof open === 'boolean') setProfileManagerOpen(open)
-      },
-    },
-    h(
-      'summary',
-      { className: styles.diagSummary },
-      `${t.profileManagerTitle} (${profileEntries.length})`,
-    ),
-    h('p', { className: styles.defaultLead, style: S.defaultLead }, t.profileManagerLead),
+  const profileManager = panel({
+    key: 'profile-manager',
+    summary: `${t.profileManagerTitle} (${profileEntries.length})`,
+    lead: t.profileManagerLead,
+    open: profileManagerOpen === true,
+    onToggle: open => setProfileManagerOpen(open),
+    children: [
     h(
       'div',
       { style: { ...S.testRow, alignItems: 'stretch' }, key: 'profile:add' },
@@ -2376,10 +2479,9 @@ function renderPage(ctx: any): unknown {
             display: 'flex',
             flexDirection: 'column',
             gap: '8px',
-            padding: '10px 12px',
-            marginTop: '8px',
+            padding: '12px 14px',
             border: '1px solid var(--dsw-alias-border-l1)',
-            borderRadius: '8px',
+            borderRadius: '10px',
             background: 'var(--dsw-alias-bg-layer-1)',
           },
         },
@@ -2596,7 +2698,8 @@ function renderPage(ctx: any): unknown {
         ),
       )
     }),
-  )
+    ],
+  })
 
   const storedLocalDirect = snapshot.value?.localDirect !== false
   const globalTestUrl = typeof globalDraft.testUrl === 'string' ? globalDraft.testUrl : storedTestUrl
@@ -2685,7 +2788,16 @@ function renderPage(ctx: any): unknown {
 
   const backupBlock = h(
     'div',
-    { style: { ...S.testRow, flexWrap: 'wrap' }, key: 'backup' },
+    { style: S.backupBar, key: 'backup' },
+    h(
+      'div',
+      { style: { display: 'flex', flexDirection: 'column', gap: '2px', minWidth: '0' } },
+      h('span', { style: { ...S.name, fontSize: '12px' } }, t.backupTitle),
+      h('span', { style: S.defaultLead }, t.backupLead),
+    ),
+    h(
+      'div',
+      { style: { ...S.testRow, flex: 'none' } },
     h(
       'button',
       {
@@ -2716,20 +2828,14 @@ function renderPage(ctx: any): unknown {
         },
       }),
     ),
+    ),
   )
 
-  const globalBlock = h(
-    'details',
-    {
-      className: styles.diag,
-      style: {
-        ...S.diag,
-        marginTop: '0',
-      },
-      key: 'global-settings',
-    },
-    h('summary', { className: styles.diagSummary }, t.globalTitle),
-    h('p', { className: styles.defaultLead, style: S.defaultLead }, t.globalLead),
+  const globalBlock = panel({
+    key: 'global-settings',
+    summary: t.globalTitle,
+    lead: t.globalLead,
+    children: [
     h(
       'label',
       { className: styles.field, style: S.field },
@@ -2783,7 +2889,8 @@ function renderPage(ctx: any): unknown {
       { className: styles.hint, style: { ...S.hint, margin: '2px 0 0' } },
       globalLocalDirect ? t.localDirectOnHint : t.localDirectOffHint,
     ),
-  )
+    ],
+  })
 
   const routeStateOf = (row: ProviderRow): 'proxied' | 'direct' | 'rejected' => {
     const route = view({ ...configured[row.id], ...draft[row.id] })
@@ -2814,47 +2921,57 @@ function renderPage(ctx: any): unknown {
     return routeStateOf(row) === statusFilter
   })
 
-  const chipRow =
+  /**
+   * The list toolbar: status chips, search, bulk test and the view switch.
+   *
+   * All four act on the SAME list, so they live in one bordered block directly
+   * above it. They used to be two loose rows placed after every page-level
+   * panel, which put the controls four blocks away from what they control.
+   */
+  const listToolbar =
     rows.length === 0
       ? null
       : h(
           'div',
-          { className: styles.chipRow, style: S.chipRow, key: 'status-chips' },
-          ([
-            { id: 'all', label: `${t.filterStatusAll} (${matchedKeywordRows.length})` },
-            { id: 'proxied', label: `${t.filterStatusProxied} (${countActive})` },
-            { id: 'direct', label: `${t.filterStatusDirect} (${countDirect})` },
-            { id: 'rejected', label: `${t.filterStatusRejected} (${countRejected})` },
-          ] as const).map(({ id, label }) =>
-            h(
-              'button',
-              {
-                key: id,
-                type: 'button',
-                className: statusFilter === id ? styles.chipActive : styles.chip,
-                style: {
-                  ...S.chip,
-                  ...(statusFilter === id ? S.chipActive : {}),
-                },
-                onClick: () => setStatusFilter(id),
-              },
-              label,
-            ),
-          ),
-        )
-
-  const filterRow =
-    rows.length === 0
-      ? null
-      : field(
-          t.filterLabel,
+          { style: S.toolbar, key: 'list-toolbar' },
           h(
             'div',
-            { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
+            { className: styles.chipRow, style: S.chipRow, key: 'status-chips' },
+            ([
+              { id: 'all', label: `${t.filterStatusAll} (${matchedKeywordRows.length})` },
+              { id: 'proxied', label: `${t.filterStatusProxied} (${countActive})` },
+              { id: 'direct', label: `${t.filterStatusDirect} (${countDirect})` },
+              { id: 'rejected', label: `${t.filterStatusRejected} (${countRejected})` },
+            ] as const).map(({ id, label }) =>
+              h(
+                'button',
+                {
+                  key: id,
+                  type: 'button',
+                  className: statusFilter === id ? styles.chipActive : styles.chip,
+                  style: {
+                    ...S.chip,
+                    ...(statusFilter === id ? S.chipActive : {}),
+                  },
+                  // Selection is a STATE, not a decoration: `aria-pressed`
+                  // makes exactly one chip self-describing to assistive tech,
+                  // and it is what the regression test reads instead of
+                  // trusting a colour.
+                  'aria-pressed': statusFilter === id,
+                  onClick: () => setStatusFilter(id),
+                },
+                label,
+              ),
+            ),
+          ),
+          h(
+            'div',
+            { className: styles.toolbarRow, style: S.toolbarRow, key: 'list-actions' },
             h('input', {
               className: styles.input,
-              style: S.input,
+              style: { ...S.input, flex: '1 1 180px', minWidth: '0' },
               placeholder: t.filterPlaceholder,
+              'aria-label': t.filterLabel,
               value: filter,
               onChange: (event: any) => setFilter(event.target.value),
             }),
@@ -3102,75 +3219,87 @@ function renderPage(ctx: any): unknown {
             ),
             h('span', { className: pill.className, style: pill.style }, pill.text),
           ),
+          // The two route-level controls, on ONE row and in ONE shape: each is
+          // a label over its control. They were a bare `label` (checkbox) next to
+          // a two-column `field` (picker), so the card's own row looked like two
+          // unrelated widgets stacked.
           h(
-            'label',
-            { className: styles.toggle, style: S.toggle },
-            h('input', {
-              type: 'checkbox',
-              checked: route.enabled,
-              onChange: (event: any) => bind(row.id, 'enabled')(event.target.checked === true),
-            }),
-            h('span', null, t.useProxy),
-          ),
-          // Which endpoint this card takes.
-          //
-          // Always a picker, never a checkbox: the decision has three possible
-          // shapes (own fields / the built-in default / a named preset), and a
-          // checkbox can only express the first two. Every option carries the
-          // address it will use, because "预设: 香港专线" alone does not tell a
-          // user which port it points at.
-          h(
-            'label',
-            { className: styles.field, style: S.field, key: `${row.id}:profile` },
-            h('span', { className: styles.label, style: S.label }, t.profileBinding),
+            'div',
+            { className: styles.controlRow, style: S.controlRow, key: `${row.id}:controls` },
             h(
-              'select',
-              {
-                className: styles.input,
-                style: S.input,
-                value: boundProfile.length > 0 ? boundProfile : useDefault ? DEFAULT_PROFILE_BINDING : '',
-                onChange: (event: any) => {
-                  const value = String(event.target.value)
-                  // Every branch writes BOTH binding fields.
-                  //
-                  // `profileId` wins over `useDefault` when both are present,
-                  // so clearing one in the draft while persisting the other
-                  // left the disk holding the OLD preset id: picking "default
-                  // preset" then still routed through the previous preset, and
-                  // picking "custom fields" still routed through a preset.
-                  // Two drafts + one write is the only shape with no such
-                  // half-applied window.
-                  if (value === DEFAULT_PROFILE_BINDING) return bindRouteProfile(row.id)(DEFAULT_PROFILE_BINDING)
-                  if (value.length === 0) return bindRouteProfile(row.id)('')
-                  bindRouteProfile(row.id)(value)
-                },
-              },
-              h('option', { key: 'own', value: '' }, t.profileBindingOwn),
+              'label',
+              { style: S.controlCell },
+              h('span', { className: styles.label, style: S.label }, t.enableLabel),
               h(
-                'option',
-                { key: 'default', value: DEFAULT_PROFILE_BINDING },
-                `${t.profileBindingPrefix}${DEFAULT_PROFILE_LABEL.replace(
-                  ' (Default)',
-                  '',
-                )} (${endpointAddress(defaultView)})`,
+                'span',
+                { className: styles.toggle, style: { ...S.toggle, paddingTop: '0' } },
+                h('input', {
+                  type: 'checkbox',
+                  checked: route.enabled,
+                  onChange: (event: any) =>
+                    bind(row.id, 'enabled')(event.target.checked === true),
+                }),
+                h('span', { style: { fontSize: '12px' } }, t.useProxy),
               ),
-              ...profileEntries.map(entry =>
+            ),
+            // Which endpoint this card takes.
+            //
+            // Always a picker, never a checkbox: the decision has three possible
+            // shapes (own fields / the built-in default / a named preset), and a
+            // checkbox can only express the first two. Every option carries the
+            // address it will use, because "预设: 香港专线" alone does not tell a
+            // user which port it points at.
+            h(
+              'label',
+              { style: S.controlCell, key: `${row.id}:profile` },
+              h('span', { className: styles.label, style: S.label }, t.profileBinding),
+              h(
+                'select',
+                {
+                  className: styles.input,
+                  style: S.input,
+                  value: boundProfile.length > 0 ? boundProfile : useDefault ? DEFAULT_PROFILE_BINDING : '',
+                  onChange: (event: any) => {
+                    const value = String(event.target.value)
+                    // Every branch writes BOTH binding fields.
+                    //
+                    // `profileId` wins over `useDefault` when both are present,
+                    // so clearing one in the draft while persisting the other
+                    // left the disk holding the OLD preset id: picking "default
+                    // preset" then still routed through the previous preset, and
+                    // picking "custom fields" still routed through a preset.
+                    // Two drafts + one write is the only shape with no such
+                    // half-applied window.
+                    bindRouteProfile(row.id)(value)
+                  },
+                },
+                h('option', { key: 'own', value: '' }, t.profileBindingOwn),
                 h(
                   'option',
-                  { key: entry.name, value: entry.name },
-                  `${t.profileBindingPrefix}${entry.name} (${endpointAddress(entry.value)})`,
+                  { key: 'default', value: DEFAULT_PROFILE_BINDING },
+                  `${t.profileBindingPrefix}${DEFAULT_PROFILE_LABEL.replace(
+                    ' (Default)',
+                    '',
+                  )} (${endpointAddress(defaultView)})`,
                 ),
-              ),
-              // A route may still point at a preset that was deleted while this
-              // page was open. Without an option for it the select would render
-              // blank, which reads as "no choice made".
-              boundProfile.length > 0 && !profileEntries.some(entry => entry.name === boundProfile)
-                ? h(
+                ...profileEntries.map(entry =>
+                  h(
                     'option',
-                    { key: `missing:${boundProfile}`, value: boundProfile },
-                    `${t.profileBindingPrefix}${boundProfile}${t.profileMissingOption}`,
-                  )
-                : null,
+                    { key: entry.name, value: entry.name },
+                    `${t.profileBindingPrefix}${entry.name} (${endpointAddress(entry.value)})`,
+                  ),
+                ),
+                // A route may still point at a preset that was deleted while this
+                // page was open. Without an option for it the select would render
+                // blank, which reads as "no choice made".
+                boundProfile.length > 0 && !profileEntries.some(entry => entry.name === boundProfile)
+                  ? h(
+                      'option',
+                      { key: `missing:${boundProfile}`, value: boundProfile },
+                      `${t.profileBindingPrefix}${boundProfile}${t.profileMissingOption}`,
+                    )
+                  : null,
+              ),
             ),
           ),
           problemText !== undefined
@@ -3627,36 +3756,31 @@ function renderPage(ctx: any): unknown {
             t.close,
           ),
         ),
-    defaultBlock,
-    profileManager,
-    backupBlock,
-    globalBlock,
-    catalogueNotice,
-    chipRow,
-    filterRow,
-    ...body,
+    // Page-level settings, as one group: they apply to the whole page, not to
+    // one provider.
     h(
-      'details',
-      {
-        className: styles.diag,
-        key: 'diag',
-        style: {
-          marginTop: '4px',
-          padding: '8px 10px',
-          border: '1px solid var(--dsw-alias-border-l1)',
-          borderRadius: '8px',
-          fontSize: '11px',
-          color: 'var(--dsw-alias-label-secondary)',
-        },
-      },
-      // The count is the only visible signal while the panel is collapsed: a
-      // rejected route is not a page that refuses to render, it is one that
-      // quietly does nothing.
-      h(
-        'summary',
-        { className: styles.diagSummary },
+      'div',
+      { style: S.group, key: 'page-settings' },
+      h('h3', { style: S.groupTitle }, t.sectionSettings),
+      defaultBlock,
+      profileManager,
+      globalBlock,
+      backupBlock,
+    ),
+    // The provider list, as its own group: heading, toolbar, then the cards.
+    h(
+      'div',
+      { style: S.group, key: 'provider-list' },
+      h('h3', { style: S.groupTitle }, t.sectionProviders),
+      catalogueNotice,
+      listToolbar,
+      ...body,
+    ),
+    panel({
+      key: 'diag',
+      summary:
         problemCount === 0 ? t.diagnostics : `${t.diagnostics} (${problemCount})`,
-      ),
+      children: [
       h(
         'ul',
         { className: styles.diagList, style: { margin: '6px 0 0', paddingLeft: '18px' } },
@@ -3669,7 +3793,8 @@ function renderPage(ctx: any): unknown {
               ...diagnostics.map((line, index) => h('li', { key: `d${index}` }, line)),
             ]),
       ),
-    ),
+      ],
+    }),
   )
 }
 
@@ -3808,6 +3933,11 @@ const EN = {
   backupConfirmProviders: ', presets: ',
   backupConfirmProfiles: ' entry/entries.',
   backupRestored: 'Restored from backup, providers: ',
+  backupTitle: 'Backup and restore',
+  backupLead: 'Save the whole proxy configuration to a JSON file, or load one back.',
+  sectionSettings: 'Page settings',
+  sectionProviders: 'Providers',
+  enableLabel: 'Enabled',
 }
 
 const ZH = {
@@ -3941,6 +4071,11 @@ const ZH = {
   backupConfirmProviders: '，预设：',
   backupConfirmProfiles: ' 个。',
   backupRestored: '已从备份恢复，provider：',
+  backupTitle: '备份与恢复',
+  backupLead: '把整份代理配置存成 JSON 文件，或从文件恢复。',
+  sectionSettings: '页面设置',
+  sectionProviders: 'Provider 列表',
+  enableLabel: '启用',
 }
 
 /**

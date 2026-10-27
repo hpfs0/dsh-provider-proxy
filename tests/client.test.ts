@@ -3996,6 +3996,111 @@ test('N9: status filter chips render counts and filter the visible providers', a
   }
 })
 
+test('N9: selecting a status chip leaves exactly one chip active', async () => {
+  // Reported: after choosing 走代理(0), 全部(5) still LOOKED selected. Two causes
+  // are pinned here — the tree must carry exactly one active chip, and the
+  // stylesheet must not paint hover with the same background the active state
+  // uses (otherwise any hovered chip, including the old one, reads as active).
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      settings: {
+        providers: {
+          a: { enabled: false, protocol: 'http', host: '', port: 0 },
+          b: { enabled: false, protocol: 'http', host: '', port: 0 },
+        },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+
+    const chipsOf = tree => {
+      const out = []
+      const walk = node => {
+        if (node === null || typeof node !== 'object') return
+        if (Array.isArray(node)) return node.forEach(walk)
+        // Status chips are the only buttons that are BOTH a chip and a toggle
+        // state. The password reveal button also carries `aria-pressed`, and
+        // the upstream-template pill is a chip without state, so neither can be
+        // caught here.
+        const isChip =
+          /_(chip|chipActive)$/.test(String(node.props?.className ?? ''))
+        if (node.type === 'button' && isChip && node.props?.['aria-pressed'] !== undefined) {
+          out.push(node)
+        }
+        if (node.children) walk(node.children)
+      }
+      walk(tree)
+      return out
+    }
+    const labelOf = chip => textsOf(chip).join('')
+
+    const initial = chipsOf(render())
+    assert.equal(initial.length, 4, 'four status chips')
+    assert.deepEqual(
+      initial.map(chip => chip.props['aria-pressed']),
+      [true, false, false, false],
+      'only 全部 starts selected',
+    )
+
+    chipsOf(render())
+      .find(chip => labelOf(chip).startsWith('走代理'))
+      .props.onClick()
+
+    const after = chipsOf(render())
+    assert.deepEqual(
+      after.map(chip => chip.props['aria-pressed']),
+      [false, true, false, false],
+      'the previous chip must be released when another one is chosen',
+    )
+    // And the visual state carries the same single answer.
+    const active = after.filter(chip => String(chip.props.className).includes('chipActive'))
+    assert.equal(active.length, 1, 'exactly one chip may carry the active class')
+    assert.ok(
+      labelOf(active[0]).startsWith('走代理'),
+      'the chip the user clicked is the selected one',
+    )
+    for (const chip of after.filter(chip => chip !== active[0])) {
+      assert.notEqual(
+        chip.props.style.color,
+        'var(--dsw-alias-brand-primary)',
+        `${labelOf(chip)} must not keep the active colour`,
+      )
+      assert.equal(
+        chip.props.style.background,
+        'var(--dsw-alias-bg-layer-1)',
+        `${labelOf(chip)} must fall back to the resting surface`,
+      )
+    }
+  } finally {
+    restore()
+  }
+})
+
+test('N9: a hovered chip cannot be mistaken for the selected one', async () => {
+  // The hover rule used the SAME background token as the active rule, so a
+  // hovered-but-unselected chip was visually identical to the selected chip.
+  // Selection must own the tinted surface; hover may only shift the border.
+  // Strip comments first: the prose above the rule also names `.chipActive`, and
+  // a regex over raw text would match THROUGH a comment into a later block.
+  const cssRules = clientCss.replace(/\/\*[\s\S]*?\*\//g, '')
+  const hoverMatch = /\.chip:hover[^{}]*\{([^}]*)\}/.exec(cssRules)
+  assert.ok(hoverMatch, 'the hover rule must exist')
+  const hover = hoverMatch[1]
+  assert.ok(
+    !hover.includes('background: var(--dsw-alias-interactive-bg-hover)'),
+    'hover must not paint the selected surface',
+  )
+  assert.ok(hover.includes('border-color'), 'hover still gives its own feedback')
+  const ruleMatch = /\.chipActive[^{}]*\{([^}]*)\}/.exec(cssRules)
+  assert.ok(ruleMatch, 'the selected-chip rule must exist')
+  const active = ruleMatch[1]
+  assert.ok(
+    active.includes('background: var(--dsw-alias-interactive-bg-hover)'),
+    'the selected chip keeps the tinted surface',
+  )
+})
+
 test('N10: compact view mode toggles and allows expanding individual cards', async () => {
   const { mod, restore } = loadBundle()
   try {
@@ -4027,6 +4132,158 @@ test('N10: compact view mode toggles and allows expanding individual cards', asy
 })
 
 // ---- N18: two-line compact rows with an endpoint-source switch ----
+
+// ---- N19: layout consistency ----
+
+/** Every box that should share the page's container scale. */
+function containersOf(tree) {
+  const out = []
+  const LEAF = new Set(['button', 'label', 'input', 'select', 'span', 'summary', 'option', 'p'])
+  const walk = node => {
+    if (node === null || typeof node !== 'object') return
+    if (Array.isArray(node)) return node.forEach(walk)
+    const style = node.props?.style
+    if (!LEAF.has(node.type) && style?.borderRadius !== undefined && style?.border !== undefined) out.push(node)
+    if (node.children) walk(node.children)
+  }
+  walk(tree)
+  return out
+}
+
+test('N19: every bordered container shares one padding and corner radius', async () => {
+  // Five containers used to carry four different padding/radius pairs, which is
+  // what made the page read as a pile of unrelated widgets.
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: { enabled: true, protocol: 'http', host: '10.0.0.1', port: 7890 },
+        },
+        proxyProfiles: { HK: { protocol: 'http', host: '127.0.0.1', port: 7891 } },
+      },
+    })
+    const [tree] = renderPage(mod, harness)
+    const containers = containersOf(tree)
+    assert.ok(containers.length >= 5, `expected several containers, got ${containers.length}`)
+    // One radius for every box on the page.
+    const radii = new Set(containers.map(node => node.props.style.borderRadius))
+    assert.deepEqual([...radii], ['10px'], 'every container must share one corner radius')
+    // The padding scale is small and ordered: page-level blocks, inner blocks,
+    // tiles. Anything outside it is drift.
+    const ALLOWED = new Set(['14px 16px', '12px 16px', '12px 14px', '10px 14px', '10px 12px'])
+    for (const node of containers) {
+      assert.ok(
+        ALLOWED.has(node.props.style.padding),
+        `off-scale padding "${node.props.style.padding}" on ${node.type}`,
+      )
+    }
+  } finally {
+    restore()
+  }
+})
+
+test('N19: the list toolbar sits directly above the cards it controls', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [tree] = renderPage(mod, harness)
+    const list = tree.children.find(child => child?.props?.key === 'provider-list')
+    assert.ok(list, 'the provider list is its own group')
+    const order = list.children.filter(child => child !== null && child !== undefined)
+    const toolbarIndex = order.findIndex(child => child.props?.key === 'list-toolbar')
+    const sectionIndex = order.findIndex(child => child.type === 'section')
+    assert.ok(toolbarIndex >= 0, 'the toolbar is inside the list group')
+    if (sectionIndex >= 0) {
+      assert.ok(toolbarIndex < sectionIndex, 'the toolbar comes BEFORE the first card')
+    }
+    // Nothing that belongs to the card list may appear outside its group.
+    const outside = tree.children.filter(
+      child => child?.props?.key === 'status-chips' || child?.props?.key === 'list-toolbar',
+    )
+    assert.equal(outside.length, 0, 'list controls must not float at page level')
+  } finally {
+    restore()
+  }
+})
+
+test('N19: page-level settings are grouped under their own heading', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [tree] = renderPage(mod, harness)
+    const settings = tree.children.find(child => child?.props?.key === 'page-settings')
+    assert.ok(settings, 'page settings are one group')
+    assert.ok(
+      textsOf(settings).includes('页面设置'),
+      'the group carries a heading so the page has two clear halves',
+    )
+    assert.ok(textsOf(tree).includes('Provider 列表'), 'and the list half is labelled too')
+    for (const key of ['default-proxy', 'profile-manager', 'global-settings', 'backup']) {
+      assert.ok(
+        settings.children.some(child => child?.props?.key === key),
+        `${key} belongs to the page-settings group`,
+      )
+    }
+  } finally {
+    restore()
+  }
+})
+
+test('N19: the save-error banner and diagnosis follow the same panel scale', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [tree] = renderPage(mod, harness)
+    const diag = tree.children.find(child => child?.props?.key === 'diag')
+    assert.ok(diag, 'the diagnostics panel renders')
+    assert.equal(diag.props.style.borderRadius, '10px', 'panels share the container radius')
+    assert.equal(diag.props.style.padding, '10px 14px')
+    // Every collapsible panel is built by the same constructor, so they agree.
+    const panels = tree.children
+      .flatMap(child => (child?.children ?? []))
+      .filter(child => child?.type === 'details')
+    for (const item of panels) {
+      assert.equal(item.props.style.borderRadius, '10px')
+    }
+  } finally {
+    restore()
+  }
+})
+
+test('N19: a card puts its two route-level controls on one labelled row', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [tree] = renderPage(mod, harness)
+    const card = cardFor(tree, 'sensenova')
+    const controls = []
+    const walk = node => {
+      if (node === null || typeof node !== 'object') return
+      if (Array.isArray(node)) return node.forEach(walk)
+      if (node.props?.style?.gridTemplateColumns === 'repeat(auto-fit, minmax(180px, 1fr))') {
+        controls.push(node)
+      }
+      if (node.children) walk(node.children)
+    }
+    walk(card)
+    assert.equal(controls.length, 1, 'the enable switch and the source picker share one row')
+    const cells = controls[0].children.filter(child => child !== null && child !== undefined)
+    assert.equal(cells.length, 2, 'the row holds exactly the two controls')
+    for (const cell of cells) {
+      // Each cell is a label OVER its control, not a label beside it.
+      assert.equal(cell.type, 'label')
+      assert.equal(cell.props.style.flexDirection, 'column')
+    }
+    // Same wording for both, so the pair reads as a set.
+    assert.deepEqual(
+      cells.map(cell => textsOf(cell.children[0]).join('')),
+      ['启用', '端点来源'],
+    )
+  } finally {
+    restore()
+  }
+})
 
 /** One compact row (the `section` whose texts include a provider id). */
 function compactRowFor(tree, id) {
