@@ -23,6 +23,7 @@ import {
   type DefaultProxyValue,
   type ProviderProxyRouteValue,
 } from './config.js'
+import { detectProxyEnv } from './proxy-env.js'
 import { effectiveRoute, type ProfileMap } from './presets.js'
 
 export const name = 'dsh-provider-proxy'
@@ -813,6 +814,24 @@ export function apply(ctx: any, config?: ProxyConfig): void {
     return { providers: out }
   }
 
+  /**
+   * The forward proxy this Host process inherited from its environment, if any.
+   *
+   * Detected ONCE and cached: the process environment does not change under a
+   * running Host, so re-reading it per request would only add work. Credentials
+   * never leave `detectProxyEnv` — the payload carries `hadCredentials`, a
+   * boolean, and nothing else derived from the userinfo.
+   */
+  let environmentDetected = false
+  let environmentProxy: ReturnType<typeof detectProxyEnv> | undefined
+  const environmentProxyOf = (): ReturnType<typeof detectProxyEnv> => {
+    if (!environmentDetected) {
+      environmentProxy = detectProxyEnv()
+      environmentDetected = true
+    }
+    return environmentProxy
+  }
+
 
   // The page reads this same-origin JSON endpoint for the provider list. Mounted
   // inside an optional child so a composition without a web server still runs.
@@ -825,6 +844,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
           try {
             const text = JSON.stringify({
               ...catalog(),
+              environment: { proxy: environmentProxyOf() ?? null },
               problems: Object.fromEntries(
                 [...problems].map(([id, message]) => [id, bareMessage(message)]),
               ),
@@ -1083,6 +1103,8 @@ export {
 } from './proxy-table.js'
 export { Config, ProviderProxyRoute, normalizeRoute, normalizeDefaultProxy, PROTOCOLS } from './config.js'
 export { defaultProxyProblem, proxyHostProblem } from './proxy-address.js'
+export { PROXY_CLIENT_PRESETS, proxyClientPreset } from './proxy-clients.js'
+export { detectProxyEnv, parseProxyEnvValue } from './proxy-env.js'
 export {
   deadRuleEntries,
   hostMatches,

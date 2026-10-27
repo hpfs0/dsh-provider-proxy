@@ -4554,3 +4554,208 @@ test('N14: renaming a preset moves the key and rebinds every route using it', as
   }
 })
 
+// ---- N15: quick import from common local clients and the environment ----
+
+/** The quick-import picker whose subtree contains one option label. */
+function quickImportOf(node, label) {
+  const selects = []
+  const walk = current => {
+    if (current === null || typeof current !== 'object') return
+    if (Array.isArray(current)) return current.forEach(walk)
+    if (current.type === 'select') selects.push(current)
+    if (current.children) walk(current.children)
+  }
+  walk(node)
+  return selects.find(select => textsOf(select).some(text => text.includes(label)))
+}
+
+test('N15: the default block offers the common-client presets', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [tree] = renderPage(mod, harness)
+    const picker = quickImportOf(tree, 'Clash / Mihomo')
+    assert.ok(picker, 'the page must offer a quick-import picker')
+    const options = textsOf(picker)
+    for (const label of [
+      'Clash / Mihomo (127.0.0.1:7890)',
+      'Clash Verge / Meta (127.0.0.1:7897)',
+      'V2Ray / Xray HTTP (127.0.0.1:10809)',
+      'V2Ray / Xray SOCKS5 (127.0.0.1:10808)',
+    ]) {
+      assert.ok(options.includes(label), `missing preset: ${label}`)
+    }
+  } finally {
+    restore()
+  }
+})
+
+test('N15: choosing Clash fills protocol, host and port in ONE write', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const picker = quickImportOf(render(), 'Clash / Mihomo')
+    picker.props.onChange({ target: { value: 'clash' } })
+    await writeSettle()
+    assert.deepEqual(harness.writes[0].ops, [
+      { op: 'set', path: ['defaultProxy', 'protocol'], value: 'http' },
+      { op: 'set', path: ['defaultProxy', 'host'], value: '127.0.0.1' },
+      { op: 'set', path: ['defaultProxy', 'port'], value: 7890 },
+    ])
+    const host = findInputsOutsideSections(render(), '127.0.0.1')[0]
+    assert.equal(host.props.value, '127.0.0.1', 'the field shows the imported value immediately')
+  } finally {
+    restore()
+  }
+})
+
+test('N15: the V2Ray SOCKS5 preset imports port 10808 and socks5', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    quickImportOf(render(), 'V2Ray / Xray SOCKS5').props.onChange({ target: { value: 'v2ray-socks' } })
+    await writeSettle()
+    const ops = harness.writes[0].ops
+    assert.deepEqual(
+      ops.map(op => [op.path[op.path.length - 1], op.value]),
+      [
+        ['protocol', 'socks5'],
+        ['host', '127.0.0.1'],
+        ['port', 10808],
+      ],
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('N15: a card quick-import fills THAT card, not the shared default', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const card = cardFor(render(), 'openai')
+    quickImportOf(card, 'Clash Verge / Meta').props.onChange({ target: { value: 'clash-verge' } })
+    await writeSettle()
+    assert.deepEqual(
+      harness.writes[0].ops.map(op => op.path),
+      [
+        ['providers', 'openai', 'protocol'],
+        ['providers', 'openai', 'host'],
+        ['providers', 'openai', 'port'],
+      ],
+    )
+    assert.equal(harness.writes[0].ops[2].value, 7897)
+  } finally {
+    restore()
+  }
+})
+
+test('N15: a preset row can import a client into that preset', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {},
+        proxyProfiles: { 'HK-Proxy': { protocol: 'http', host: '', port: 0 } },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const manager = profileManagerOf(render())
+    quickImportOf(manager, 'V2Ray / Xray HTTP').props.onChange({ target: { value: 'v2ray-http' } })
+    await writeSettle()
+    assert.deepEqual(
+      harness.writes[0].ops.map(op => [op.path.join('.'), op.value]),
+      [
+        ['proxyProfiles.HK-Proxy.protocol', 'http'],
+        ['proxyProfiles.HK-Proxy.host', '127.0.0.1'],
+        ['proxyProfiles.HK-Proxy.port', 10809],
+      ],
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('N15: the environment option applies the Host-detected endpoint', async () => {
+  const { mod, restore } = loadBundle(async url => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      providers: [],
+      environment: {
+        proxy: { source: 'ALL_PROXY', protocol: 'socks5', host: '10.1.2.3', port: 1080, hadCredentials: false },
+      },
+    }),
+  }))
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const picker = quickImportOf(render(), '从环境变量')
+    assert.ok(picker, 'the detected environment must be offered')
+    picker.props.onChange({ target: { value: 'environment' } })
+    await writeSettle()
+    assert.deepEqual(
+      harness.writes[0].ops.map(op => [op.path[op.path.length - 1], op.value]),
+      [
+        ['protocol', 'socks5'],
+        ['host', '10.1.2.3'],
+        ['port', 1080],
+      ],
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('N15: without a detected environment the option is disabled, not broken', async () => {
+  const { mod, restore } = loadBundle(async url => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ providers: [], environment: { proxy: null } }),
+  }))
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const picker = quickImportOf(render(), '从环境变量（未检测到）')
+    assert.ok(picker, 'the option still explains that nothing was found')
+    const option = picker.children.find(child => child?.props?.value === 'environment')
+    assert.equal(option.props.disabled, true, 'a missing environment must not be selectable')
+    assert.equal(harness.writes.length, 0)
+  } finally {
+    restore()
+  }
+})
+
+test('N15: an environment credential is announced instead of silently dropped', async () => {
+  const { mod, restore } = loadBundle(async url => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      providers: [],
+      environment: {
+        proxy: { source: 'HTTPS_PROXY', protocol: 'http', host: 'p.test', port: 8080, hadCredentials: true },
+      },
+    }),
+  }))
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    assert.ok(
+      textsOf(render()).some(text => text.includes('该环境变量还带了凭据')),
+      'the page must ask for the credential it did not import',
+    )
+  } finally {
+    restore()
+  }
+})
+

@@ -32,6 +32,7 @@ import {
   routeBindingOf,
   routesBoundTo,
 } from './presets.js'
+import { PROXY_CLIENT_PRESETS, proxyClientPreset } from './proxy-clients.js'
 
 type Protocol = 'http' | 'https' | 'socks5'
 
@@ -428,8 +429,23 @@ type Catalog = {
   hits: Record<string, number>
   problems: Record<string, string>
   lastUse: Record<string, LastUse>
+  /**
+   * The forward proxy the Host inherited from its environment, if any. The
+   * Host already dropped the credentials; `hadCredentials` says the variable
+   * carried some, so the page can ask the user to re-enter them.
+   */
+  environmentProxy?: DetectedProxy | null
   /** Set when the FIRST read failed; a later successful poll clears it. */
   error?: string
+}
+
+/** One proxy detected in the Host's environment (see `src/proxy-env.ts`). */
+type DetectedProxy = {
+  source: string
+  protocol: Protocol
+  host: string
+  port: number
+  hadCredentials: boolean
 }
 
 /**
@@ -506,7 +522,26 @@ async function fetchCatalog(): Promise<Catalog> {
       }
     }
   }
-  return { rows, publishedRows: rows, hits, problems, lastUse }
+  // The environment probe is OPTIONAL decoration: a missing or malformed value
+  // only costs the "detect from environment" option, never a render.
+  const environmentProxy = ((): DetectedProxy | null => {
+    const raw = (body?.environment as { proxy?: unknown } | undefined)?.proxy
+    if (raw === null || typeof raw !== 'object') return null
+    const candidate = raw as Record<string, unknown>
+    const protocol = candidate.protocol
+    if (protocol !== 'http' && protocol !== 'https' && protocol !== 'socks5') return null
+    if (typeof candidate.host !== 'string' || candidate.host.length === 0) return null
+    const port = candidate.port
+    if (typeof port !== 'number' || !Number.isInteger(port) || port < 1 || port > 65535) return null
+    return {
+      source: typeof candidate.source === 'string' ? candidate.source : 'environment',
+      protocol,
+      host: candidate.host,
+      port,
+      hadCredentials: candidate.hadCredentials === true,
+    }
+  })()
+  return { rows, publishedRows: rows, hits, problems, lastUse, environmentProxy }
 }
 
 /**
@@ -1087,6 +1122,7 @@ function renderPage(ctx: any): unknown {
       hits: {} as Record<string, number>,
       problems: {} as Record<string, string>,
       lastUse: {} as Record<string, LastUse>,
+      environmentProxy: null as DetectedProxy | null,
       error: undefined as string | undefined,
       pending: true,
     }
@@ -1100,6 +1136,7 @@ function renderPage(ctx: any): unknown {
       hits: catalog.hits,
       problems: catalog.problems,
       lastUse: catalog.lastUse,
+      environmentProxy: catalog.environmentProxy ?? null,
       error: catalog.error,
       pending: false,
     })
@@ -1681,6 +1718,65 @@ function renderPage(ctx: any): unknown {
       apply(parts)
     }
 
+  /**
+   * The common-client picker, as an "apply on choose" `<select>`.
+   *
+   * A `<select>` rather than four buttons: the panel already has a lot of
+   * buttons, and this control has exactly the shape of a picker — choose one of
+   * a fixed list, fill the fields, then edit them. The option carrying the
+   * environment value appears only when the Host found one, so a composition
+   * without it shows four plain presets instead of a dead entry.
+   */
+  const quickImportSelect = (
+    key: string,
+    apply: (parts: Record<string, unknown>) => void,
+  ): unknown => {
+    const detected = state.environmentProxy ?? null
+    const select = h(
+      'select',
+      {
+        className: styles.input,
+        style: { ...S.input, flex: 'none', width: 'auto' },
+        key: `${key}:select`,
+        value: '',
+        'aria-label': t.quickImport,
+        onChange: (event: any) => {
+          const value = String(event.target.value ?? '')
+          if (value.length === 0) return
+          if (value === 'environment') {
+            if (detected === null) return
+            apply({
+              protocol: detected.protocol,
+              host: detected.host,
+              port: detected.port,
+            })
+            return
+          }
+          const preset = proxyClientPreset(value)
+          if (preset === undefined) return
+          apply({ protocol: preset.protocol, host: preset.host, port: preset.port })
+        },
+      },
+      h('option', { key: 'none', value: '' }, t.quickImport),
+      ...PROXY_CLIENT_PRESETS.map(preset =>
+        h('option', { key: preset.id, value: preset.id }, preset.label),
+      ),
+      h(
+        'option',
+        { key: 'environment', value: 'environment', disabled: detected === null },
+        detected === null ? t.quickImportEnvNone : `${t.quickImportEnv}${detected.source}`,
+      ),
+    )
+    return h(
+      'div',
+      { key, style: { display: 'flex', flexDirection: 'column', gap: '2px', minWidth: '0' } },
+      select,
+      detected !== null && detected.hadCredentials
+        ? h('span', { style: { ...S.hint, gridColumn: 'auto' } }, t.quickImportEnvCredentials)
+        : null,
+    )
+  }
+
   const field = (
     label: string,
     control: unknown,
@@ -2019,6 +2115,11 @@ function renderPage(ctx: any): unknown {
     h('p', { className: styles.defaultLead, style: S.defaultLead }, t.defaultLead),
     h(
       'div',
+      { style: S.testRow, key: 'default:quick-import' },
+      quickImportSelect('default:quick-import', applyDefaultUrl),
+    ),
+    h(
+      'div',
       { className: styles.formGrid, style: S.formGrid, key: 'default:form-grid' },
       field(
         t.protocol,
@@ -2225,6 +2326,41 @@ function renderPage(ctx: any): unknown {
         bound.length === 0
           ? null
           : h('p', { style: S.inheritNote }, `${t.profileUsedBy}${bound.join('、')}`),
+        h(
+          'div',
+          { style: S.testRow },
+          quickImportSelect(`profile:${entry.name}:quick-import`, parts => {
+            // One draft update and ONE write for the three transport fields, for
+            // the same reason a pasted URL is applied in one go: a half-applied
+            // fill can hit the credential guards between fields.
+            setProfileDraft((current: any) => ({
+              ...current,
+              [entry.name]: { ...current[entry.name], ...parts },
+            }))
+            invalidateTests(bound)
+            saveMany(
+              `\u0000profile\u0000${entry.name}\u0000*quick`,
+              Object.keys(parts).map(field => ({
+                op: 'set',
+                path: ['proxyProfiles', entry.name, field],
+                value: (parts as Record<string, unknown>)[field],
+              })),
+              `${entry.name}（快捷导入）`,
+              () => {
+                setProfileDraft((current: any) => {
+                  const value = current[entry.name]
+                  if (value === undefined) return current
+                  const nextValue = { ...value }
+                  for (const field of Object.keys(parts)) delete nextValue[field]
+                  const next = { ...current }
+                  if (Object.keys(nextValue).length === 0) delete next[entry.name]
+                  else next[entry.name] = nextValue
+                  return next
+                })
+              },
+            )
+          }),
+        ),
         h(
           'div',
           { className: styles.formGrid, style: S.formGrid },
@@ -2787,7 +2923,14 @@ function renderPage(ctx: any): unknown {
               : null,
           ...(useDefault || boundProfile.length > 0
             ? []
-            : [h('div', { className: styles.formGrid, style: S.formGrid, key: `${row.id}:form-grid` }, ...endpointFields)]),
+            : [
+                h(
+                  'div',
+                  { style: S.testRow, key: `${row.id}:quick-import` },
+                  quickImportSelect(`${row.id}:quick-import`, parts => applyCardUrl(row.id, parts)),
+                ),
+                h('div', { className: styles.formGrid, style: S.formGrid, key: `${row.id}:form-grid` }, ...endpointFields),
+              ]),
           // The self-check is offered whenever there is something to check: an
           // enabled route (the Host's table carries it, and a rejected one still
           // reports WHY), or a disabled one whose endpoint is already complete —
@@ -3240,6 +3383,10 @@ const EN = {
   profileMissingOption: ' (missing)',
   profileUnusable: 'The bound preset "',
   profileUnusableSuffix: '" is not usable, so this provider is not proxied: ',
+  quickImport: 'Quick import…',
+  quickImportEnv: 'From environment: ',
+  quickImportEnvNone: 'From environment (none detected)',
+  quickImportEnvCredentials: 'The environment variable also carried credentials; enter them below.',
 }
 
 const ZH = {
@@ -3356,6 +3503,10 @@ const ZH = {
   profileMissingOption: '（已缺失）',
   profileUnusable: '绑定的预设「',
   profileUnusableSuffix: '」不可用，该 provider 不会走代理：',
+  quickImport: '常用客户端…',
+  quickImportEnv: '从环境变量：',
+  quickImportEnvNone: '从环境变量（未检测到）',
+  quickImportEnvCredentials: '该环境变量还带了凭据，请在下方补填。',
 }
 
 /**

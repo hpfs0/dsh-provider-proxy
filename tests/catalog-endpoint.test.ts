@@ -148,3 +148,49 @@ test('the Host half never mutates its config object', () => {
   assert.deepEqual(Object.keys(config), ['providers'])
   assert.equal(typeof config.providers.get, 'function', 'the volatile reference is untouched')
 })
+
+// ---- N15: environment detection on the catalogue endpoint ----
+
+test('N15: the endpoint publishes the environment proxy WITHOUT credentials', () => {
+  // The payload is readable by anything that can reach the web server, so a
+  // credential in it would be an exfiltration path, not a convenience.
+  const previous = process.env.HTTPS_PROXY
+  process.env.HTTPS_PROXY = 'http://alice:hunter2@env-proxy.test:8899'
+  try {
+    const { routes } = mountHost({ listProviders: () => [], listConfigurableProviders: () => [] })
+    const { body } = get(routes)
+    assert.deepEqual(body.environment.proxy, {
+      source: 'HTTPS_PROXY',
+      protocol: 'http',
+      host: 'env-proxy.test',
+      port: 8899,
+      hadCredentials: true,
+    })
+    assert.ok(
+      !JSON.stringify(body).includes('hunter2'),
+      'the environment password must never reach the page payload',
+    )
+    assert.ok(!JSON.stringify(body).includes('alice'), 'nor the environment username')
+  } finally {
+    if (previous === undefined) delete process.env.HTTPS_PROXY
+    else process.env.HTTPS_PROXY = previous
+  }
+})
+
+test('N15: the endpoint reports null when the environment has no proxy', () => {
+  const saved = {
+    HTTPS_PROXY: process.env.HTTPS_PROXY,
+    HTTP_PROXY: process.env.HTTP_PROXY,
+    ALL_PROXY: process.env.ALL_PROXY,
+  }
+  for (const key of Object.keys(saved)) delete process.env[key]
+  try {
+    const { routes } = mountHost({ listProviders: () => [], listConfigurableProviders: () => [] })
+    const { body } = get(routes)
+    assert.equal(body.environment.proxy, null)
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value !== undefined) process.env[key] = value
+    }
+  }
+})
