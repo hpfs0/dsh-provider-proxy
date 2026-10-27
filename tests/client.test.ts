@@ -4849,3 +4849,261 @@ test('N16: an unknown provider shows no template pill', async () => {
   }
 })
 
+// ---- N17: configuration backup and restore ----
+
+/**
+ * Replace the browser globals the export path needs.
+ *
+ * `Blob`, `URL.createObjectURL` and an anchor are the real download mechanism;
+ * stubbing them is what lets the test read the exact bytes the user would get.
+ */
+function stubDownloadEnvironment(confirmAnswer = true) {
+  const saved = {
+    Blob: globalThis.Blob,
+    URL: globalThis.URL,
+    window: globalThis.window,
+    setTimeout: globalThis.setTimeout,
+    document: globalThis.document,
+  }
+  const state = { text: undefined, name: undefined, prompts: [] }
+  globalThis.Blob = class {
+    constructor(parts) {
+      state.text = String(parts?.[0] ?? '')
+    }
+  }
+  globalThis.URL = {
+    ...saved.URL,
+    createObjectURL: () => 'blob:fake',
+    revokeObjectURL: () => {},
+  }
+  globalThis.setTimeout = fn => {
+    fn()
+    return 0
+  }
+  globalThis.window = {
+    ...saved.window,
+    confirm: text => {
+      state.prompts.push(String(text))
+      return confirmAnswer
+    },
+  }
+  globalThis.document = {
+    ...saved.document,
+    createElement(tag) {
+      if (tag !== 'a') return saved.document.createElement(tag)
+      const anchor = {}
+      Object.defineProperties(anchor, {
+        href: { set() {} },
+        download: {
+          set(value) {
+            state.name = value
+          },
+        },
+      })
+      anchor.click = () => {}
+      return anchor
+    },
+  }
+  return {
+    state,
+    /** The JSON the browser would have written to disk. */
+    savedFile() {
+      return state.text === undefined ? undefined : JSON.parse(state.text)
+    },
+    restore() {
+      globalThis.Blob = saved.Blob
+      globalThis.URL = saved.URL
+      globalThis.window = saved.window
+      globalThis.setTimeout = saved.setTimeout
+      globalThis.document = saved.document
+    },
+  }
+}
+
+/** The backup toolbar, by its button labels. */
+function backupBlockOf(tree) {
+  const walk = node => {
+    if (node === null || typeof node !== 'object') return undefined
+    if (Array.isArray(node)) {
+      for (const child of node) {
+        const found = walk(child)
+        if (found !== undefined) return found
+      }
+      return undefined
+    }
+    if (node.props?.style?.flexWrap === 'wrap' && node.props?.key === 'backup') return node
+    return node.children ? walk(node.children) : undefined
+  }
+  return walk(tree)
+}
+
+test('N17: the page offers both backup actions', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [tree] = renderPage(mod, harness)
+    const block = backupBlockOf(tree)
+    assert.ok(block, 'the backup toolbar must render')
+    const labels = textsOf(block)
+    assert.ok(labels.includes('备份配置'), 'an export button is offered')
+    assert.ok(labels.includes('恢复配置'), 'an import control is offered')
+  } finally {
+    restore()
+  }
+})
+
+test('N17: export asks about passwords and omits them when declined', async () => {
+  const { mod, restore } = loadBundle()
+  const download = stubDownloadEnvironment(false)
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: {
+            enabled: true,
+            protocol: 'http',
+            host: '10.0.0.1',
+            port: 7890,
+            username: 'alice',
+            password: 'hunter2',
+          },
+        },
+        proxyProfiles: { HK: { protocol: 'http', host: '127.0.0.1', port: 7891, password: 'p2' } },
+        defaultProxy: { protocol: 'http', host: '127.0.0.1', port: 7890, password: 'p3' },
+      },
+    })
+    const [tree] = renderPage(mod, harness)
+    findButtons(backupBlockOf(tree))
+      .find(button => textsOf(button).includes('备份配置'))
+      .props.onClick()
+
+    assert.ok(
+      download.state.prompts.some(text => text.includes('是否包含代理密码')),
+      'the export must ask about passwords every time',
+    )
+    const file = download.savedFile()
+    assert.ok(file, 'the download must carry a JSON body')
+    assert.match(download.state.name, /^dsh-proxy-backup-\d{4}-\d{2}-\d{2}\.json$/)
+    assert.equal(file.providers.sensenova.password, '')
+    assert.equal(file.proxyProfiles.HK.password, '')
+    assert.equal(file.defaultProxy.password, '')
+    assert.equal(file.providers.sensenova.username, 'alice', 'non-secret fields are untouched')
+    assert.equal(JSON.stringify(file).includes('hunter2'), false)
+  } finally {
+    download.restore()
+    restore()
+  }
+})
+
+test('N17: accepting the prompt keeps the passwords in the export', async () => {
+  const { mod, restore } = loadBundle()
+  const download = stubDownloadEnvironment(true)
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: {
+            enabled: true,
+            protocol: 'http',
+            host: '10.0.0.1',
+            port: 7890,
+            username: 'alice',
+            password: 'hunter2',
+          },
+        },
+      },
+    })
+    const [tree] = renderPage(mod, harness)
+    findButtons(backupBlockOf(tree))
+      .find(button => textsOf(button).includes('备份配置'))
+      .props.onClick()
+    assert.equal(download.savedFile().providers.sensenova.password, 'hunter2')
+  } finally {
+    download.restore()
+    restore()
+  }
+})
+
+test('N17: an exported file round-trips into a single restore write', async () => {
+  const { mod, restore } = loadBundle()
+  const download = stubDownloadEnvironment(true)
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: { enabled: true, protocol: 'http', host: '10.0.0.1', port: 7890 },
+        },
+        proxyProfiles: { HK: { protocol: 'http', host: '127.0.0.1', port: 7891 } },
+        localDirect: false,
+        testUrl: 'https://echo.example/ip',
+      },
+    })
+    let [, render] = renderPage(mod, harness)
+    findButtons(backupBlockOf(render()))
+      .find(button => textsOf(button).includes('备份配置'))
+      .props.onClick()
+    const exported = download.state.text
+    assert.ok(exported)
+
+    const input = findFirstNodeOfType(backupBlockOf(render()), 'input')
+    assert.equal(input.props.type, 'file')
+    await input.props.onChange({
+      target: { files: [{ text: async () => exported }], value: 'C:\\fake.json' },
+    })
+    await settle()
+    const writes = harness.writes.filter(write => write.ops.length > 1)
+    assert.equal(writes.length, 1, 'a restore is ONE mutate call, so it cannot half apply')
+    assert.deepEqual(
+      writes[0].ops.map(op => op.path[0]),
+      ['providers', 'proxyProfiles', 'defaultProxy', 'localDirect', 'testUrl'],
+    )
+    assert.equal(writes[0].ops[3].value, false, 'localDirect is restored, not defaulted')
+    assert.equal(writes[0].ops[4].value, 'https://echo.example/ip')
+  } finally {
+    download.restore()
+    restore()
+  }
+})
+
+test('N17: a broken file is reported and nothing is written', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const input = findFirstNodeOfType(backupBlockOf(render()), 'input')
+    await input.props.onChange({
+      target: { files: [{ text: async () => '{"providers": "nope"}' }], value: 'x' },
+    })
+    await settle()
+    assert.equal(harness.writes.length, 0, 'an invalid file must not touch the settings')
+    assert.ok(
+      textsOf(render()).some(text => text.includes('保存失败：') && text.includes('providers')),
+      'the reason must be shown, and must not be a bare crash',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('N17: a cancelled restore writes nothing', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    globalThis.window = { ...globalThis.window, confirm: () => false }
+    const input = findFirstNodeOfType(backupBlockOf(render()), 'input')
+    await input.props.onChange({
+      target: {
+        files: [{ text: async () => JSON.stringify({ providers: { p: { enabled: true, host: 'h', port: 1 } } }) }],
+        value: 'x',
+      },
+    })
+    await settle()
+    assert.equal(harness.writes.length, 0)
+  } finally {
+    restore()
+  }
+})
+

@@ -1106,6 +1106,14 @@ export { defaultProxyProblem, proxyHostProblem } from './proxy-address.js'
 export { PROXY_CLIENT_PRESETS, proxyClientPreset } from './proxy-clients.js'
 export { detectProxyEnv, parseProxyEnvValue } from './proxy-env.js'
 export {
+  backupCounts,
+  backupFileName,
+  backupOps,
+  buildBackup,
+  parseBackup,
+  validateEnabledRoutes,
+} from './backup.js'
+export {
   PROVIDER_HOST_TEMPLATES,
   appendHostRules,
   deadRuleEntries,

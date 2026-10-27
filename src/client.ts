@@ -33,6 +33,7 @@ import {
   routesBoundTo,
 } from './presets.js'
 import { PROXY_CLIENT_PRESETS, proxyClientPreset } from './proxy-clients.js'
+import { backupCounts, backupFileName, backupOps, buildBackup, parseBackup } from './backup.js'
 
 type Protocol = 'http' | 'https' | 'socks5'
 
@@ -2448,6 +2449,121 @@ function renderPage(ctx: any): unknown {
   const globalLocalDirect =
     typeof globalDraft.localDirect === 'boolean' ? globalDraft.localDirect : storedLocalDirect
   const globalTestUrlHint = testUrlHint(globalTestUrl, t)
+
+  /**
+   * Download the current configuration as JSON.
+   *
+   * The password question is asked EVERY time rather than remembered: an export
+   * that silently started carrying credentials because of an earlier "yes" is
+   * exactly the kind of sticky choice nobody expects. Default is "no".
+   */
+  const exportBackup = (): void => {
+    const includePasswords =
+      globalThis.window?.confirm?.(t.backupIncludePasswords) === true
+    const document = buildBackup(
+      {
+        providers: { ...configured, ...draft },
+        proxyProfiles: { ...storedProfiles, ...profileDraft },
+        defaultProxy: { ...storedDefault, ...defaultDraft },
+        localDirect: globalLocalDirect,
+        testUrl: globalTestUrl,
+      },
+      { includePasswords },
+    )
+    try {
+      const text = JSON.stringify(document, null, 2)
+      const blob = new globalThis.Blob([text], { type: 'application/json' })
+      const url = globalThis.URL.createObjectURL(blob)
+      const anchor = globalThis.document.createElement('a')
+      anchor.href = url
+      anchor.download = backupFileName()
+      anchor.click()
+      globalThis.setTimeout(() => globalThis.URL.revokeObjectURL(url), 0)
+      setSavedNote(`${t.backupExported}${includePasswords ? t.backupWithPasswords : t.backupWithoutPasswords}`)
+    } catch (error: any) {
+      setSavedNote(undefined)
+      setSaveError({ label: t.backupExport, message: String(error?.message ?? error) })
+    }
+  }
+
+  /**
+   * Read, validate, confirm, then overwrite in ONE write.
+   *
+   * A file is parsed and checked BEFORE the user is asked to confirm, so the
+   * prompt never appears for a file that cannot be applied. The whole restore is
+   * a single `mutate` call, which is what makes a revision conflict fail the
+   * restore instead of leaving half of it in place.
+   */
+  const importBackupFile = async (file: any): Promise<void> => {
+    let text: string
+    try {
+      text = await file.text()
+    } catch (error: any) {
+      setSaveError({ label: t.backupImport, message: String(error?.message ?? error) })
+      return
+    }
+    const parsed = parseBackup(text)
+    if (!parsed.ok) {
+      setSavedNote(undefined)
+      setSaveError({ label: t.backupImport, message: parsed.error })
+      return
+    }
+    const counts = backupCounts(parsed.document)
+    const confirmed = globalThis.window?.confirm?.(
+      `${t.backupConfirm}${counts.providers}${t.backupConfirmProviders}${counts.profiles}${t.backupConfirmProfiles}`,
+    )
+    if (confirmed !== true) return
+    try {
+      await enqueueWrite(() => writeConfig(ctx, backupOps(parsed.document)))
+      setSaveError(undefined)
+      setSavedNote(`${t.backupRestored}${counts.providers}`)
+      // The restored values must show immediately: the settings store may not
+      // republish within this render, so every draft layer is cleared.
+      setDraft({})
+      setDefaultDraft({})
+      setProfileDraft({})
+      setGlobalDraft({})
+    } catch (error: any) {
+      setSavedNote(undefined)
+      setSaveError({ label: t.backupImport, message: String(error?.message ?? error) })
+    }
+  }
+
+  const backupBlock = h(
+    'div',
+    { style: { ...S.testRow, flexWrap: 'wrap' }, key: 'backup' },
+    h(
+      'button',
+      {
+        className: styles.testButton,
+        style: S.testButton,
+        type: 'button',
+        onClick: exportBackup,
+      },
+      t.backupExport,
+    ),
+    h(
+      'label',
+      {
+        className: styles.testButton,
+        style: { ...S.testButton, display: 'inline-flex', alignItems: 'center' },
+        key: 'backup:import',
+      },
+      t.backupImport,
+      h('input', {
+        type: 'file',
+        accept: 'application/json,.json',
+        style: { display: 'none' },
+        onChange: (event: any) => {
+          const file = event?.target?.files?.[0]
+          if (file !== undefined) void importBackupFile(file)
+          // Allow the same file to be chosen twice in a row.
+          if (event?.target !== undefined) event.target.value = ''
+        },
+      }),
+    ),
+  )
+
   const globalBlock = h(
     'details',
     {
@@ -3248,6 +3364,7 @@ function renderPage(ctx: any): unknown {
         ),
     defaultBlock,
     profileManager,
+    backupBlock,
     globalBlock,
     catalogueNotice,
     chipRow,
@@ -3412,6 +3529,17 @@ const EN = {
   quickImportEnvNone: 'From environment (none detected)',
   quickImportEnvCredentials: 'The environment variable also carried credentials; enter them below.',
   loadHostTemplate: 'Load official upstream hosts: ',
+  backupExport: 'Back up configuration',
+  backupImport: 'Restore configuration',
+  backupIncludePasswords:
+    'Include proxy passwords in the backup?\n\nOK = include, Cancel = leave every password empty.',
+  backupWithPasswords: 'Exported backup (passwords included — store it safely)',
+  backupWithoutPasswords: 'Exported backup (passwords omitted)',
+  backupConfirm:
+    'Restore this backup? The current configuration will be replaced.\n\nProviders: ',
+  backupConfirmProviders: ', presets: ',
+  backupConfirmProfiles: ' entry/entries.',
+  backupRestored: 'Restored from backup, providers: ',
 }
 
 const ZH = {
@@ -3533,6 +3661,15 @@ const ZH = {
   quickImportEnvNone: '从环境变量（未检测到）',
   quickImportEnvCredentials: '该环境变量还带了凭据，请在下方补填。',
   loadHostTemplate: '载入官方上游域名：',
+  backupExport: '备份配置',
+  backupImport: '恢复配置',
+  backupIncludePasswords: '备份中是否包含代理密码？\n\n确定 = 包含；取消 = 所有密码字段留空。',
+  backupWithPasswords: '已导出备份（包含密码，请妥善保管）',
+  backupWithoutPasswords: '已导出备份（未包含密码）',
+  backupConfirm: '确认用该备份覆盖当前配置？\n\nprovider：',
+  backupConfirmProviders: '，预设：',
+  backupConfirmProfiles: ' 个。',
+  backupRestored: '已从备份恢复，provider：',
 }
 
 /**
