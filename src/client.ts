@@ -1376,6 +1376,7 @@ const S = {
     cursor: 'pointer',
     lineHeight: '1.4',
     flexShrink: 0,
+    alignSelf: 'center',
   },
   bypassToggle: {
     display: 'flex',
@@ -4324,6 +4325,11 @@ function renderPage(ctx: any): unknown {
             ),
             h('span', null, t.metricHitsTitle),
           ),
+        ),
+        h(
+          'div',
+          { className: styles.metricValue, style: S.metricValue },
+          h('span', null, totalHits.formatted),
           h(
             'button',
             {
@@ -4337,7 +4343,6 @@ function renderPage(ctx: any): unknown {
             t.resetHits,
           ),
         ),
-        h('div', { className: styles.metricValue, style: S.metricValue }, h('span', null, totalHits.formatted)),
         h(
           'div',
           { className: styles.metricSub, style: S.metricSub },

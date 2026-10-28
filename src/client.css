@@ -597,6 +597,7 @@
   cursor: pointer;
   transition: all 150ms ease;
   line-height: 1.4;
+  align-self: center;
 }
 
 .resetHitsButton:hover {

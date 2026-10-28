@@ -6050,6 +6050,23 @@ test('N19/N21: Dashboard header renders all four metrics and reset button with a
     assert.ok(texts.some(t => t.includes('连通成功率')), 'renders connection success rate metric')
     assert.ok(texts.some(t => t.includes('近期平均延迟')), 'renders average latency metric')
     assert.ok(texts.some(t => t.includes('累计转发请求量')), 'renders total hits metric')
+
+    // Verify resetBtn is placed in the metric-hits card
+    const findHitsCard = (node: any): any => {
+      if (!node || typeof node !== 'object') return null
+      if (node.props?.key === 'metric-hits') return node
+      if (Array.isArray(node)) {
+        for (const child of node) {
+          const found = findHitsCard(child)
+          if (found) return found
+        }
+      }
+      if (node.children) return findHitsCard(node.children)
+      return null
+    }
+    const hitsCard = findHitsCard(tree)
+    assert.ok(hitsCard, 'metric-hits card must be present')
+    assert.equal(findButtons(hitsCard).length, 1, 'reset button belongs to metric-hits card')
   } finally {
     restore()
   }
