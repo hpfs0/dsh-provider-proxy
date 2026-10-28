@@ -6031,3 +6031,83 @@ test('N17: a cancelled restore writes nothing', async () => {
   }
 })
 
+
+test('N19/N21: Dashboard header renders all four metrics and reset button with aria attributes', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+
+    const tree = render()
+    const allButtons = findButtons(tree)
+    const resetBtn = allButtons.find(b => b.props['aria-label']?.includes('重置') || textsOf(b).includes('重置'))
+    assert.ok(resetBtn, 'reset hits button must be rendered')
+    assert.ok(resetBtn.props['aria-label'], 'reset hits button must have aria-label')
+
+    const texts = textsOf(tree)
+    assert.ok(texts.some(t => t.includes('代理覆盖率')), 'renders proxy coverage metric')
+    assert.ok(texts.some(t => t.includes('连通成功率')), 'renders connection success rate metric')
+    assert.ok(texts.some(t => t.includes('近期平均延迟')), 'renders average latency metric')
+    assert.ok(texts.some(t => t.includes('累计转发请求量')), 'renders total hits metric')
+  } finally {
+    restore()
+  }
+})
+
+test('N20/N21: Emergency bypass switch renders with role switch and accessible attributes', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {},
+        bypassAll: true,
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+
+    const tree = render()
+    const switches = findCheckboxes(tree).filter(cb => cb.props.role === 'switch')
+    assert.ok(switches.length >= 2, 'switches with role="switch" must be present')
+
+    const bypassSwitch = switches.find(s => s.props['aria-label']?.includes('Bypass All') || s.props['aria-label']?.includes('全局紧急旁路'))
+    assert.ok(bypassSwitch, 'bypass switch must be rendered with role="switch"')
+    assert.equal(bypassSwitch.props['aria-checked'], true, 'aria-checked reflects bypass state')
+
+    const texts = textsOf(tree)
+    assert.ok(texts.some(t => t.includes('紧急旁路激活中')), 'alert banner is displayed when bypassAll is on')
+  } finally {
+    restore()
+  }
+})
+
+test('N21: View mode switch and test buttons carry accessible aria attributes', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: { enabled: true, protocol: 'http', host: '127.0.0.1', port: 8080 },
+        },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+
+    const tree = render()
+    const buttons = findButtons(tree)
+
+    const viewModeBtn = buttons.find(b => b.props['aria-label']?.includes('视图'))
+    assert.ok(viewModeBtn, 'view mode button must carry aria-label')
+    assert.equal(typeof viewModeBtn.props['aria-pressed'], 'boolean', 'view mode button must carry aria-pressed')
+
+    const batchTestBtn = buttons.find(b => b.props['aria-label']?.includes('测试'))
+    assert.ok(batchTestBtn, 'batch test button must carry aria-label')
+
+    const cardTestBtn = buttons.find(b => b.props['aria-label']?.includes('SenseNova') || b.props['aria-label']?.includes('sensenova'))
+    assert.ok(cardTestBtn, 'card test button must carry aria-label')
+  } finally {
+    restore()
+  }
+})

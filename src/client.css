@@ -188,7 +188,7 @@
   color: var(--dsw-alias-label-primary);
   font: inherit;
   font-size: 12px;
-  transition: border-color 120ms ease, background 120ms ease;
+  transition: border-color 150ms ease, background 150ms ease;
 }
 
 /* The base look of every input is INLINE too, so these three state rules only
@@ -214,7 +214,7 @@
 /* The icon sits inside the input, so its hover/focus feedback must be local
    and must outrank the transparent inline base. */
 .passwordToggle {
-  transition: background 120ms ease, color 120ms ease;
+  transition: background 150ms ease, color 150ms ease;
 }
 
 .passwordToggle:hover:not(:disabled) {
@@ -241,7 +241,7 @@
      `border-l1`→`l2` is 4%→10% black on a 1px line. The app's own hovers use
      `interactive-bg-hover`; using it here is what makes the feedback exist. */
 .testButton {
-  transition: border-color 120ms ease, background 120ms ease;
+  transition: border-color 150ms ease, background 150ms ease;
 }
 
 .testButton:hover:not(:disabled) {
@@ -281,7 +281,7 @@
 }
 
 .chip {
-  transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
+  transition: border-color 150ms ease, background 150ms ease, color 150ms ease;
 }
 
 /* Hover is a HINT, never a selection.
@@ -374,7 +374,7 @@
 
 /* ---- v0.8.0 N13 additions: quick copy ---- */
 .copyButton {
-  transition: background 120ms ease, color 120ms ease;
+  transition: background 150ms ease, color 150ms ease;
 }
 
 .copyButton:hover:not(:disabled) {
@@ -395,7 +395,7 @@
   border: 1px solid var(--dsw-alias-border-l1);
   border-radius: 10px;
   background: var(--dsw-alias-bg-layer-1);
-  transition: border-color 120ms ease;
+  transition: border-color 150ms ease;
 }
 
 .profileCard:focus-within {
@@ -469,7 +469,7 @@
   font-size: 10px;
   color: var(--dsw-alias-label-secondary);
   cursor: pointer;
-  transition: all 120ms ease;
+  transition: all 150ms ease;
 }
 
 .resetHitsButton:hover {
@@ -506,7 +506,7 @@
   border: 1px solid var(--dsw-alias-state-warning-border, rgba(210, 153, 34, 0.4));
   background: var(--dsw-alias-state-warning-subtle, rgba(210, 153, 34, 0.08));
   user-select: none;
-  transition: all 120ms ease;
+  transition: all 150ms ease;
 }
 
 .bypassToggle:hover {
@@ -534,4 +534,34 @@
   font-size: 11px;
   font-weight: 500;
   white-space: nowrap;
+}
+
+/* ---- v1.0.0 N21: Theme contrast & smooth transitions ---- */
+
+details,
+summary,
+.toggle input,
+.card,
+.cardActive,
+.cardRejected,
+.defaultCard {
+  transition: all 150ms ease;
+}
+
+/* Light mode layer contrast & elevation optimization */
+:root[data-theme='light'] .card,
+:root[data-theme='light'] .metricCard,
+:root[data-theme='light'] .defaultCard,
+:root[data-theme='light'] .profileCard {
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+
+:root[data-theme='light'] .cardActive {
+  background: var(--dsw-alias-bg-layer-2, #f6f8fa) !important;
+  border-color: var(--dsw-alias-state-success-primary, #2da44e) !important;
+}
+
+:root[data-theme='light'] .cardRejected {
+  background: var(--dsw-alias-bg-layer-2, #fff5f5) !important;
+  border-color: var(--dsw-alias-state-error-primary, #cf222e) !important;
 }

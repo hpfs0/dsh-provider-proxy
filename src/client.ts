@@ -2999,6 +2999,9 @@ function renderPage(ctx: any): unknown {
       { className: styles.toggle, style: S.toggle },
       h('input', {
         type: 'checkbox',
+        role: 'switch',
+        'aria-checked': globalLocalDirect,
+        'aria-label': t.localDirect,
         checked: globalLocalDirect,
         onChange: (event: any) => bindGlobal('localDirect')(event.target.checked === true),
       }),
@@ -3014,6 +3017,9 @@ function renderPage(ctx: any): unknown {
       { className: styles.toggle, style: { ...S.toggle, marginTop: '8px' } },
       h('input', {
         type: 'checkbox',
+        role: 'switch',
+        'aria-checked': globalEnableFallbackDirect,
+        'aria-label': t.enableFallbackDirect,
         checked: globalEnableFallbackDirect,
         onChange: (event: any) => bindGlobal('enableFallbackDirect')(event.target.checked === true),
       }),
@@ -3139,6 +3145,7 @@ function renderPage(ctx: any): unknown {
                 className: styles.testButton,
                 style: { ...S.testButton, flex: 'none', whiteSpace: 'nowrap' },
                 type: 'button',
+                'aria-label': t.batchTest,
                 disabled: countActive === 0 || batchProgress !== null,
                 onClick: runBatchTest,
               },
@@ -3152,6 +3159,8 @@ function renderPage(ctx: any): unknown {
                 className: styles.testButton,
                 style: { ...S.testButton, flex: 'none', whiteSpace: 'nowrap' },
                 type: 'button',
+                'aria-label': viewMode === 'card' ? t.switchToCompact : t.switchToCard,
+                'aria-pressed': viewMode === 'compact',
                 onClick: () =>
                   setViewMode((m: 'card' | 'compact') => {
                     const next = m === 'card' ? 'compact' : 'card'
@@ -3469,7 +3478,7 @@ function renderPage(ctx: any): unknown {
             ),
           ),
           problemText !== undefined
-            ? h('p', { key: `${row.id}:problem`, style: S.inheritWarning }, problemText)
+            ? h('p', { key: `${row.id}:problem`, style: S.inheritWarning, role: 'alert' }, problemText)
             : boundProfile.length > 0
               ? h(
                   'p',
@@ -3511,6 +3520,7 @@ function renderPage(ctx: any): unknown {
                     className: styles.testButton,
                     style: S.testButton,
                     type: 'button',
+                    'aria-label': `${t.testButton} ${row.name || row.id}`,
                     disabled: result?.pending === true,
                     onClick: () => runTest(row.id),
                   },
@@ -3807,6 +3817,7 @@ function renderPage(ctx: any): unknown {
                     className: styles.testButton,
                     style: { ...S.testButton, padding: '3px 8px', fontSize: '11px' },
                     type: 'button',
+                    'aria-label': `${t.testButton} ${row.name || row.id}`,
                     disabled: result?.pending === true,
                     onClick: () => runTest(row.id),
                   },
@@ -3912,6 +3923,9 @@ function renderPage(ctx: any): unknown {
         { className: styles.bypassToggle },
         h('input', {
           type: 'checkbox',
+          role: 'switch',
+          'aria-checked': globalBypassAll,
+          'aria-label': t.bypassAllToggle,
           checked: globalBypassAll,
           onChange: (event: any) => bindGlobal('bypassAll')(event.target.checked === true),
         }),
@@ -4149,6 +4163,10 @@ const EN = {
   bypassAllBannerTitle: '[Emergency Bypass Active]',
   bypassAllBannerText: 'All traffic is routed directly upstream, individual settings preserved. Remember to disable when done.',
   bypassedDirect: 'Bypassed Direct',
+  expandCard: 'Expand card details',
+  collapseCard: 'Collapse card details',
+  switchToCompact: 'Switch to compact view',
+  switchToCard: 'Switch to card view',
   advanced: 'Advanced: target host rules',
   onlyHosts: 'Proxy only',
   onlyHostsHint: 'Comma/space separated; when set, only requests to these hosts are proxied (suffix match, * for all).',
@@ -4307,6 +4325,10 @@ const ZH = {
   bypassAllBannerTitle: '[紧急旁路激活中]',
   bypassAllBannerText: '所有模型流量已全量绕过代理直连上游，单项配置仍完整保持。调试完毕后请及时关闭。',
   bypassedDirect: '旁路直连中',
+  expandCard: '展开卡片详情',
+  collapseCard: '折叠卡片详情',
+  switchToCompact: '切换至紧凑视图',
+  switchToCard: '切换至卡片视图',
   advanced: '高级：目标域名规则',
   onlyHosts: '仅走代理',
   onlyHostsHint: '逗号或空格分隔；非空时只有匹配这些主机的请求走代理（后缀匹配，* 表示全部）。',
