@@ -1354,6 +1354,7 @@ const S = {
     lineHeight: '1.3',
     color: 'var(--dsw-alias-label-primary)',
     fontVariantNumeric: 'tabular-nums',
+    whiteSpace: 'nowrap',
   },
   metricSub: {
     fontSize: '10px',
@@ -4030,7 +4031,19 @@ function renderPage(ctx: any): unknown {
       })
 
   const isZh = t.protocol === '类型'
-  const coverage = calculateCoverage(rows, configured, problems, isZh)
+  const effectiveConfigured = Object.fromEntries(
+    rows.map(row => [row.id, view({ ...configured[row.id], ...draft[row.id] })]),
+  )
+  const effectiveProblems: Record<string, string | undefined> = { ...problems }
+  for (const row of rows) {
+    const route = effectiveConfigured[row.id]
+    if (route?.enabled && !effectiveProblems[row.id]) {
+      const state = cardEndpoint(route)
+      const err = cardProblemText(state)
+      if (err) effectiveProblems[row.id] = err
+    }
+  }
+  const coverage = calculateCoverage(rows, effectiveConfigured, effectiveProblems, isZh)
   const successRate = calculateSuccessRate(lastUse, isZh)
   const avgLatency = calculateAverageLatency(tests)
   const totalHits = calculateTotalHits(hits)

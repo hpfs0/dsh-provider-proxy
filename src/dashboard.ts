@@ -54,8 +54,8 @@ export function calculateCoverage(
   }
 
   const formatted = isZh
-    ? `已代理 ${proxiedCount} / 活跃共 ${activeCount}`
-    : `Proxied ${proxiedCount} / ${activeCount} Active`
+    ? `${proxiedCount} / ${activeCount} 活跃`
+    : `${proxiedCount} / ${activeCount} Active`
 
   return {
     proxied: proxiedCount,

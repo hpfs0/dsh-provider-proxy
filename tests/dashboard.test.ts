@@ -25,11 +25,11 @@ test('calculateCoverage computes proxy coverage across empty, partial and full s
   const empty = calculateCoverage([], {})
   assert.equal(empty.proxied, 0)
   assert.equal(empty.active, 0)
-  assert.equal(empty.formatted, '已代理 0 / 活跃共 0')
+  assert.equal(empty.formatted, '0 / 0 活跃')
 
   // English formatting
   const emptyEn = calculateCoverage([], {}, {}, false)
-  assert.equal(emptyEn.formatted, 'Proxied 0 / 0 Active')
+  assert.equal(emptyEn.formatted, '0 / 0 Active')
 
   // Rows without live marker use total length
   const rows = [
@@ -45,13 +45,13 @@ test('calculateCoverage computes proxy coverage across empty, partial and full s
   const cov1 = calculateCoverage(rows, configured)
   assert.equal(cov1.active, 2, 'only live: true count towards active when some are live')
   assert.equal(cov1.proxied, 2, 'p1 and p3 are enabled')
-  assert.equal(cov1.formatted, '已代理 2 / 活跃共 2')
+  assert.equal(cov1.formatted, '2 / 2 活跃')
 
   // Problem-rejected provider does not count as proxied
   const problems = { p1: 'Bad port' }
   const cov2 = calculateCoverage(rows, configured, problems)
   assert.equal(cov2.proxied, 1, 'rejected p1 must not count as proxied')
-  assert.equal(cov2.formatted, '已代理 1 / 活跃共 2')
+  assert.equal(cov2.formatted, '1 / 2 活跃')
 })
 
 test('calculateSuccessRate computes percentage correctly across edge cases', () => {

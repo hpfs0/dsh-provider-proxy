@@ -555,6 +555,7 @@
   line-height: 1.3;
   color: var(--dsw-alias-label-primary);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .metricSub {

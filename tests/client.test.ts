@@ -6111,3 +6111,47 @@ test('N21: View mode switch and test buttons carry accessible aria attributes', 
     restore()
   }
 })
+
+test('Dashboard proxy coverage dynamically reflects draft enabled toggles without page remount', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: { enabled: true, protocol: 'http', host: '127.0.0.1', port: 8080 },
+        },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+
+    let tree = render()
+    let texts = textsOf(tree)
+    // Initially enabled: 1 / 2 活跃 (sensenova enabled, openai not enabled; both live)
+    assert.ok(texts.some(t => t.includes('1 / 2 活跃') || t.includes('1 / 2 Active')), 'initially shows 1 / 2 活跃')
+
+    // Find sensenova card checkbox
+    const card = cardFor(tree, 'sensenova')
+    assert.ok(card, 'card for sensenova must exist')
+    const checkbox = findCheckboxes(card).find(b => b.props.checked === true)
+    assert.ok(checkbox, 'checkbox must be checked initially')
+
+    // Uncheck proxy
+    checkbox.props.onChange({ target: { checked: false } })
+    tree = render()
+    texts = textsOf(tree)
+    // Must immediately update to 0 / 2 活跃 without remounting or waiting for snapshot
+    assert.ok(texts.some(t => t.includes('0 / 2 活跃') || t.includes('0 / 2 Active')), 'coverage must immediately update to 0 / 2 活跃 upon unchecking')
+
+    // Toggle back on
+    const uncheckedBox = findCheckboxes(cardFor(tree, 'sensenova')).find(b => b.props.checked === false)
+    assert.ok(uncheckedBox, 'checkbox is now unchecked')
+    uncheckedBox.props.onChange({ target: { checked: true } })
+    tree = render()
+    texts = textsOf(tree)
+    assert.ok(texts.some(t => t.includes('1 / 2 活跃') || t.includes('1 / 2 Active')), 'coverage must immediately update back to 1 / 2 活跃 upon checking')
+  } finally {
+    restore()
+  }
+})
+
