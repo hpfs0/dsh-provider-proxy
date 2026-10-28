@@ -1277,6 +1277,140 @@ const S = {
     fontSize: '11px',
     lineHeight: '1',
   },
+  dashboardContainer: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '12px',
+    padding: '14px 16px',
+    borderWidth: '1px',
+    borderStyle: 'solid',
+    borderColor: 'var(--dsw-alias-border-l1)',
+    borderRadius: '10px',
+    background: 'var(--dsw-alias-bg-layer-1)',
+  },
+  dashboardHeaderRow: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: '12px',
+    flexWrap: 'wrap',
+  },
+  dashboardTitleWrap: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+  },
+  dashboardTitle: {
+    fontSize: '13px',
+    fontWeight: '600',
+    letterSpacing: '0.2px',
+    color: 'var(--dsw-alias-label-primary)',
+  },
+  dashboardGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
+    gap: '10px',
+  },
+  metricCard: {
+    display: 'flex',
+    flexDirection: 'column',
+    justifyContent: 'space-between',
+    gap: '6px',
+    padding: '11px 13px',
+    borderWidth: '1px',
+    borderStyle: 'solid',
+    borderColor: 'var(--dsw-alias-border-l1)',
+    borderRadius: '8px',
+    background: 'var(--dsw-alias-bg-layer-2)',
+    position: 'relative',
+    overflow: 'hidden',
+    minWidth: '0',
+  },
+  metricHead: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: '6px',
+    fontSize: '11px',
+    fontWeight: '500',
+    lineHeight: '1.4',
+    color: 'var(--dsw-alias-label-secondary)',
+  },
+  metricHeadTitle: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '6px',
+    minWidth: '0',
+    overflow: 'hidden',
+    whiteSpace: 'nowrap',
+    textOverflow: 'ellipsis',
+  },
+  metricValue: {
+    display: 'flex',
+    alignItems: 'baseline',
+    gap: '6px',
+    fontSize: '15px',
+    fontWeight: '600',
+    lineHeight: '1.3',
+    color: 'var(--dsw-alias-label-primary)',
+    fontVariantNumeric: 'tabular-nums',
+  },
+  metricSub: {
+    fontSize: '10px',
+    color: 'var(--dsw-alias-label-secondary)',
+    opacity: '0.75',
+    lineHeight: '1.2',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+  },
+  resetHitsButton: {
+    background: 'transparent',
+    border: '1px solid var(--dsw-alias-border-l1)',
+    borderRadius: '4px',
+    padding: '1px 7px',
+    fontSize: '10px',
+    fontWeight: '500',
+    color: 'var(--dsw-alias-label-secondary)',
+    cursor: 'pointer',
+    lineHeight: '1.4',
+    flexShrink: 0,
+  },
+  bypassToggle: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '6px',
+    fontSize: '12px',
+    fontWeight: '500',
+    cursor: 'pointer',
+    color: 'var(--dsw-alias-label-secondary)',
+    padding: '3px 10px',
+    borderRadius: '6px',
+    borderWidth: '1px',
+    borderStyle: 'solid',
+    borderColor: 'var(--dsw-alias-border-l1)',
+    background: 'var(--dsw-alias-bg-layer-2)',
+    userSelect: 'none',
+  },
+  bypassToggleActive: {
+    color: 'var(--dsw-alias-state-warning-primary, #d29922)',
+    borderColor: 'var(--dsw-alias-state-warning-border, rgba(210, 153, 34, 0.5))',
+    background: 'var(--dsw-alias-state-warning-subtle, rgba(210, 153, 34, 0.12))',
+  },
+  bypassAlertBanner: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    padding: '10px 14px',
+    borderRadius: '8px',
+    background: 'var(--dsw-alias-state-warning-subtle, rgba(210, 153, 34, 0.12))',
+    borderWidth: '1px',
+    borderStyle: 'solid',
+    borderColor: 'var(--dsw-alias-state-warning-border, rgba(210, 153, 34, 0.4))',
+    color: 'var(--dsw-alias-state-warning-primary, #d29922)',
+    fontSize: '12px',
+    lineHeight: '1.5',
+  },
 } as const
 
 function renderPage(ctx: any): unknown {
@@ -3913,22 +4047,45 @@ function renderPage(ctx: any): unknown {
       role: 'region',
       'aria-label': t.dashboardAriaLabel,
       className: styles.dashboardContainer,
+      style: S.dashboardContainer,
     },
     h(
       'div',
-      { className: styles.dashboardHeaderRow },
+      { className: styles.dashboardHeaderRow, style: S.dashboardHeaderRow },
       h(
         'div',
-        { className: styles.dashboardTitleWrap },
-        h('span', {
-          className: globalBypassAll ? styles.dashboardPulseDotWarning : styles.dashboardPulseDot,
-          'aria-hidden': 'true',
-        }),
-        h('span', { className: styles.dashboardTitle }, t.dashboardTitle),
+        { className: styles.dashboardTitleWrap, style: S.dashboardTitleWrap },
+        h(
+          'svg',
+          {
+            width: 10,
+            height: 10,
+            viewBox: '0 0 10 10',
+            style: { flexShrink: 0, display: 'inline-block', verticalAlign: 'middle', marginRight: '2px' },
+            className: globalBypassAll ? styles.dashboardPulseDotWarning : styles.dashboardPulseDot,
+            'aria-hidden': 'true',
+          },
+          h('circle', {
+            cx: 5,
+            cy: 5,
+            r: 4.5,
+            fill: globalBypassAll ? 'rgba(210, 153, 34, 0.25)' : 'rgba(35, 134, 54, 0.25)',
+          }),
+          h('circle', {
+            cx: 5,
+            cy: 5,
+            r: 3,
+            fill: globalBypassAll ? 'var(--dsw-alias-state-warning-primary, #d29922)' : 'var(--dsw-alias-state-success-primary, #238636)',
+          }),
+        ),
+        h('span', { className: styles.dashboardTitle, style: S.dashboardTitle }, t.dashboardTitle),
       ),
       h(
         'label',
-        { className: `${styles.bypassToggle}${globalBypassAll ? ` ${styles.bypassToggleActive}` : ''}` },
+        {
+          className: `${styles.bypassToggle}${globalBypassAll ? ` ${styles.bypassToggleActive}` : ''}`,
+          style: globalBypassAll ? { ...S.bypassToggle, ...S.bypassToggleActive } : S.bypassToggle,
+        },
         h('input', {
           type: 'checkbox',
           role: 'switch',
@@ -3943,7 +4100,7 @@ function renderPage(ctx: any): unknown {
     globalBypassAll
       ? h(
           'div',
-          { className: styles.bypassAlertBanner, role: 'alert' },
+          { className: styles.bypassAlertBanner, role: 'alert', style: S.bypassAlertBanner },
           h(
             'svg',
             {
@@ -3969,17 +4126,22 @@ function renderPage(ctx: any): unknown {
       'div',
       {
         className: styles.dashboardGrid,
+        style: S.dashboardGrid,
         key: 'dashboard-grid',
       },
       h(
         'div',
-        { className: `${styles.metricCard} ${styles.metricCardCoverage}`, key: 'metric-coverage' },
+        {
+          className: `${styles.metricCard} ${styles.metricCardCoverage}`,
+          style: S.metricCard,
+          key: 'metric-coverage',
+        },
         h(
           'div',
-          { className: styles.metricHead },
+          { className: styles.metricHead, style: S.metricHead },
           h(
             'div',
-            { className: styles.metricHeadTitle },
+            { className: styles.metricHeadTitle, style: S.metricHeadTitle },
             h(
               'svg',
               {
@@ -4005,16 +4167,29 @@ function renderPage(ctx: any): unknown {
         ),
         h(
           'div',
-          { className: styles.metricValue },
-          h('span', {
-            className: `${styles.statusDot} ${coverage.proxied > 0 ? styles.statusDotActive : styles.statusDotIdle}`,
-            'aria-hidden': 'true',
-          }),
+          { className: styles.metricValue, style: S.metricValue },
+          h(
+            'svg',
+            {
+              width: 8,
+              height: 8,
+              viewBox: '0 0 8 8',
+              style: { flexShrink: 0, display: 'inline-block', verticalAlign: 'middle' },
+              className: `${styles.statusDot} ${coverage.proxied > 0 ? styles.statusDotActive : styles.statusDotIdle}`,
+              'aria-hidden': 'true',
+            },
+            h('circle', {
+              cx: 4,
+              cy: 4,
+              r: 3.5,
+              fill: coverage.proxied > 0 ? 'var(--dsw-alias-state-success-primary, #238636)' : 'var(--dsw-alias-state-idle-primary, #8c959f)',
+            }),
+          ),
           h('span', null, coverage.formatted),
         ),
         h(
           'div',
-          { className: styles.metricSub },
+          { className: styles.metricSub, style: S.metricSub },
           isZh
             ? (coverage.proxied === 0 ? '所有路由直连' : `已覆盖 ${coverage.proxied} 个服务`)
             : (coverage.proxied === 0 ? 'Direct connection' : `${coverage.proxied} proxied`),
@@ -4022,13 +4197,17 @@ function renderPage(ctx: any): unknown {
       ),
       h(
         'div',
-        { className: `${styles.metricCard} ${styles.metricCardSuccess}`, key: 'metric-success-rate' },
+        {
+          className: `${styles.metricCard} ${styles.metricCardSuccess}`,
+          style: S.metricCard,
+          key: 'metric-success-rate',
+        },
         h(
           'div',
-          { className: styles.metricHead },
+          { className: styles.metricHead, style: S.metricHead },
           h(
             'div',
-            { className: styles.metricHeadTitle },
+            { className: styles.metricHeadTitle, style: S.metricHeadTitle },
             h(
               'svg',
               {
@@ -4049,10 +4228,10 @@ function renderPage(ctx: any): unknown {
             h('span', null, t.metricSuccessRateTitle),
           ),
         ),
-        h('div', { className: styles.metricValue }, h('span', null, successRate.formatted)),
+        h('div', { className: styles.metricValue, style: S.metricValue }, h('span', null, successRate.formatted)),
         h(
           'div',
-          { className: styles.metricSub },
+          { className: styles.metricSub, style: S.metricSub },
           isZh
             ? (successRate.rate === 100 ? '链路状态健康' : '存在调用异常记录')
             : (successRate.rate === 100 ? 'All routes healthy' : 'Issues detected'),
@@ -4060,13 +4239,17 @@ function renderPage(ctx: any): unknown {
       ),
       h(
         'div',
-        { className: `${styles.metricCard} ${styles.metricCardLatency}`, key: 'metric-latency' },
+        {
+          className: `${styles.metricCard} ${styles.metricCardLatency}`,
+          style: S.metricCard,
+          key: 'metric-latency',
+        },
         h(
           'div',
-          { className: styles.metricHead },
+          { className: styles.metricHead, style: S.metricHead },
           h(
             'div',
-            { className: styles.metricHeadTitle },
+            { className: styles.metricHeadTitle, style: S.metricHeadTitle },
             h(
               'svg',
               {
@@ -4086,10 +4269,10 @@ function renderPage(ctx: any): unknown {
             h('span', null, t.metricLatencyTitle),
           ),
         ),
-        h('div', { className: styles.metricValue }, h('span', null, avgLatency.formatted)),
+        h('div', { className: styles.metricValue, style: S.metricValue }, h('span', null, avgLatency.formatted)),
         h(
           'div',
-          { className: styles.metricSub },
+          { className: styles.metricSub, style: S.metricSub },
           isZh
             ? (avgLatency.averageMs !== null ? (avgLatency.averageMs < 300 ? '连通响应迅速' : '代理延迟适中') : '等待连接测试')
             : (avgLatency.averageMs !== null ? (avgLatency.averageMs < 300 ? 'Fast response' : 'Moderate ping') : 'Awaiting test'),
@@ -4097,13 +4280,17 @@ function renderPage(ctx: any): unknown {
       ),
       h(
         'div',
-        { className: `${styles.metricCard} ${styles.metricCardHits}`, key: 'metric-hits' },
+        {
+          className: `${styles.metricCard} ${styles.metricCardHits}`,
+          style: S.metricCard,
+          key: 'metric-hits',
+        },
         h(
           'div',
-          { className: styles.metricHead },
+          { className: styles.metricHead, style: S.metricHead },
           h(
             'div',
-            { className: styles.metricHeadTitle },
+            { className: styles.metricHeadTitle, style: S.metricHeadTitle },
             h(
               'svg',
               {
@@ -4128,6 +4315,7 @@ function renderPage(ctx: any): unknown {
             'button',
             {
               className: styles.resetHitsButton,
+              style: S.resetHitsButton,
               type: 'button',
               onClick: resetHits,
               title: t.resetHitsHint,
@@ -4136,10 +4324,10 @@ function renderPage(ctx: any): unknown {
             t.resetHits,
           ),
         ),
-        h('div', { className: styles.metricValue }, h('span', null, totalHits.formatted)),
+        h('div', { className: styles.metricValue, style: S.metricValue }, h('span', null, totalHits.formatted)),
         h(
           'div',
-          { className: styles.metricSub },
+          { className: styles.metricSub, style: S.metricSub },
           isZh ? '会话累计代理请求' : 'Proxy requests count',
         ),
       ),

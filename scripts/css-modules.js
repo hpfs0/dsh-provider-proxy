@@ -33,12 +33,17 @@ export const cssModulesPlugin = {
         const hash = createHash('sha256').update(`${name} ${source}`).digest('hex').slice(0, 8)
         const local = `${hash}_${name}`
         hashed[name] = local
+        // CSS identifiers cannot start with a digit: [0-9]. If the hash starts with a
+        // digit, escape it in CSS as `\3<digit> <rest>` so browsers do not drop the rule.
+        const cssSelector = /^[0-9]/.test(local)
+          ? `\\3${local[0]} ${local.slice(1)}`
+          : local
         // Replace only the WHOLE class token. A plain `replaceAll('.name')`
         // also hits `.nameLonger`, which merged `.diag` / `.diagSummary` /
         // `.diagList` into one rule and left the longer two unstyled.
         out = out.replace(
           new RegExp(`\\.${name}(?![A-Za-z0-9_-])`, 'g'),
-          `.${local}`,
+          () => `.${cssSelector}`,
         )
       }
 
