@@ -916,6 +916,22 @@ export function apply(ctx: any, config?: ProxyConfig): void {
         },
       })
 
+      // Reset hits counter.
+      wctx?.webServer?.register?.({
+        kind: 'exact',
+        path: '/dsh-provider-proxy/reset-hits',
+        handler: (_req: any, res: any) => {
+          hits.clear()
+          const text = JSON.stringify({ ok: true })
+          res.writeHead(200, {
+            'content-type': 'application/json; charset=utf-8',
+            'cache-control': 'no-store',
+            'content-length': Buffer.byteLength(text),
+          })
+          res.end(text)
+        },
+      })
+
       // Connection self-check: one request through the provider's own dispatcher.
       // POST-only, the provider must be in the LIVE table, and at most one check
       // per provider is in flight — so this cannot become an outbound amplifier.
@@ -1189,3 +1205,11 @@ export {
   routesBoundTo,
   withEndpoint,
 } from './presets.js'
+
+export {
+  calculateCoverage,
+  calculateSuccessRate,
+  calculateAverageLatency,
+  calculateTotalHits,
+  formatNumber,
+} from './dashboard.js'

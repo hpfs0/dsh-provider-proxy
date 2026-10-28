@@ -1,3 +1,9 @@
+import {
+  calculateCoverage,
+  calculateSuccessRate,
+  calculateAverageLatency,
+  calculateTotalHits,
+} from './dashboard.js'
 /**
  * dsh-provider-proxy — browser half.
  *
@@ -3869,10 +3875,76 @@ function renderPage(ctx: any): unknown {
         return cardSection
       })
 
+  const isZh = t.protocol === '类型'
+  const coverage = calculateCoverage(rows, configured, problems, isZh)
+  const successRate = calculateSuccessRate(lastUse, isZh)
+  const avgLatency = calculateAverageLatency(tests)
+  const totalHits = calculateTotalHits(hits)
+
+  const resetHits = () => {
+    globalThis.fetch?.('/dsh-provider-proxy/reset-hits', { method: 'POST' }).catch(() => {})
+    setState((current: any) => ({ ...current, hits: {} }))
+  }
+
+  const dashboardBar = h(
+    'div',
+    {
+      className: styles.dashboardGrid,
+      key: 'dashboard-grid',
+      role: 'region',
+      'aria-label': t.dashboardAriaLabel,
+    },
+    h(
+      'div',
+      { className: styles.metricCard, key: 'metric-coverage' },
+      h('div', { className: styles.metricHead }, t.metricCoverageTitle),
+      h(
+        'div',
+        { className: styles.metricValue },
+        h('span', { className: styles.statusDot, 'aria-hidden': 'true' }),
+        h('span', null, coverage.formatted),
+      ),
+    ),
+    h(
+      'div',
+      { className: styles.metricCard, key: 'metric-success-rate' },
+      h('div', { className: styles.metricHead }, t.metricSuccessRateTitle),
+      h('div', { className: styles.metricValue }, h('span', null, successRate.formatted)),
+    ),
+    h(
+      'div',
+      { className: styles.metricCard, key: 'metric-latency' },
+      h('div', { className: styles.metricHead }, t.metricLatencyTitle),
+      h('div', { className: styles.metricValue }, h('span', null, avgLatency.formatted)),
+    ),
+    h(
+      'div',
+      { className: styles.metricCard, key: 'metric-hits' },
+      h(
+        'div',
+        { className: styles.metricHead },
+        h('span', null, t.metricHitsTitle),
+        h(
+          'button',
+          {
+            className: styles.resetHitsButton,
+            type: 'button',
+            onClick: resetHits,
+            title: t.resetHitsHint,
+            'aria-label': t.resetHitsHint,
+          },
+          t.resetHits,
+        ),
+      ),
+      h('div', { className: styles.metricValue }, h('span', null, totalHits.formatted)),
+    ),
+  )
+
   return h(
     'div',
     { className: styles.root, style: S.root },
     h('p', { className: styles.lead, style: { margin: '0 0 4px', fontSize: '12px', lineHeight: '1.6', color: 'var(--dsw-alias-label-secondary)' } }, t.lead),
+    dashboardBar,
     saveError === undefined
       ? null
       : h(
@@ -4025,6 +4097,13 @@ const EN = {
   enableFallbackDirectOffHint: 'Off (default): fail-closed. Errors immediately on proxy failure to prevent IP leaks.',
   fallbackSecurityWarning: '[Notice] When enabled, requests will automatically fallback to direct connection if the proxy is unreachable, which may expose your real IP address to the target service.',
   fallbackAlert: '[Warning: Proxy down, degraded to direct]',
+  dashboardAriaLabel: 'Runtime Dashboard',
+  metricCoverageTitle: 'Proxy Coverage',
+  metricSuccessRateTitle: 'Success Rate',
+  metricLatencyTitle: 'Average Latency',
+  metricHitsTitle: 'Total Requests',
+  resetHits: 'Reset',
+  resetHitsHint: 'Reset hit counts for all providers',
   advanced: 'Advanced: target host rules',
   onlyHosts: 'Proxy only',
   onlyHostsHint: 'Comma/space separated; when set, only requests to these hosts are proxied (suffix match, * for all).',
@@ -4171,6 +4250,13 @@ const ZH = {
   enableFallbackDirectOffHint: '关闭（默认）：严格阻断 (Fail-closed)，代理异常时直接报错，避免暴露真实出口 IP。',
   fallbackSecurityWarning: '[注意] 开启后，当代理不可达时将自动回退至本机直连网络，可能会向目标服务暴露你的真实出口 IP。',
   fallbackAlert: '[告警: 代理宕机，已降级直连]',
+  dashboardAriaLabel: '运行监控仪表盘',
+  metricCoverageTitle: '代理覆盖率',
+  metricSuccessRateTitle: '连通成功率',
+  metricLatencyTitle: '近期平均延迟',
+  metricHitsTitle: '累计转发请求量',
+  resetHits: '重置',
+  resetHitsHint: '重置所有 provider 的转发命中计数',
   advanced: '高级：目标域名规则',
   onlyHosts: '仅走代理',
   onlyHostsHint: '逗号或空格分隔；非空时只有匹配这些主机的请求走代理（后缀匹配，* 表示全部）。',
