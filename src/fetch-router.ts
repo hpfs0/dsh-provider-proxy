@@ -42,6 +42,40 @@ export interface DispatcherLike {
   close(): Promise<void>
 }
 
+export const kNativeFetch = Symbol.for('dsh-provider-proxy.native-fetch')
+
+export function isNetworkFailoverError(error: unknown): boolean {
+  if (error === null || typeof error !== 'object') return false
+  const chain: unknown[] = []
+  const seen = new Set<unknown>()
+  const queue: unknown[] = [error]
+  while (queue.length > 0) {
+    const node = queue.shift()
+    if (node === null || typeof node !== 'object' || seen.has(node)) continue
+    seen.add(node)
+    chain.push(node)
+    const cause = (node as { cause?: unknown }).cause
+    if (cause !== undefined && cause !== null) queue.push(cause)
+    const errors = (node as { errors?: unknown }).errors
+    if (Array.isArray(errors)) queue.push(...errors)
+  }
+  const codes = chain
+    .map(n => (n as { code?: unknown }).code)
+    .filter((c): c is string => typeof c === 'string')
+  const names = chain
+    .map(n => (n as { name?: unknown }).name)
+    .filter((name): name is string => typeof name === 'string')
+  const messages = chain
+    .map(n => (n as { message?: unknown }).message)
+    .filter((m): m is string => typeof m === 'string')
+
+  const failoverCodes = ['ECONNREFUSED', 'ETIMEDOUT', 'EHOSTUNREACH', 'ENETUNREACH', 'ECONNRESET']
+  if (codes.some(c => failoverCodes.includes(c))) return true
+  if (names.some(n => n === 'ConnectTimeoutError' || n === 'TimeoutError')) return true
+  if (messages.some(m => m.includes('ECONNREFUSED') || m.includes('ETIMEDOUT') || m.includes('ConnectTimeoutError'))) return true
+  return false
+}
+
 export interface RouterStore {
   dispatcher: DispatcherLike
   /** Called once per request that actually leaves through the proxy. */
@@ -62,13 +96,15 @@ export interface RouterStore {
    * unclassified so the caller can name the failure with whatever error
    * vocabulary it already has.
    */
-  onSettle?: (ok: boolean, detail: unknown) => void
+  onSettle?: (ok: boolean, detail: unknown, meta?: { fallback?: boolean }) => void
   /**
    * Decide whether one request is proxied or sent directly, given its target
    * host (`undefined` when the input carries no parsable URL). Absent means
    * "always proxy within this scope".
    */
   decide?: (host: string | undefined) => 'proxy' | 'direct'
+  enableFallbackDirect?: boolean
+  onFallback?: () => void
 }
 
 /** Shared across every plugin instance in one process, keyed so copies cooperate. */
@@ -115,6 +151,14 @@ function installSharedRouter(): RouterState {
 
   const storage = new AsyncLocalStorage<RouterStore>()
   const originalFetch = globalThis.fetch
+  if ((globalThis as Record<symbol, unknown>)[kNativeFetch] === undefined) {
+    Object.defineProperty(globalThis, kNativeFetch, {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value: originalFetch,
+    })
+  }
   const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'fetch')
 
   const routedFetch = function routedFetch(
@@ -139,25 +183,38 @@ function installSharedRouter(): RouterState {
     // Same undici realm as the dispatcher — Node's own fetch would reject it.
     // The init is passed through structurally: the DOM `RequestInit` and the
     // undici one disagree on `body`/`duplex`, so both are erased here.
+    const nativeFetch =
+      ((globalThis as Record<symbol, unknown>)[kNativeFetch] as typeof globalThis.fetch | undefined) ??
+      originalFetch
+
     const inFlight = undiciFetch(input as never, {
       ...(init as Record<string, unknown> | undefined),
       dispatcher: active.dispatcher as never,
     } as never) as unknown as Promise<{ status: number }>
+
+    let isFallback = false
+    const promise = inFlight.catch(async (error: unknown) => {
+      if (active.enableFallbackDirect && isNetworkFailoverError(error)) {
+        isFallback = true
+        active.onFallback?.()
+        return nativeFetch.call(globalThis, input, init)
+      }
+      throw error
+    })
+
     if (active.onSettle !== undefined) {
       const settle = active.onSettle
-      // Observe the reply without changing the caller's promise: the handlers
-      // hang off a DERIVED promise, both arms are handled here so nothing can
-      // surface as an unhandled rejection, and the original is returned as-is.
-      // This fires when `fetch` resolves — response HEADERS — not when the body
-      // ends; see `onSettle`.
-      void inFlight
+      void promise
         .then(
-          response => settle(response.status < 500, response),
-          (error: unknown) => settle(false, error),
+          (response: any) => {
+            const ok = typeof response?.status === 'number' ? response.status < 500 : true
+            settle(ok, response, { fallback: isFallback })
+          },
+          (error: unknown) => settle(false, error, { fallback: isFallback }),
         )
         .catch(() => undefined)
     }
-    return inFlight as never
+    return promise as never
   }
 
   Object.defineProperty(globalThis, 'fetch', {
@@ -258,6 +315,7 @@ export function acquireFetchRouter(): FetchRouter {
         else Object.defineProperty(globalThis, 'fetch', state.descriptor)
       }
       delete (globalThis as Record<symbol, unknown>)[STATE_KEY]
+      delete (globalThis as Record<symbol, unknown>)[kNativeFetch]
       state.storage.disable()
     },
   }

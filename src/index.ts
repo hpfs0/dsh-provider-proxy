@@ -56,6 +56,8 @@ interface ProxyConfig {
   readonly defaultProxy?: unknown
   /** Whether loopback/private targets stay direct, or the Volatile wrapper. */
   readonly localDirect?: unknown
+  /** Whether to fallback to direct connection when proxy is down. */
+  readonly enableFallbackDirect?: unknown
   /** The self-check URL, or the Volatile wrapper around it. */
   readonly testUrl?: unknown
 }
@@ -105,6 +107,14 @@ function plainLocalDirect(config: ProxyConfig | undefined): boolean {
   return value !== false
 }
 
+function plainEnableFallbackDirect(config: ProxyConfig | undefined): boolean {
+  const raw = config?.enableFallbackDirect
+  if (raw === undefined) return false
+  const snapshot = (raw as { get?: () => unknown }).get
+  const value = typeof snapshot === 'function' ? snapshot.call(raw) : raw
+  return value === true
+}
+
 export function apply(ctx: any, config?: ProxyConfig): void {
   const router = acquireFetchRouter()
   let current = new Map<string, RouteEntry>()
@@ -134,7 +144,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
    * request's start time with another's outcome, and a card could name a failure
    * that belongs to a call which in fact succeeded.
    */
-  const lastUse = new Map<string, { startedAt: number; at?: number; ok?: boolean; code?: string }>()
+  const lastUse = new Map<string, { startedAt: number; at?: number; ok?: boolean; code?: string; fallback?: boolean }>()
   const bump = (provider: string, token: number): void => {
     hits.set(provider, (hits.get(provider) ?? 0) + 1)
     if (routeStates.get(provider)?.token !== token) return
@@ -142,16 +152,26 @@ export function apply(ctx: any, config?: ProxyConfig): void {
     // settles, so an in-flight call cannot overwrite the last COMPLETED result.
     lastUse.set(provider, { ...lastUse.get(provider), startedAt: Date.now() })
   }
-  const settle = (provider: string, token: number) => (ok: boolean, detail: unknown): void => {
+  const settle = (provider: string, token: number) => (ok: boolean, detail: unknown, meta?: { fallback?: boolean }): void => {
     if (routeStates.get(provider)?.token !== token) return
     const previous = lastUse.get(provider)
-    lastUse.set(provider, {
-      startedAt: previous?.startedAt ?? Date.now(),
-      // `at` is the FINISH time, written together with the outcome it belongs to.
-      at: Date.now(),
-      ok,
-      code: ok ? String((detail as { status?: unknown } | undefined)?.status ?? '') : failureCodeOf(detail),
-    })
+    if (meta?.fallback && ok) {
+      lastUse.set(provider, {
+        startedAt: previous?.startedAt ?? Date.now(),
+        at: Date.now(),
+        ok: true,
+        code: '[告警: 代理宕机，已降级直连]',
+        fallback: true,
+      })
+    } else {
+      lastUse.set(provider, {
+        startedAt: previous?.startedAt ?? Date.now(),
+        at: Date.now(),
+        ok,
+        code: ok ? String((detail as { status?: unknown } | undefined)?.status ?? '') : failureCodeOf(detail),
+        ...(meta?.fallback ? { fallback: true } : {}),
+      })
+    }
   }
 
   /** Where the self-check sends its request; overridable so a blocked echo host can be replaced. */
@@ -1027,6 +1047,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
           onHit: () => bump(WEB_SEARCH_KEY, token),
           onSettle: settle(WEB_SEARCH_KEY, token),
           decide: route.decide,
+          enableFallbackDirect: plainEnableFallbackDirect(config),
         },
         () => original.call(this, request, signal),
       )
@@ -1066,6 +1087,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
             onHit: () => bump(provider, token),
             onSettle: settle(provider, token),
             decide: route.decide,
+            enableFallbackDirect: plainEnableFallbackDirect(config),
           },
           next as () => AsyncIterable<unknown>,
         )
@@ -1124,7 +1146,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
   })
 }
 
-export { acquireFetchRouter } from './fetch-router.js'
+export { acquireFetchRouter, kNativeFetch, isNetworkFailoverError } from './fetch-router.js'
 export {
   buildRouteEntry,
   createProxyTable,

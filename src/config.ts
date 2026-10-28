@@ -182,6 +182,11 @@ export const Config = z.object({
    */
   localDirect: vol(z.boolean().default(true)),
   /**
+   * Whether to automatically fallback to direct connection when the proxy is unreachable.
+   * Disabled by default (strict fail-closed).
+   */
+  enableFallbackDirect: vol(z.boolean().default(false)),
+  /**
    * URL the per-provider connection self-check requests THROUGH the proxy.
    * Volatile, so a settings write does not remount the plugin; the default is an
    * IP echo service, which lets the check report the exit address.
@@ -217,6 +222,7 @@ export interface ConfigShape {
   proxyProfiles: { readonly [profile: string]: DefaultProxyValue }
   defaultProxy: DefaultProxyValue
   localDirect: boolean
+  enableFallbackDirect: boolean
   testUrl: string
 }
 

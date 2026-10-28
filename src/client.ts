@@ -418,6 +418,7 @@ type LastUse = {
   at?: number
   ok?: boolean
   code?: string
+  fallback?: boolean
 }
 
 /** What the Host endpoint publishes: provider rows, hit counts, rejected routes. */
@@ -522,6 +523,7 @@ async function fetchCatalog(): Promise<Catalog> {
         ...(at === undefined ? {} : { at }),
         ...(typeof entry.ok === 'boolean' ? { ok: entry.ok } : {}),
         ...(typeof entry.code === 'string' && entry.code.length > 0 ? { code: entry.code } : {}),
+        ...(entry.fallback === true ? { fallback: true } : {}),
       }
     }
   }
@@ -1040,6 +1042,13 @@ const S = {
     fontWeight: '500',
     color: 'var(--dsw-alias-state-error-primary, #f85149)',
   },
+  fallbackWarning: {
+    margin: '0',
+    fontSize: '11px',
+    lineHeight: '1.5',
+    fontWeight: '500',
+    color: 'var(--dsw-alias-state-warning-primary, #d29922)',
+  },
   toggle: {
     display: 'flex',
     alignItems: 'center',
@@ -1349,6 +1358,9 @@ function renderPage(ctx: any): unknown {
   const lastUseText = (id: string): string | undefined => {
     const use = lastUse[id]
     if (use === undefined) return undefined
+    if (use.fallback === true || use.code === '[告警: 代理宕机，已降级直连]') {
+      return `${t.fallbackAlert}（${relativeTime(use.at ?? use.startedAt ?? Date.now(), t)}）`
+    }
     if (use.ok === true) return `${t.recentOk}${relativeTime(use.at ?? use.startedAt ?? Date.now(), t)}`
     if (use.ok === false) return `${t.recentFail}${use.code ?? 'ERROR'}`
     return `${t.recentStarted}${relativeTime(use.startedAt ?? use.at ?? Date.now(), t)}`
@@ -1780,7 +1792,7 @@ function renderPage(ctx: any): unknown {
   }
 
   /** One advanced global control: draft, invalidate every check, persist. */
-  const bindGlobal = (field: 'testUrl' | 'localDirect') => (value: unknown) => {
+  const bindGlobal = (field: 'testUrl' | 'localDirect' | 'enableFallbackDirect') => (value: unknown) => {
     editGlobal(field, value)
     invalidateTests(rows.map(row => row.id))
     save(`\u0000global\u0000${field}`, [field], field, value, () => {
@@ -2790,9 +2802,14 @@ function renderPage(ctx: any): unknown {
   })
 
   const storedLocalDirect = snapshot.value?.localDirect !== false
+  const storedEnableFallbackDirect = snapshot.value?.enableFallbackDirect === true
   const globalTestUrl = typeof globalDraft.testUrl === 'string' ? globalDraft.testUrl : storedTestUrl
   const globalLocalDirect =
     typeof globalDraft.localDirect === 'boolean' ? globalDraft.localDirect : storedLocalDirect
+  const globalEnableFallbackDirect =
+    typeof globalDraft.enableFallbackDirect === 'boolean'
+      ? globalDraft.enableFallbackDirect
+      : storedEnableFallbackDirect
   const globalTestUrlHint = testUrlHint(globalTestUrl, t)
 
   /**
@@ -2977,6 +2994,41 @@ function renderPage(ctx: any): unknown {
       { className: styles.hint, style: { ...S.hint, margin: '2px 0 0' } },
       globalLocalDirect ? t.localDirectOnHint : t.localDirectOffHint,
     ),
+    h(
+      'label',
+      { className: styles.toggle, style: { ...S.toggle, marginTop: '8px' } },
+      h('input', {
+        type: 'checkbox',
+        checked: globalEnableFallbackDirect,
+        onChange: (event: any) => bindGlobal('enableFallbackDirect')(event.target.checked === true),
+      }),
+      h('span', null, t.enableFallbackDirect),
+    ),
+    h(
+      'p',
+      { className: styles.hint, style: { ...S.hint, margin: '2px 0 0' } },
+      globalEnableFallbackDirect ? t.enableFallbackDirectOnHint : t.enableFallbackDirectOffHint,
+    ),
+    globalEnableFallbackDirect
+      ? h(
+          'div',
+          {
+            className: styles.securityWarningBox,
+            style: {
+              margin: '6px 0 0',
+              padding: '8px 12px',
+              borderRadius: '6px',
+              backgroundColor: 'var(--dsw-alias-state-warning-subtle, rgba(210, 153, 34, 0.12))',
+              border: '1px solid var(--dsw-alias-state-warning-border, rgba(210, 153, 34, 0.4))',
+              color: 'var(--dsw-alias-state-warning-primary, #d29922)',
+              fontSize: '12px',
+              lineHeight: '1.5',
+            },
+            role: 'alert',
+          },
+          t.fallbackSecurityWarning,
+        )
+      : null,
     ],
   })
 
@@ -3310,7 +3362,7 @@ function renderPage(ctx: any): unknown {
                     {
                       style: {
                         ...S.hits,
-                        ...(lastUse[row.id]?.ok === false ? S.inheritWarning : {}),
+                        ...(lastUse[row.id]?.fallback === true ? S.fallbackWarning : lastUse[row.id]?.ok === false ? S.inheritWarning : {}),
                       },
                     },
                     lastText,
@@ -3677,7 +3729,7 @@ function renderPage(ctx: any): unknown {
                   {
                     style: {
                       ...S.compactEndpoint,
-                      ...(lastUse[row.id]?.ok === false ? S.inheritWarning : {}),
+                      ...(lastUse[row.id]?.fallback === true ? S.fallbackWarning : lastUse[row.id]?.ok === false ? S.inheritWarning : {}),
                     },
                   },
                   lastText,
@@ -3968,6 +4020,11 @@ const EN = {
   localDirect: 'Loopback / private targets go direct',
   localDirectOnHint: 'On: localhost, 127.x and private ranges bypass the proxy.',
   localDirectOffHint: 'Off: loopback/private targets also use the proxy. Enable only when the proxy itself is the target.',
+  enableFallbackDirect: 'Auto-fallback to direct on proxy failure',
+  enableFallbackDirectOnHint: 'On: automatically falls back to direct connection if the proxy is unreachable.',
+  enableFallbackDirectOffHint: 'Off (default): fail-closed. Errors immediately on proxy failure to prevent IP leaks.',
+  fallbackSecurityWarning: '[Notice] When enabled, requests will automatically fallback to direct connection if the proxy is unreachable, which may expose your real IP address to the target service.',
+  fallbackAlert: '[Warning: Proxy down, degraded to direct]',
   advanced: 'Advanced: target host rules',
   onlyHosts: 'Proxy only',
   onlyHostsHint: 'Comma/space separated; when set, only requests to these hosts are proxied (suffix match, * for all).',
@@ -4109,6 +4166,11 @@ const ZH = {
   localDirect: '本机 / 内网目标直连',
   localDirectOnHint: '开启：localhost、127.x 与私有网段绕过代理。',
   localDirectOffHint: '关闭：本机 / 内网目标也走代理；仅在代理本身就是目标时使用。',
+  enableFallbackDirect: '故障容灾自动降级直连',
+  enableFallbackDirectOnHint: '开启：当代理网络中断或不可达时，自动回退至本机直连访问目标模型服务。',
+  enableFallbackDirectOffHint: '关闭（默认）：严格阻断 (Fail-closed)，代理异常时直接报错，避免暴露真实出口 IP。',
+  fallbackSecurityWarning: '[注意] 开启后，当代理不可达时将自动回退至本机直连网络，可能会向目标服务暴露你的真实出口 IP。',
+  fallbackAlert: '[告警: 代理宕机，已降级直连]',
   advanced: '高级：目标域名规则',
   onlyHosts: '仅走代理',
   onlyHostsHint: '逗号或空格分隔；非空时只有匹配这些主机的请求走代理（后缀匹配，* 表示全部）。',
