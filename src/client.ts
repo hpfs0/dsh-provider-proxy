@@ -439,6 +439,7 @@ type Catalog = {
   hits: Record<string, number>
   problems: Record<string, string>
   lastUse: Record<string, LastUse>
+  bypassAll?: boolean
   /**
    * The forward proxy the Host inherited from its environment, if any. The
    * Host already dropped the credentials; `hadCredentials` says the variable
@@ -552,7 +553,8 @@ async function fetchCatalog(): Promise<Catalog> {
       hadCredentials: candidate.hadCredentials === true,
     }
   })()
-  return { rows, publishedRows: rows, hits, problems, lastUse, environmentProxy }
+  const bypassAll = body?.bypassAll === true
+  return { rows, publishedRows: rows, hits, problems, lastUse, environmentProxy, bypassAll }
 }
 
 /**
@@ -1325,6 +1327,7 @@ function renderPage(ctx: any): unknown {
       problems: {} as Record<string, string>,
       lastUse: {} as Record<string, LastUse>,
       environmentProxy: null as DetectedProxy | null,
+      bypassAll: false as boolean,
       error: undefined as string | undefined,
       pending: true,
     }
@@ -1339,6 +1342,7 @@ function renderPage(ctx: any): unknown {
       problems: catalog.problems,
       lastUse: catalog.lastUse,
       environmentProxy: catalog.environmentProxy ?? null,
+      bypassAll: catalog.bypassAll === true,
       error: catalog.error,
       pending: false,
     })
@@ -1798,7 +1802,7 @@ function renderPage(ctx: any): unknown {
   }
 
   /** One advanced global control: draft, invalidate every check, persist. */
-  const bindGlobal = (field: 'testUrl' | 'localDirect' | 'enableFallbackDirect') => (value: unknown) => {
+  const bindGlobal = (field: 'testUrl' | 'localDirect' | 'enableFallbackDirect' | 'bypassAll') => (value: unknown) => {
     editGlobal(field, value)
     invalidateTests(rows.map(row => row.id))
     save(`\u0000global\u0000${field}`, [field], field, value, () => {
@@ -2809,6 +2813,11 @@ function renderPage(ctx: any): unknown {
 
   const storedLocalDirect = snapshot.value?.localDirect !== false
   const storedEnableFallbackDirect = snapshot.value?.enableFallbackDirect === true
+  const storedBypassAll = snapshot.value?.bypassAll === true || state.bypassAll === true
+  const globalBypassAll =
+    typeof globalDraft.bypassAll === 'boolean'
+      ? globalDraft.bypassAll
+      : storedBypassAll
   const globalTestUrl = typeof globalDraft.testUrl === 'string' ? globalDraft.testUrl : storedTestUrl
   const globalLocalDirect =
     typeof globalDraft.localDirect === 'boolean' ? globalDraft.localDirect : storedLocalDirect
@@ -3889,11 +3898,41 @@ function renderPage(ctx: any): unknown {
   const dashboardBar = h(
     'div',
     {
-      className: styles.dashboardGrid,
-      key: 'dashboard-grid',
+      key: 'dashboard-container',
       role: 'region',
       'aria-label': t.dashboardAriaLabel,
+      style: { display: 'flex', flexDirection: 'column', gap: '8px' },
     },
+    h(
+      'div',
+      { className: styles.dashboardHeaderRow },
+      h('span', { className: styles.dashboardTitle }, t.dashboardTitle),
+      h(
+        'label',
+        { className: styles.bypassToggle },
+        h('input', {
+          type: 'checkbox',
+          checked: globalBypassAll,
+          onChange: (event: any) => bindGlobal('bypassAll')(event.target.checked === true),
+        }),
+        h('span', null, t.bypassAllToggle),
+      ),
+    ),
+    globalBypassAll
+      ? h(
+          'div',
+          { className: styles.bypassAlertBanner, role: 'alert' },
+          h('strong', null, t.bypassAllBannerTitle),
+          ' ',
+          t.bypassAllBannerText,
+        )
+      : null,
+    h(
+      'div',
+      {
+        className: styles.dashboardGrid,
+        key: 'dashboard-grid',
+      },
     h(
       'div',
       { className: styles.metricCard, key: 'metric-coverage' },
@@ -3938,6 +3977,7 @@ function renderPage(ctx: any): unknown {
       ),
       h('div', { className: styles.metricValue }, h('span', null, totalHits.formatted)),
     ),
+  )
   )
 
   return h(
@@ -4104,6 +4144,11 @@ const EN = {
   metricHitsTitle: 'Total Requests',
   resetHits: 'Reset',
   resetHitsHint: 'Reset hit counts for all providers',
+  dashboardTitle: 'Runtime Health & Metrics',
+  bypassAllToggle: 'Emergency Bypass All',
+  bypassAllBannerTitle: '[Emergency Bypass Active]',
+  bypassAllBannerText: 'All traffic is routed directly upstream, individual settings preserved. Remember to disable when done.',
+  bypassedDirect: 'Bypassed Direct',
   advanced: 'Advanced: target host rules',
   onlyHosts: 'Proxy only',
   onlyHostsHint: 'Comma/space separated; when set, only requests to these hosts are proxied (suffix match, * for all).',
@@ -4257,6 +4302,11 @@ const ZH = {
   metricHitsTitle: '累计转发请求量',
   resetHits: '重置',
   resetHitsHint: '重置所有 provider 的转发命中计数',
+  dashboardTitle: '运行监控与健康态势',
+  bypassAllToggle: '全局紧急旁路 (Bypass All)',
+  bypassAllBannerTitle: '[紧急旁路激活中]',
+  bypassAllBannerText: '所有模型流量已全量绕过代理直连上游，单项配置仍完整保持。调试完毕后请及时关闭。',
+  bypassedDirect: '旁路直连中',
   advanced: '高级：目标域名规则',
   onlyHosts: '仅走代理',
   onlyHostsHint: '逗号或空格分隔；非空时只有匹配这些主机的请求走代理（后缀匹配，* 表示全部）。',

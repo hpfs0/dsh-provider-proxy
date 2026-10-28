@@ -105,6 +105,7 @@ export interface RouterStore {
   decide?: (host: string | undefined) => 'proxy' | 'direct'
   enableFallbackDirect?: boolean
   onFallback?: () => void
+  bypassAll?: boolean
 }
 
 /** Shared across every plugin instance in one process, keyed so copies cooperate. */
@@ -172,6 +173,11 @@ function installSharedRouter(): RouterState {
     if (init !== undefined && init !== null && (init as { dispatcher?: unknown }).dispatcher !== undefined) {
       return originalFetch.call(globalThis, input, init)
     }
+    // Global emergency bypass all: short-circuit directly to native fetch.
+    if (active.bypassAll === true) {
+      return originalFetch.call(globalThis, input, init)
+    }
+
     // A `direct` verdict from the route's target-host rules keeps the native
     // path, exactly as if there were no scope at all.
     if (active.decide !== undefined && active.decide(requestHost(input)) === 'direct') {

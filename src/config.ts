@@ -187,6 +187,11 @@ export const Config = z.object({
    */
   enableFallbackDirect: vol(z.boolean().default(false)),
   /**
+   * Emergency global bypass mode. When true, all requests bypass proxies and go direct.
+   * Individual route configurations are completely preserved.
+   */
+  bypassAll: vol(z.boolean().default(false)),
+  /**
    * URL the per-provider connection self-check requests THROUGH the proxy.
    * Volatile, so a settings write does not remount the plugin; the default is an
    * IP echo service, which lets the check report the exit address.
@@ -223,6 +228,7 @@ export interface ConfigShape {
   defaultProxy: DefaultProxyValue
   localDirect: boolean
   enableFallbackDirect: boolean
+  bypassAll: boolean
   testUrl: string
 }
 

@@ -53,6 +53,7 @@ export interface RouteFingerprintInput {
   onlyHosts?: string
   bypassHosts?: string
   localDirect?: boolean
+  bypassAll?: boolean
 }
 
 /** Stable, non-secret representation of the rule set in one route. */
@@ -209,10 +210,12 @@ function isLocalHost(host: string): boolean {
  * A target whose host cannot be parsed (`undefined`) stays on the proxy, so a
  * malformed URL cannot quietly leak a credentialed request.
  */
-function buildDecide(
+export function buildDecide(
   route: ProviderProxyRouteValue,
   localDirect: boolean,
+  bypassAll: boolean = false,
 ): (host: string | undefined) => 'proxy' | 'direct' {
+  if (bypassAll) return () => 'direct'
   const only = parseHostList(route.onlyHosts)
   const bypass = parseHostList(route.bypassHosts)
   return host => {
@@ -246,6 +249,7 @@ export interface RouteBuildOptions {
   requireEnabled: boolean
   /** Whether loopback/private targets are sent direct; see {@link buildDecide}. */
   localDirect: boolean
+  bypassAll?: boolean
 }
 
 /**
@@ -370,7 +374,7 @@ export function buildRouteEntry(
       provider,
       proxyOrigin: displayOrigin(route, url),
       dispatcher,
-      decide: buildDecide(route, options.localDirect),
+      decide: buildDecide(route, options.localDirect, options.bypassAll === true),
       testTarget: route.testTarget,
     },
   }
@@ -387,6 +391,7 @@ export interface ProxyTableOptions {
    * proxy. Defaults to true; `undefined`/absent means "on".
    */
   localDirect?: boolean
+  bypassAll?: boolean
 }
 
 /**
@@ -412,6 +417,7 @@ export function createProxyTable(
     profiles: options.profiles,
     requireEnabled: true,
     localDirect: options.localDirect !== false,
+    bypassAll: options.bypassAll === true,
   }
 
   for (const [provider, raw] of Object.entries(config ?? {})) {

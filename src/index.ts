@@ -58,6 +58,7 @@ interface ProxyConfig {
   readonly localDirect?: unknown
   /** Whether to fallback to direct connection when proxy is down. */
   readonly enableFallbackDirect?: unknown
+  readonly bypassAll?: unknown
   /** The self-check URL, or the Volatile wrapper around it. */
   readonly testUrl?: unknown
 }
@@ -105,6 +106,14 @@ function plainLocalDirect(config: ProxyConfig | undefined): boolean {
   const snapshot = (raw as { get?: () => unknown }).get
   const value = typeof snapshot === 'function' ? snapshot.call(raw) : raw
   return value !== false
+}
+
+function plainBypassAll(config: ProxyConfig | undefined): boolean {
+  const raw = config?.bypassAll
+  if (raw === undefined) return false
+  const snapshot = (raw as { get?: () => unknown }).get
+  const value = typeof snapshot === 'function' ? snapshot.call(raw) : raw
+  return value === true
 }
 
 function plainEnableFallbackDirect(config: ProxyConfig | undefined): boolean {
@@ -671,6 +680,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
       profiles: plainProfiles(config),
       requireEnabled: false,
       localDirect: plainLocalDirect(config),
+      bypassAll: plainBypassAll(config),
     }
     /**
      * Whether the table's route belongs to an OLDER configuration.
@@ -897,6 +907,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
             const text = JSON.stringify({
               ...catalog(),
               environment: { proxy: environmentProxyOf() ?? null },
+              bypassAll: plainBypassAll(config),
               problems: Object.fromEntries(
                 [...problems].map(([id, message]) => [id, bareMessage(message)]),
               ),
@@ -1064,6 +1075,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
           onSettle: settle(WEB_SEARCH_KEY, token),
           decide: route.decide,
           enableFallbackDirect: plainEnableFallbackDirect(config),
+          bypassAll: plainBypassAll(config),
         },
         () => original.call(this, request, signal),
       )
@@ -1104,6 +1116,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
             onSettle: settle(provider, token),
             decide: route.decide,
             enableFallbackDirect: plainEnableFallbackDirect(config),
+            bypassAll: plainBypassAll(config),
           },
           next as () => AsyncIterable<unknown>,
         )
@@ -1136,6 +1149,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
         provider: entry.provider,
         proxyOrigin: entry.proxyOrigin,
       })),
+      bypassAll: plainBypassAll(config),
       problems: Object.fromEntries(problems),
       hits: Object.fromEntries(hits),
       lastUse: Object.fromEntries(lastUse),
@@ -1164,6 +1178,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
 
 export { acquireFetchRouter, kNativeFetch, isNetworkFailoverError } from './fetch-router.js'
 export {
+  buildDecide,
   buildRouteEntry,
   createProxyTable,
   closeTable,
