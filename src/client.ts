@@ -3912,15 +3912,23 @@ function renderPage(ctx: any): unknown {
       key: 'dashboard-container',
       role: 'region',
       'aria-label': t.dashboardAriaLabel,
-      style: { display: 'flex', flexDirection: 'column', gap: '8px' },
+      className: styles.dashboardContainer,
     },
     h(
       'div',
       { className: styles.dashboardHeaderRow },
-      h('span', { className: styles.dashboardTitle }, t.dashboardTitle),
+      h(
+        'div',
+        { className: styles.dashboardTitleWrap },
+        h('span', {
+          className: globalBypassAll ? styles.dashboardPulseDotWarning : styles.dashboardPulseDot,
+          'aria-hidden': 'true',
+        }),
+        h('span', { className: styles.dashboardTitle }, t.dashboardTitle),
+      ),
       h(
         'label',
-        { className: styles.bypassToggle },
+        { className: `${styles.bypassToggle}${globalBypassAll ? ` ${styles.bypassToggleActive}` : ''}` },
         h('input', {
           type: 'checkbox',
           role: 'switch',
@@ -3936,9 +3944,25 @@ function renderPage(ctx: any): unknown {
       ? h(
           'div',
           { className: styles.bypassAlertBanner, role: 'alert' },
-          h('strong', null, t.bypassAllBannerTitle),
-          ' ',
-          t.bypassAllBannerText,
+          h(
+            'svg',
+            {
+              width: 16,
+              height: 16,
+              viewBox: '0 0 24 24',
+              fill: 'none',
+              stroke: 'currentColor',
+              strokeWidth: 2,
+              strokeLinecap: 'round',
+              strokeLinejoin: 'round',
+              style: { flexShrink: 0 },
+              'aria-hidden': 'true',
+            },
+            h('path', { d: 'm21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z' }),
+            h('line', { x1: 12, y1: 9, x2: 12, y2: 13 }),
+            h('line', { x1: 12, y1: 17, x2: 12.01, y2: 17 }),
+          ),
+          h('div', null, h('strong', null, t.bypassAllBannerTitle), ' ', t.bypassAllBannerText),
         )
       : null,
     h(
@@ -3947,51 +3971,179 @@ function renderPage(ctx: any): unknown {
         className: styles.dashboardGrid,
         key: 'dashboard-grid',
       },
-    h(
-      'div',
-      { className: styles.metricCard, key: 'metric-coverage' },
-      h('div', { className: styles.metricHead }, t.metricCoverageTitle),
       h(
         'div',
-        { className: styles.metricValue },
-        h('span', { className: styles.statusDot, 'aria-hidden': 'true' }),
-        h('span', null, coverage.formatted),
-      ),
-    ),
-    h(
-      'div',
-      { className: styles.metricCard, key: 'metric-success-rate' },
-      h('div', { className: styles.metricHead }, t.metricSuccessRateTitle),
-      h('div', { className: styles.metricValue }, h('span', null, successRate.formatted)),
-    ),
-    h(
-      'div',
-      { className: styles.metricCard, key: 'metric-latency' },
-      h('div', { className: styles.metricHead }, t.metricLatencyTitle),
-      h('div', { className: styles.metricValue }, h('span', null, avgLatency.formatted)),
-    ),
-    h(
-      'div',
-      { className: styles.metricCard, key: 'metric-hits' },
-      h(
-        'div',
-        { className: styles.metricHead },
-        h('span', null, t.metricHitsTitle),
+        { className: `${styles.metricCard} ${styles.metricCardCoverage}`, key: 'metric-coverage' },
         h(
-          'button',
-          {
-            className: styles.resetHitsButton,
-            type: 'button',
-            onClick: resetHits,
-            title: t.resetHitsHint,
-            'aria-label': t.resetHitsHint,
-          },
-          t.resetHits,
+          'div',
+          { className: styles.metricHead },
+          h(
+            'div',
+            { className: styles.metricHeadTitle },
+            h(
+              'svg',
+              {
+                width: 13,
+                height: 13,
+                viewBox: '0 0 24 24',
+                fill: 'none',
+                stroke: 'currentColor',
+                strokeWidth: 2,
+                strokeLinecap: 'round',
+                strokeLinejoin: 'round',
+                style: { opacity: 0.75, flexShrink: 0 },
+                'aria-hidden': 'true',
+              },
+              h('circle', { cx: 6, cy: 6, r: 3 }),
+              h('circle', { cx: 6, cy: 18, r: 3 }),
+              h('line', { x1: 9, y1: 6, x2: 21, y2: 6 }),
+              h('line', { x1: 9, y1: 18, x2: 21, y2: 18 }),
+              h('line', { x1: 6, y1: 9, x2: 6, y2: 15 }),
+            ),
+            h('span', null, t.metricCoverageTitle),
+          ),
+        ),
+        h(
+          'div',
+          { className: styles.metricValue },
+          h('span', {
+            className: `${styles.statusDot} ${coverage.proxied > 0 ? styles.statusDotActive : styles.statusDotIdle}`,
+            'aria-hidden': 'true',
+          }),
+          h('span', null, coverage.formatted),
+        ),
+        h(
+          'div',
+          { className: styles.metricSub },
+          isZh
+            ? (coverage.proxied === 0 ? '所有路由直连' : `已覆盖 ${coverage.proxied} 个服务`)
+            : (coverage.proxied === 0 ? 'Direct connection' : `${coverage.proxied} proxied`),
         ),
       ),
-      h('div', { className: styles.metricValue }, h('span', null, totalHits.formatted)),
+      h(
+        'div',
+        { className: `${styles.metricCard} ${styles.metricCardSuccess}`, key: 'metric-success-rate' },
+        h(
+          'div',
+          { className: styles.metricHead },
+          h(
+            'div',
+            { className: styles.metricHeadTitle },
+            h(
+              'svg',
+              {
+                width: 13,
+                height: 13,
+                viewBox: '0 0 24 24',
+                fill: 'none',
+                stroke: 'currentColor',
+                strokeWidth: 2,
+                strokeLinecap: 'round',
+                strokeLinejoin: 'round',
+                style: { opacity: 0.75, flexShrink: 0 },
+                'aria-hidden': 'true',
+              },
+              h('path', { d: 'M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z' }),
+              h('path', { d: 'm9 12 2 2 4-4' }),
+            ),
+            h('span', null, t.metricSuccessRateTitle),
+          ),
+        ),
+        h('div', { className: styles.metricValue }, h('span', null, successRate.formatted)),
+        h(
+          'div',
+          { className: styles.metricSub },
+          isZh
+            ? (successRate.rate === 100 ? '链路状态健康' : '存在调用异常记录')
+            : (successRate.rate === 100 ? 'All routes healthy' : 'Issues detected'),
+        ),
+      ),
+      h(
+        'div',
+        { className: `${styles.metricCard} ${styles.metricCardLatency}`, key: 'metric-latency' },
+        h(
+          'div',
+          { className: styles.metricHead },
+          h(
+            'div',
+            { className: styles.metricHeadTitle },
+            h(
+              'svg',
+              {
+                width: 13,
+                height: 13,
+                viewBox: '0 0 24 24',
+                fill: 'none',
+                stroke: 'currentColor',
+                strokeWidth: 2,
+                strokeLinecap: 'round',
+                strokeLinejoin: 'round',
+                style: { opacity: 0.75, flexShrink: 0 },
+                'aria-hidden': 'true',
+              },
+              h('polygon', { points: '13 2 3 14 12 14 11 22 21 10 12 10 13 2' }),
+            ),
+            h('span', null, t.metricLatencyTitle),
+          ),
+        ),
+        h('div', { className: styles.metricValue }, h('span', null, avgLatency.formatted)),
+        h(
+          'div',
+          { className: styles.metricSub },
+          isZh
+            ? (avgLatency.averageMs !== null ? (avgLatency.averageMs < 300 ? '连通响应迅速' : '代理延迟适中') : '等待连接测试')
+            : (avgLatency.averageMs !== null ? (avgLatency.averageMs < 300 ? 'Fast response' : 'Moderate ping') : 'Awaiting test'),
+        ),
+      ),
+      h(
+        'div',
+        { className: `${styles.metricCard} ${styles.metricCardHits}`, key: 'metric-hits' },
+        h(
+          'div',
+          { className: styles.metricHead },
+          h(
+            'div',
+            { className: styles.metricHeadTitle },
+            h(
+              'svg',
+              {
+                width: 13,
+                height: 13,
+                viewBox: '0 0 24 24',
+                fill: 'none',
+                stroke: 'currentColor',
+                strokeWidth: 2,
+                strokeLinecap: 'round',
+                strokeLinejoin: 'round',
+                style: { opacity: 0.75, flexShrink: 0 },
+                'aria-hidden': 'true',
+              },
+              h('line', { x1: 18, y1: 20, x2: 18, y2: 10 }),
+              h('line', { x1: 12, y1: 20, x2: 12, y2: 4 }),
+              h('line', { x1: 6, y1: 20, x2: 6, y2: 14 }),
+            ),
+            h('span', null, t.metricHitsTitle),
+          ),
+          h(
+            'button',
+            {
+              className: styles.resetHitsButton,
+              type: 'button',
+              onClick: resetHits,
+              title: t.resetHitsHint,
+              'aria-label': t.resetHitsHint,
+            },
+            t.resetHits,
+          ),
+        ),
+        h('div', { className: styles.metricValue }, h('span', null, totalHits.formatted)),
+        h(
+          'div',
+          { className: styles.metricSub },
+          isZh ? '会话累计代理请求' : 'Proxy requests count',
+        ),
+      ),
     ),
-  )
   )
 
   return h(
