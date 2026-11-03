@@ -1186,7 +1186,7 @@ export {
   routeFingerprint,
   routeStateDecision,
 } from './proxy-table.js'
-export { Config, ProviderProxyRoute, normalizeRoute, normalizeDefaultProxy, PROTOCOLS } from './config.js'
+export { Config, ProviderProxyRoute, DefaultProxy, normalizeRoute, normalizeDefaultProxy, PROTOCOLS } from './config.js'
 export { defaultProxyProblem, proxyHostProblem } from './proxy-address.js'
 export { PROXY_CLIENT_PRESETS, proxyClientPreset } from './proxy-clients.js'
 export { detectProxyEnv, parseProxyEnvValue } from './proxy-env.js'

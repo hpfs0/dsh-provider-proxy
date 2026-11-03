@@ -40,6 +40,8 @@ const SOURCE = {
       port: 7891,
       username: 'bob',
       password: 's3cret',
+      proxyTls: false,
+      proxyTlsRejectUnauthorized: true,
     },
   },
   defaultProxy: { protocol: 'http', host: '127.0.0.1', port: 7890, password: 'defaultpass' },
@@ -120,6 +122,8 @@ test('N17: missing optional fields are filled with schema defaults', () => {
     port: 0,
     username: '',
     password: '',
+    proxyTls: false,
+    proxyTlsRejectUnauthorized: true,
   })
 })
 
@@ -229,6 +233,8 @@ test('N17: the backup defaults agree with the settings schema', () => {
     port: 0,
     username: '',
     password: '',
+    proxyTls: false,
+    proxyTlsRejectUnauthorized: true,
   })
   // The Host normalizes (trims) what the schema fills in; the backup copy must
   // reach the same value, or a restored file would differ from a saved one.
@@ -238,6 +244,8 @@ test('N17: the backup defaults agree with the settings schema', () => {
     port: 0,
     username: 'bob',
     password: '',
+    proxyTls: false,
+    proxyTlsRejectUnauthorized: true,
   })
 
   const document = buildBackup(
@@ -250,6 +258,8 @@ test('N17: the backup defaults agree with the settings schema', () => {
     port: 0,
     username: '',
     password: '',
+    proxyTls: false,
+    proxyTlsRejectUnauthorized: true,
   })
   assert.equal(document.defaultProxy.username, 'x', 'the same trim the schema applies')
 })

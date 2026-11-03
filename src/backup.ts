@@ -41,6 +41,8 @@ function normalizeEndpoint(raw: Partial<DefaultProxyValue> | undefined): Default
     port: typeof value.port === 'number' && Number.isFinite(value.port) ? value.port : 0,
     username: typeof value.username === 'string' ? value.username.trim() : '',
     password: typeof value.password === 'string' ? value.password : '',
+    proxyTls: value.proxyTls === true,
+    proxyTlsRejectUnauthorized: value.proxyTlsRejectUnauthorized !== false,
   }
 }
 
@@ -87,6 +89,8 @@ function fillRoute(raw: Partial<ProviderProxyRouteValue> | undefined): ProviderP
     port: typeof value.port === 'number' && Number.isFinite(value.port) ? value.port : 0,
     username: typeof value.username === 'string' ? value.username.trim() : '',
     password: typeof value.password === 'string' ? value.password : '',
+    proxyTls: value.proxyTls === true,
+    proxyTlsRejectUnauthorized: value.proxyTlsRejectUnauthorized !== false,
     onlyHosts: typeof value.onlyHosts === 'string' ? value.onlyHosts : '',
     bypassHosts: typeof value.bypassHosts === 'string' ? value.bypassHosts : '',
     testTarget: typeof value.testTarget === 'string' ? value.testTarget : '',
@@ -214,6 +218,15 @@ export function parseBackup(text: string): BackupParseResult {
     ) {
       return `${label}.port 必须是数字`
     }
+    if (value.proxyTls !== undefined && typeof value.proxyTls !== 'boolean') {
+      return `${label}.proxyTls 必须是布尔值`
+    }
+    if (
+      value.proxyTlsRejectUnauthorized !== undefined &&
+      typeof value.proxyTlsRejectUnauthorized !== 'boolean'
+    ) {
+      return `${label}.proxyTlsRejectUnauthorized 必须是布尔值`
+    }
     return undefined
   }
 
@@ -266,7 +279,7 @@ export function parseBackup(text: string): BackupParseResult {
 }
 
 /**
- * The settings writes that apply a document.
+ * Apply the operations that replace the running settings with `document`.
  *
  * Dictionaries are written WHOLE rather than per key: a restore must also
  * REMOVE entries the backup does not contain, and one `op: set` per key can only

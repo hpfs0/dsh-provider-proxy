@@ -50,6 +50,8 @@ export interface RouteFingerprintInput {
   port?: number
   username?: string
   password?: string
+  proxyTls?: boolean
+  proxyTlsRejectUnauthorized?: boolean
   onlyHosts?: string
   bypassHosts?: string
   localDirect?: boolean
@@ -80,6 +82,8 @@ export function routeFingerprint(input: RouteFingerprintInput): string {
     input.port ?? 0,
     String(input.username ?? '').trim(),
     input.password ?? '',
+    input.proxyTls === true,
+    input.proxyTlsRejectUnauthorized !== false,
     normalizedRuleSet(input.onlyHosts),
     normalizedRuleSet(input.bypassHosts),
     input.localDirect !== false,
@@ -145,8 +149,9 @@ function proxyUrl(route: ProviderProxyRouteValue): string {
  */
 function displayOrigin(route: ProviderProxyRouteValue, url: string): string {
   if (route.protocol !== 'socks5') return new URL(url).origin
+  const scheme = route.proxyTls === true ? 'socks5s' : 'socks5'
   const host = route.host.includes(':') && !route.host.startsWith('[') ? `[${route.host}]` : route.host
-  return `${route.protocol}://${host}:${route.port}`
+  return `${scheme}://${host}:${route.port}`
 }
 
 /**
@@ -167,7 +172,13 @@ function createDispatcher(
     const auth: { username?: string; password?: string } = {}
     if (route.username.length > 0) auth.username = route.username
     if (password.length > 0) auth.password = password
-    return new Socks5ProxyAgent(url, auth) as unknown as DispatcherLike
+    const options: any = { ...auth }
+    if (route.proxyTls === true) {
+      options.proxyTls = {
+        rejectUnauthorized: route.proxyTlsRejectUnauthorized !== false,
+      }
+    }
+    return new Socks5ProxyAgent(url, options) as unknown as DispatcherLike
   }
   return new ProxyAgent({ uri: url }) as unknown as DispatcherLike
 }

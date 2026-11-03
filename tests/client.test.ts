@@ -5198,7 +5198,17 @@ test('N14: adding a preset writes the whole preset dictionary', async () => {
       {
         op: 'set',
         path: ['proxyProfiles'],
-        value: { 'HK-Proxy': { protocol: 'http', host: '', port: 0, username: '', password: '' } },
+        value: {
+          'HK-Proxy': {
+            protocol: 'http',
+            host: '',
+            port: 0,
+            username: '',
+            password: '',
+            proxyTls: false,
+            proxyTlsRejectUnauthorized: true,
+          },
+        },
       },
     ])
     assert.ok(
@@ -5391,7 +5401,17 @@ test('N14: renaming a preset moves the key and rebinds every route using it', as
       {
         op: 'set',
         path: ['proxyProfiles'],
-        value: { 'HK-Fast': { protocol: 'http', host: '127.0.0.1', port: 7891, username: '', password: '' } },
+        value: {
+          'HK-Fast': {
+            protocol: 'http',
+            host: '127.0.0.1',
+            port: 7891,
+            username: '',
+            password: '',
+            proxyTls: false,
+            proxyTlsRejectUnauthorized: true,
+          },
+        },
       },
       { op: 'set', path: ['providers', 'sensenova', 'profileId'], value: 'HK-Fast' },
     ])
@@ -6172,3 +6192,116 @@ test('Dashboard proxy coverage dynamically reflects draft enabled toggles withou
   }
 })
 
+
+test('a pasted socks5s:// or socks5+tls:// URL lands on socks5 with proxyTls: true', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const { registrations, writes } = mountPlugin(mod)
+    await settle()
+    const card = cardFor(registrations[0].Component(), 'sensenova')
+    paste(findInputsByPlaceholder(card, '127.0.0.1')[0], 'socks5s://secproxy.test:1088')
+    await writeSettle()
+    const byField = Object.fromEntries(writes[0].ops.map(op => [op.path[2], op.value]))
+    assert.equal(byField.protocol, 'socks5')
+    assert.equal(byField.host, 'secproxy.test')
+    assert.equal(byField.port, 1088)
+    assert.equal(byField.proxyTls, true)
+
+    // Test socks5+tls
+    writes.length = 0
+    paste(findInputsByPlaceholder(card, '127.0.0.1')[0], 'socks5+tls://secproxy2.test:1089')
+    await writeSettle()
+    const byField2 = Object.fromEntries(writes[0].ops.map(op => [op.path[2], op.value]))
+    assert.equal(byField2.protocol, 'socks5')
+    assert.equal(byField2.host, 'secproxy2.test')
+    assert.equal(byField2.port, 1089)
+    assert.equal(byField2.proxyTls, true)
+  } finally {
+    restore()
+  }
+})
+
+test('N22: SOCKS5 route displays TLS switch and allows toggling self-signed certs', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const { registrations } = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: {
+            enabled: true,
+            protocol: 'socks5',
+            host: '127.0.0.1',
+            port: 1080,
+            proxyTls: true,
+            proxyTlsRejectUnauthorized: false,
+          },
+        },
+      },
+    })
+    await settle()
+    const root = registrations[0].Component()
+    const card = cardFor(root, 'sensenova')
+    const checkboxes = findCheckboxes(card)
+    const tlsSwitch = checkboxes.find(b => b.props['aria-label'] === '启用 TLS 加密隧道 (SOCKS5 over TLS)')
+    assert.ok(tlsSwitch, 'TLS switch is present on socks5 card')
+    assert.equal(tlsSwitch.props.checked, true)
+
+    const insecureSwitch = checkboxes.find(b => b.props['aria-label'] === '允许自签名证书（跳过证书验证）')
+    assert.ok(insecureSwitch, 'Insecure cert switch is present when proxyTls is true')
+    assert.equal(insecureSwitch.props.checked, true)
+  } finally {
+    restore()
+  }
+})
+
+test('N22: preset with SOCKS5 protocol displays TLS switch, allows toggling TLS and pasting socks5s URL', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {},
+        proxyProfiles: {
+          'Socks-Preset': {
+            protocol: 'socks5',
+            host: '10.0.0.1',
+            port: 1080,
+            proxyTls: false,
+            proxyTlsRejectUnauthorized: true,
+          },
+        },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const manager = profileManagerOf(render())
+    const checkboxes = findCheckboxes(manager)
+    const tlsSwitch = checkboxes.find(b => b.props['aria-label'] === '启用 TLS 加密隧道 (SOCKS5 over TLS)')
+    assert.ok(tlsSwitch, 'TLS switch is present on socks5 preset row')
+    assert.equal(tlsSwitch.props.checked, false)
+
+    // Toggle TLS on
+    tlsSwitch.props.onChange({ target: { checked: true } })
+    await writeSettle()
+    assert.ok(
+      harness.writes.some(w =>
+        w.ops.some(op => op.path[0] === 'proxyProfiles' && op.path[1] === 'Socks-Preset' && op.path[2] === 'proxyTls' && op.value === true)
+      ),
+      'toggling TLS writes to proxyProfiles.Socks-Preset.proxyTls'
+    )
+
+    // Insecure cert switch appears when proxyTls is true
+    const updatedCheckboxes = findCheckboxes(profileManagerOf(render()))
+    const insecureSwitch = updatedCheckboxes.find(b => b.props['aria-label'] === '允许自签名证书（跳过证书验证）')
+    assert.ok(insecureSwitch, 'insecure cert switch appears on preset when TLS enabled')
+    insecureSwitch.props.onChange({ target: { checked: true } })
+    await writeSettle()
+    assert.ok(
+      harness.writes.some(w =>
+        w.ops.some(op => op.path[0] === 'proxyProfiles' && op.path[1] === 'Socks-Preset' && op.path[2] === 'proxyTlsRejectUnauthorized' && op.value === false)
+      ),
+      'toggling insecure cert switch writes proxyTlsRejectUnauthorized: false'
+    )
+  } finally {
+    restore()
+  }
+})

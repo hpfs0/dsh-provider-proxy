@@ -135,6 +135,8 @@ export function withEndpoint(
     port: endpoint.port ?? 0,
     username: endpoint.username ?? '',
     password: endpoint.password ?? '',
+    proxyTls: endpoint.proxyTls ?? false,
+    proxyTlsRejectUnauthorized: endpoint.proxyTlsRejectUnauthorized !== false,
   }
 }
 
@@ -178,9 +180,10 @@ export function routesBoundTo(
 /** A short, credential-free endpoint summary, e.g. `http://127.0.0.1:7890`. */
 export function endpointSummary(endpoint: Partial<DefaultProxyValue> | undefined): string {
   const protocol = endpoint?.protocol ?? 'http'
+  const scheme = protocol === 'socks5' && endpoint?.proxyTls === true ? 'socks5s' : protocol
   const host = (endpoint?.host ?? '').trim() || '—'
   const port = endpoint?.port ?? 0
-  return `${protocol}://${host}:${port === 0 ? '—' : port}`
+  return `${scheme}://${host}:${port === 0 ? '—' : port}`
 }
 
 /**

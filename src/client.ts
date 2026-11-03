@@ -55,6 +55,8 @@ type RouteValue = {
   port: number
   username: string
   password: string
+  proxyTls: boolean
+  proxyTlsRejectUnauthorized: boolean
   onlyHosts: string
   bypassHosts: string
   testTarget: string
@@ -67,6 +69,8 @@ type ProfileValue = {
   port: number
   username: string
   password: string
+  proxyTls: boolean
+  proxyTlsRejectUnauthorized: boolean
 }
 
 /** The provider rows we know about, and which of them are actually live. */
@@ -604,6 +608,8 @@ function view(route: Partial<RouteValue> | undefined): RouteValue {
     port: route?.port ?? 0,
     username: route?.username ?? '',
     password: route?.password ?? '',
+    proxyTls: route?.proxyTls === true,
+    proxyTlsRejectUnauthorized: route?.proxyTlsRejectUnauthorized !== false,
     onlyHosts: route?.onlyHosts ?? '',
     bypassHosts: route?.bypassHosts ?? '',
     testTarget: route?.testTarget ?? '',
@@ -620,6 +626,8 @@ function profileView(profile: Partial<ProfileValue> | undefined): ProfileValue {
     port: typeof profile?.port === 'number' ? profile.port : 0,
     username: typeof profile?.username === 'string' ? profile.username : '',
     password: typeof profile?.password === 'string' ? profile.password : '',
+    proxyTls: profile?.proxyTls === true,
+    proxyTlsRejectUnauthorized: profile?.proxyTlsRejectUnauthorized !== false,
   }
 }
 
@@ -659,11 +667,17 @@ function splitProxyUrl(text: string): Partial<RouteValue> | undefined {
     return undefined
   }
   const scheme = url.protocol.slice(0, -1).toLowerCase()
-  // `socks://` is a common spelling this plugin does not accept on its own;
-  // normalizing it here means a pasted alias still lands on the supported
-  // transport instead of being rejected later.
-  const protocol = scheme === 'socks' ? 'socks5' : scheme
-  if (!PROTOCOLS.includes(protocol as Protocol)) return undefined
+  let protocol: Protocol | undefined
+  let proxyTls = false
+  if (scheme === 'socks' || scheme === 'socks5') {
+    protocol = 'socks5'
+  } else if (scheme === 'socks5s' || scheme === 'socks5+tls') {
+    protocol = 'socks5'
+    proxyTls = true
+  } else if (scheme === 'http' || scheme === 'https') {
+    protocol = scheme
+  }
+  if (protocol === undefined || !PROTOCOLS.includes(protocol)) return undefined
   if (url.hostname.length === 0) return undefined
   const decode = (value: string): string => {
     try {
@@ -675,13 +689,17 @@ function splitProxyUrl(text: string): Partial<RouteValue> | undefined {
   const parsedPort = url.port.length > 0
     ? Number.parseInt(url.port, 10)
     : explicitPortOf(trimmed)
-  return {
-    protocol: protocol as Protocol,
+  const result: Partial<RouteValue> = {
+    protocol,
     host: unbracket(url.hostname),
     port: Number.isNaN(parsedPort) ? 0 : parsedPort,
     username: decode(url.username),
     password: decode(url.password),
   }
+  if (proxyTls) {
+    result.proxyTls = true
+  }
+  return result
 }
 
 /**
@@ -794,6 +812,8 @@ const TEST_RELEVANT_FIELDS = new Set([
   'port',
   'username',
   'password',
+  'proxyTls',
+  'proxyTlsRejectUnauthorized',
   'onlyHosts',
   'bypassHosts',
   'testTarget',
@@ -2040,13 +2060,18 @@ function renderPage(ctx: any): unknown {
       return
     }
     const route = view({ ...configured[id], ...draft[id] })
-    applyDefaultUrl({
+    const endpoint: Record<string, unknown> = {
       protocol: route.protocol,
       host: route.host.trim(),
       port: route.port,
       username: route.username,
       password: route.password,
-    })
+    }
+    if (route.protocol === 'socks5') {
+      endpoint.proxyTls = route.proxyTls
+      endpoint.proxyTlsRejectUnauthorized = route.proxyTlsRejectUnauthorized
+    }
+    applyDefaultUrl(endpoint)
   }
 
   /** Point every card at the default endpoint, in one write. */
@@ -2261,7 +2286,8 @@ function renderPage(ctx: any): unknown {
     ? undefined
     : proxyHostProblem(defaultView.host)
   const defaultComplete = defaultWhy === undefined
-  const defaultOrigin = `${defaultView.protocol}://${defaultView.host}:${defaultView.port}`
+  const defaultScheme = defaultView.protocol === 'socks5' && defaultView.proxyTls ? 'socks5s' : defaultView.protocol
+  const defaultOrigin = `${defaultScheme}://${defaultView.host}:${defaultView.port}`
 
   /**
    * What one card will actually use, and whether that is usable.
@@ -2492,6 +2518,37 @@ function renderPage(ctx: any): unknown {
     )
   }
 
+  /** Apply a parsed proxy URL to one named preset. */
+  const applyProfileUrl = (name: string, parts: Record<string, unknown>): void => {
+    setProfileDraft((current: any) => ({
+      ...current,
+      [name]: { ...current[name], ...parts },
+    }))
+    const bound = routesBoundTo({ ...configured, ...draft }, name)
+    invalidateTests(bound)
+    saveMany(
+      `\u0000profile\u0000${name}\u0000*paste`,
+      Object.keys(parts).map(field => ({
+        op: 'set',
+        path: ['proxyProfiles', name, field],
+        value: parts[field],
+      })),
+      `${name}（粘贴 URL）`,
+      () => {
+        setProfileDraft((current: any) => {
+          const value = current[name]
+          if (value === undefined) return current
+          const nextValue = { ...value }
+          for (const field of Object.keys(parts)) delete nextValue[field]
+          const next = { ...current }
+          if (Object.keys(nextValue).length === 0) delete next[name]
+          else next[name] = nextValue
+          return next
+        })
+      },
+    )
+  }
+
   /**
    * Point one card at a preset, at the built-in default, or back at its own
    * fields.
@@ -2532,6 +2589,91 @@ function renderPage(ctx: any): unknown {
       },
     )
   }
+  const socks5TlsControls = (
+    prefix: string,
+    proxyTls: boolean,
+    proxyTlsRejectUnauthorized: boolean,
+    onToggleTls: (enabled: boolean) => void,
+    onToggleInsecure: (insecure: boolean) => void,
+  ): unknown =>
+    h(
+      'div',
+      {
+        className: styles.tlsContainer,
+        style: {
+          margin: '8px 0 2px',
+          padding: '10px 12px',
+          borderRadius: '8px',
+          border: '1px solid var(--dsw-alias-border-l1)',
+          background: 'var(--dsw-alias-bg-layer-1)',
+        },
+        key: `${prefix}:socks5-tls`,
+      },
+      h(
+        'label',
+        { className: styles.toggle, style: S.toggle },
+        h('input', {
+          type: 'checkbox',
+          role: 'switch',
+          'aria-checked': proxyTls,
+          'aria-label': t.proxyTls,
+          checked: proxyTls,
+          onChange: (event: any) => onToggleTls(event.target.checked === true),
+        }),
+        h('span', { style: { fontWeight: 500 } }, t.proxyTls),
+      ),
+      h(
+        'p',
+        { className: styles.hint, style: { ...S.hint, margin: '2px 0 0' } },
+        t.proxyTlsHint,
+      ),
+      proxyTls
+        ? h(
+            'div',
+            {
+              style: {
+                marginTop: '8px',
+                paddingLeft: '10px',
+                borderLeft: '2px solid var(--dsw-alias-border-l1)',
+              },
+            },
+            h(
+              'label',
+              { className: styles.toggle, style: S.toggle },
+              h('input', {
+                type: 'checkbox',
+                role: 'switch',
+                'aria-checked': !proxyTlsRejectUnauthorized,
+                'aria-label': t.proxyTlsInsecure,
+                checked: !proxyTlsRejectUnauthorized,
+                onChange: (event: any) => onToggleInsecure(event.target.checked === true),
+              }),
+              h('span', null, t.proxyTlsInsecure),
+            ),
+            !proxyTlsRejectUnauthorized
+              ? h(
+                  'div',
+                  {
+                    className: styles.securityWarningBox,
+                    style: {
+                      margin: '6px 0 0',
+                      padding: '8px 12px',
+                      borderRadius: '6px',
+                      backgroundColor: 'var(--dsw-alias-state-warning-subtle, rgba(210, 153, 34, 0.12))',
+                      border: '1px solid var(--dsw-alias-state-warning-border, rgba(210, 153, 34, 0.4))',
+                      color: 'var(--dsw-alias-state-warning-primary, #d29922)',
+                      fontSize: '11px',
+                      lineHeight: '1.4',
+                    },
+                    role: 'alert',
+                  },
+                  t.proxyTlsInsecureWarning,
+                )
+              : null,
+          )
+        : null,
+    )
+
   const defaultBlock = h(
     'div',
     { className: styles.defaultCard, style: S.defaultCard, key: 'default-proxy' },
@@ -2636,6 +2778,15 @@ function renderPage(ctx: any): unknown {
         true,
       ),
     ),
+    defaultView.protocol === 'socks5'
+      ? socks5TlsControls(
+          'default',
+          defaultView.proxyTls,
+          defaultView.proxyTlsRejectUnauthorized,
+          enabled => bindDefault('proxyTls')(enabled),
+          insecure => bindDefault('proxyTlsRejectUnauthorized')(!insecure),
+        )
+      : null,
     // Bulk opt-in, in ONE write: a per-card walk would rebuild the table N times.
     // Disabled while the default configuration is incomplete, because pointing every card at an
     // empty endpoint would just refuse them all.
@@ -2891,8 +3042,9 @@ function renderPage(ctx: any): unknown {
               placeholder: '127.0.0.1',
               value: entry.value.host,
               onChange: (event: any) => bindProfile(entry.name, 'host')(event.target.value),
+              onPaste: onProxyUrlPaste(parts => applyProfileUrl(entry.name, parts)),
             }),
-            entry.value.host.trim().length === 0 ? undefined : proxyHostProblem(entry.value.host),
+            entry.value.host.trim().length === 0 ? t.hostHint : proxyHostProblem(entry.value.host),
             entry.value.host.trim().length > 0 && proxyHostProblem(entry.value.host) !== undefined,
           ),
           field(
@@ -2942,6 +3094,15 @@ function renderPage(ctx: any): unknown {
             true,
           ),
         ),
+        entry.value.protocol === 'socks5'
+          ? socks5TlsControls(
+              `profile:${entry.name}`,
+              entry.value.proxyTls,
+              entry.value.proxyTlsRejectUnauthorized,
+              enabled => bindProfile(entry.name, 'proxyTls')(enabled),
+              insecure => bindProfile(entry.name, 'proxyTlsRejectUnauthorized')(!insecure),
+            )
+          : null,
       )
     }),
     ],
@@ -3637,6 +3798,15 @@ function renderPage(ctx: any): unknown {
                   quickImportSelect(`${row.id}:quick-import`, parts => applyCardUrl(row.id, parts)),
                 ),
                 h('div', { className: styles.formGrid, style: S.formGrid, key: `${row.id}:form-grid` }, ...endpointFields),
+                route.protocol === 'socks5'
+                  ? socks5TlsControls(
+                      row.id,
+                      route.proxyTls,
+                      route.proxyTlsRejectUnauthorized,
+                      enabled => bind(row.id, 'proxyTls')(enabled),
+                      insecure => bind(row.id, 'proxyTlsRejectUnauthorized')(!insecure),
+                    )
+                  : null,
               ]),
           // The self-check is offered whenever there is something to check: an
           // enabled route (the Host's table carries it, and a rejected one still
@@ -3850,7 +4020,7 @@ function renderPage(ctx: any): unknown {
                 ? `${t.useDefault}: ${defaultOrigin}`
                 // Lower-case, matching the resolved-endpoint wording above so the
                 // same address never appears in two spellings on one page.
-                : `${route.protocol}://${route.host || '—'}:${route.port || '—'}`
+                : `${route.protocol === 'socks5' && route.proxyTls ? 'socks5s' : route.protocol}://${route.host || '—'}:${route.port || '—'}`
         const compactRowElement = h(
           'section',
           {
@@ -4593,6 +4763,10 @@ const EN = {
   backupLead: 'Save the whole proxy configuration to a JSON file, or load one back.',
   sectionSettings: 'Page settings',
   sectionProviders: 'Providers',
+  proxyTls: 'Enable TLS encrypted tunnel (SOCKS5 over TLS)',
+  proxyTlsHint: 'Encrypts the connection to the SOCKS5 proxy server using TLS (socks5s).',
+  proxyTlsInsecure: 'Allow self-signed certificates',
+  proxyTlsInsecureWarning: '[Warning] TLS certificate validation is disabled. Vulnerable to MITM interception. Use only in trusted or testing networks.',
   enableLabel: 'Enabled',
 }
 
@@ -4752,6 +4926,10 @@ const ZH = {
   backupLead: '把整份代理配置存成 JSON 文件，或从文件恢复。',
   sectionSettings: '页面设置',
   sectionProviders: 'Provider 列表',
+  proxyTls: '启用 TLS 加密隧道 (SOCKS5 over TLS)',
+  proxyTlsHint: '对 SOCKS5 代理服务器建连启用 TLS 传输加密（socks5s / Proxy TLS）。',
+  proxyTlsInsecure: '允许自签名证书（跳过证书验证）',
+  proxyTlsInsecureWarning: '[安全警告] 已跳过代理证书校验，易受中间人劫持攻击。仅建议在内网测试或自签证书环境使用。',
   enableLabel: '启用',
 }
 

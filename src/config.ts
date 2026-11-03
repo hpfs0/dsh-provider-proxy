@@ -101,6 +101,10 @@ export const DefaultProxy = z.object({
   port: z.number().default(0),
   username: z.string().default(''),
   password: z.string().default(''),
+  /** Whether to use TLS encryption tunnel to SOCKS5 proxy server (socks5s / Proxy TLS). */
+  proxyTls: z.boolean().default(false),
+  /** Whether to verify TLS certificate for SOCKS5 proxy server. */
+  proxyTlsRejectUnauthorized: z.boolean().default(true),
 })
 
 /**
@@ -143,6 +147,10 @@ export const ProviderProxyRoute = z.object({
   username: z.string().default(''),
   /** SOCKS5 proxy password. Only used when `protocol` is `socks5`. */
   password: z.string().default(''),
+  /** Whether to use TLS encryption tunnel to SOCKS5 proxy server (socks5s / Proxy TLS). */
+  proxyTls: z.boolean().default(false),
+  /** Whether to verify TLS certificate for SOCKS5 proxy server. */
+  proxyTlsRejectUnauthorized: z.boolean().default(true),
   /**
    * Comma/space-separated TARGET hosts that must go through the proxy. Empty
    * means "no restriction" (every target is proxied). Suffix match.
@@ -208,6 +216,8 @@ export interface ProviderProxyRouteValue {
   port: number
   username: string
   password: string
+  proxyTls: boolean
+  proxyTlsRejectUnauthorized: boolean
   onlyHosts: string
   bypassHosts: string
   testTarget: string
@@ -220,6 +230,8 @@ export interface DefaultProxyValue {
   port: number
   username: string
   password: string
+  proxyTls: boolean
+  proxyTlsRejectUnauthorized: boolean
 }
 
 export interface ConfigShape {
@@ -253,6 +265,8 @@ export function normalizeDefaultProxy(raw: Partial<DefaultProxyValue> | undefine
     port: value.port,
     username: value.username.trim(),
     password: value.password,
+    proxyTls: value.proxyTls === true,
+    proxyTlsRejectUnauthorized: value.proxyTlsRejectUnauthorized !== false,
   }
 }
 
@@ -278,6 +292,8 @@ export function normalizeRoute(
   // A preset name is a dictionary key, so only surrounding whitespace is
   // removed; case is preserved because the key is shown to the user.
   const profileId = value.profileId.trim()
+  const proxyTls = value.proxyTls === true
+  const proxyTlsRejectUnauthorized = value.proxyTlsRejectUnauthorized !== false
 
   // A disabled route is normally returned untouched: nothing has been asked of
   // it, so a half-typed endpoint must not be reported as a problem. The
@@ -285,7 +301,16 @@ export function normalizeRoute(
   // switched on yet — so it passes `requireEnabled: false` to get exactly the
   // validation routing would apply once the route is on.
   if (!value.enabled && options?.requireEnabled !== false) {
-    return { ...value, profileId, port: value.port || 0, onlyHosts, bypassHosts, testTarget }
+    return {
+      ...value,
+      profileId,
+      port: value.port || 0,
+      onlyHosts,
+      bypassHosts,
+      testTarget,
+      proxyTls,
+      proxyTlsRejectUnauthorized,
+    }
   }
 
   const host = value.host.trim()
@@ -310,5 +335,7 @@ export function normalizeRoute(
     onlyHosts,
     bypassHosts,
     testTarget,
+    proxyTls,
+    proxyTlsRejectUnauthorized,
   }
 }

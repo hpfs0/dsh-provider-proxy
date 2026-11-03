@@ -714,3 +714,15 @@ summary,
   background: var(--dsw-alias-bg-layer-2, #fff5f5) !important;
   border-color: var(--dsw-alias-state-error-primary, #cf222e) !important;
 }
+
+/* ---- v1.1.0 N22: SOCKS5 over TLS container ---- */
+.tlsContainer {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0 2px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  background: var(--dsw-alias-bg-layer-1);
+}
