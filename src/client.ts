@@ -958,6 +958,8 @@ const VIEW_PREFS_KEY = 'dsh-provider-proxy:view'
 type ViewPrefs = {
   viewMode?: 'card' | 'compact'
   statusFilter?: 'all' | 'proxied' | 'direct' | 'rejected'
+  /** Which settings tab was open; the page reopens where the user left it. */
+  tab?: 'providers' | 'presets' | 'global' | 'backup'
 }
 
 /** Stored preferences, or `{}` when storage is missing or unreadable. */
@@ -976,6 +978,14 @@ function readViewPrefs(): ViewPrefs {
       parsed.statusFilter === 'rejected'
     ) {
       out.statusFilter = parsed.statusFilter
+    }
+    if (
+      parsed.tab === 'providers' ||
+      parsed.tab === 'presets' ||
+      parsed.tab === 'global' ||
+      parsed.tab === 'backup'
+    ) {
+      out.tab = parsed.tab
     }
     return out
   } catch {
@@ -1103,27 +1113,50 @@ const S = {
     maxWidth: '760px',
   },
   /**
-   * One vertical group of page-level blocks.
+   * The settings tab strip.
    *
-   * Page settings (default endpoint, presets, backup, advanced) are one visual
-   * unit; the provider list is another. Without the grouping every block was a
-   * sibling at the same level, so the list controls ended up four blocks below
-   * the list they operate on.
+   * A tab is a BUTTON, not a link: it changes local state and never navigates,
+   * so the browser's back button must not treat it as history. `role="tab"`
+   * plus `aria-selected` is what makes that state visible to assistive tech.
    */
-  group: {
+  tabBar: {
     display: 'flex',
-    flexDirection: 'column',
-    gap: '10px',
-    minWidth: '0',
+    flexWrap: 'wrap',
+    gap: '6px',
+    padding: '4px',
+    borderRadius: '10px',
+    background: 'var(--dsw-alias-bg-layer-2, rgba(128, 128, 128, 0.10))',
+    borderWidth: '1px',
+    borderStyle: 'solid',
+    borderColor: 'var(--dsw-alias-separator-secondary, rgba(128, 128, 128, 0.18))',
   },
-  /** A small heading that separates the page's groups. */
-  groupTitle: {
-    margin: '6px 0 -2px',
-    fontSize: '11px',
-    fontWeight: '600',
-    letterSpacing: '0.04em',
-    textTransform: 'uppercase',
+  tab: {
+    appearance: 'none',
+    borderWidth: '1px',
+    borderStyle: 'solid',
+    borderColor: 'transparent',
+    background: 'transparent',
     color: 'var(--dsw-alias-label-secondary)',
+    fontSize: '12px',
+    fontWeight: 500,
+    lineHeight: '1.4',
+    padding: '5px 12px',
+    borderRadius: '7px',
+    cursor: 'pointer',
+  },
+  tabActive: {
+    background: 'var(--dsw-alias-bg-layer-1, #ffffff)',
+    borderColor: 'var(--dsw-alias-separator-secondary, rgba(128, 128, 128, 0.25))',
+    color: 'var(--dsw-alias-label-primary)',
+    fontWeight: 600,
+  },
+  /**
+   * One tab's content. Layout lives in the CSS module, not here: an inline
+   * `display` would override the browser's `[hidden] { display: none }` and all
+   * four panels would stay visible.
+   */
+  tabPanel: {
+    minWidth: '0',
   },
   card: {
     display: 'flex',
@@ -2108,6 +2141,17 @@ function renderPage(ctx: any): unknown {
   const [viewMode, setViewMode] = (React.useState ?? ((v: any) => [v, () => {}]))(
     () => readViewPrefs().viewMode ?? 'card',
   ) as ['card' | 'compact', (v: any) => void]
+  /**
+   * Which settings tab is open (N24 UI).
+   *
+   * The provider list is the landing tab: configuring per-provider routes is
+   * what this page is for, and the presets / global / backup blocks are visited
+   * far less often. The choice is persisted like the other view preferences, so
+   * a remount reopens the tab the user was last on.
+   */
+  const [activeTab, setActiveTab] = (React.useState ?? ((v: any) => [v, () => {}]))(
+    () => readViewPrefs().tab ?? 'providers',
+  ) as ['providers' | 'presets' | 'global' | 'backup', (v: any) => void]
   const [expandedCards, setExpandedCards] = (React.useState ?? ((v: any) => [v, () => {}]))({}) as [
     Record<string, boolean>,
     (v: any) => void,
@@ -3215,7 +3259,9 @@ function renderPage(ctx: any): unknown {
     key: 'profile-manager',
     summary: `${t.profileManagerTitle} (${profileEntries.length})`,
     lead: t.profileManagerLead,
-    open: profileManagerOpen === true,
+    // Arriving on the presets tab opens the manager: the tab and the panel
+    // share the same title, and a collapsed copy of it reads as an empty tab.
+    open: activeTab === 'presets' || profileManagerOpen === true,
     onToggle: open => setProfileManagerOpen(open),
     children: [
     h(
@@ -3714,6 +3760,9 @@ function renderPage(ctx: any): unknown {
     key: 'global-settings',
     summary: t.globalTitle,
     lead: t.globalLead,
+    // The tab IS this panel now, so arriving on it must show the controls
+    // instead of asking for a second click on a collapsed header.
+    open: activeTab === 'global',
     children: [
     h(
       'label',
@@ -5239,6 +5288,74 @@ function renderPage(ctx: any): unknown {
     ),
   )
 
+  /**
+   * The page used to be one long scroll: default proxy → presets → advanced
+   * settings → backup → provider list. Every section stayed mounted, so the
+   * provider list ended up several screens below the thing the user came for,
+   * and the diagnostics panel was the only way to see where one section ended
+   * and the next began.
+   *
+   * Tabs show one section at a time. The dashboard stays ABOVE the tabs: it
+   * summarises the runtime health of every route, which is not a setting and
+   * must remain visible whichever tab is open.
+   *
+   * Inactive panels are rendered with `hidden` rather than unmounted. Drafts,
+   * self-check results and the current filter live in this component's state, so
+   * they survive a tab switch either way — but a hidden panel also keeps its own
+   * scroll position, and the content is small enough that keeping it mounted
+   * costs nothing.
+   */
+  const tabDefinitions = [
+    { id: 'providers', label: t.tabProviders },
+    { id: 'presets', label: t.tabPresets },
+    { id: 'global', label: t.tabGlobal },
+    { id: 'backup', label: t.tabBackup },
+  ] as const
+  const tabBar = h(
+    'div',
+    {
+      className: styles.tabBar,
+      style: S.tabBar,
+      role: 'tablist',
+      'aria-label': t.tabsAriaLabel,
+      key: 'tabs',
+    },
+    ...tabDefinitions.map(tab =>
+      h(
+        'button',
+        {
+          key: tab.id,
+          type: 'button',
+          role: 'tab',
+          id: `dsh-proxy-tab-${tab.id}`,
+          'aria-selected': activeTab === tab.id,
+          'aria-controls': `dsh-proxy-panel-${tab.id}`,
+          className: activeTab === tab.id ? styles.tabActive : styles.tab,
+          style: activeTab === tab.id ? { ...S.tab, ...S.tabActive } : S.tab,
+          onClick: () => {
+            setActiveTab(tab.id)
+            writeViewPrefs({ tab: tab.id })
+          },
+        },
+        tab.label,
+      ),
+    ),
+  )
+  const tabPanel = (id: (typeof tabDefinitions)[number]['id'], children: unknown[]) =>
+    h(
+      'div',
+      {
+        key: `panel-${id}`,
+        id: `dsh-proxy-panel-${id}`,
+        role: 'tabpanel',
+        'aria-labelledby': `dsh-proxy-tab-${id}`,
+        hidden: activeTab !== id,
+        className: styles.tabPanel,
+        style: S.tabPanel,
+      },
+      ...children,
+    )
+
   return h(
     'div',
     { className: styles.root, style: S.root },
@@ -5279,25 +5396,20 @@ function renderPage(ctx: any): unknown {
           ),
         ),
     // Page-level settings, as one group: they apply to the whole page, not to
-    // one provider.
-    h(
-      'div',
-      { style: S.group, key: 'page-settings' },
-      h('h3', { style: S.groupTitle }, t.sectionSettings),
-      defaultBlock,
-      profileManager,
-      globalBlock,
-      backupBlock,
-    ),
-    // The provider list, as its own group: heading, toolbar, then the cards.
-    h(
-      'div',
-      { style: S.group, key: 'provider-list' },
-      h('h3', { style: S.groupTitle }, t.sectionProviders),
+    // one provider. Each block now has its own tab; the provider list is the
+    // landing tab because that is what this page exists to configure.
+    tabBar,
+    tabPanel('providers', [
       catalogueNotice,
       listToolbar,
       ...body,
-    ),
+    ]),
+    tabPanel('presets', [
+      defaultBlock,
+      profileManager,
+    ]),
+    tabPanel('global', [globalBlock]),
+    tabPanel('backup', [backupBlock]),
     panel({
       key: 'diag',
       summary:
@@ -5526,8 +5638,11 @@ const EN = {
   backupRestored: 'Restored from backup, providers: ',
   backupTitle: 'Backup and restore',
   backupLead: 'Save the whole proxy configuration to a JSON file, or load one back.',
-  sectionSettings: 'Page settings',
-  sectionProviders: 'Providers',
+  tabProviders: 'Providers',
+  tabPresets: 'Proxy presets',
+  tabGlobal: 'Global settings',
+  tabBackup: 'Backup & restore',
+  tabsAriaLabel: 'Settings sections',
   proxyTls: 'Enable TLS encrypted tunnel (SOCKS5 over TLS)',
   proxyTlsHint: 'Encrypts the connection to the SOCKS5 proxy server using TLS (socks5s).',
   proxyTlsInsecure: 'Allow self-signed certificates',
@@ -5737,8 +5852,11 @@ const ZH = {
   backupRestored: '已从备份恢复，provider：',
   backupTitle: '备份与恢复',
   backupLead: '把整份代理配置存成 JSON 文件，或从文件恢复。',
-  sectionSettings: '页面设置',
-  sectionProviders: 'Provider 列表',
+  tabProviders: 'Provider 列表',
+  tabPresets: '代理预设',
+  tabGlobal: '全局设置',
+  tabBackup: '备份与恢复',
+  tabsAriaLabel: '设置分区',
   proxyTls: '启用 TLS 加密隧道 (SOCKS5 over TLS)',
   proxyTlsHint: '对 SOCKS5 代理服务器建连启用 TLS 传输加密（socks5s / Proxy TLS）。',
   proxyTlsInsecure: '允许自签名证书（跳过证书验证）',

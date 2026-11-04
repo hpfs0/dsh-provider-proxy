@@ -799,3 +799,55 @@ summary,
   font-size: 11px;
   white-space: nowrap;
 }
+/* ---- v1.1.0 N24 UI: settings tabs ---- */
+.tabBar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px;
+  border-radius: 10px;
+  border: 1px solid var(--dsw-alias-separator-secondary, rgba(128, 128, 128, 0.18));
+  background: var(--dsw-alias-bg-layer-2, rgba(128, 128, 128, 0.1));
+}
+
+.tab {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+  padding: 5px 12px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.tab:hover {
+  color: var(--dsw-alias-label-primary);
+}
+
+.tabActive {
+  background: var(--dsw-alias-bg-layer-1, #ffffff);
+  border-color: var(--dsw-alias-separator-secondary, rgba(128, 128, 128, 0.25));
+  color: var(--dsw-alias-label-primary);
+  font-weight: 600;
+}
+
+.tabPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+/* The `hidden` attribute must win over the panel's own display rule. */
+.tabPanel[hidden] {
+  display: none;
+}
+
+/* The strip's background is an inline style, so only the shadow can be
+   theme-adjusted here; the alpha-based colour already works on both themes. */
+:root[data-theme='light'] .tabActive {
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}

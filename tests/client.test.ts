@@ -296,6 +296,44 @@ function cardFor(tree, id) {
   return sections.find(section => textsOf(section).includes(id))
 }
 
+/** The shared default-proxy block (key `default-proxy`), not a provider card. */
+function defaultBlockOf(tree) {
+  let found
+  const walk = node => {
+    if (found !== undefined || node === null || typeof node !== 'object') return
+    if (Array.isArray(node)) return node.forEach(walk)
+    if (node.props?.key === 'default-proxy') found = node
+    if (node.children) walk(node.children)
+  }
+  walk(tree)
+  return found
+}
+
+/** The tab strip and one tab panel, by their stable ids (N24 UI). */
+function tabBarOf(tree) {
+  let found
+  const walk = node => {
+    if (found !== undefined || node === null || typeof node !== 'object') return
+    if (Array.isArray(node)) return node.forEach(walk)
+    if (node.props?.role === 'tablist') found = node
+    if (node.children) walk(node.children)
+  }
+  walk(tree)
+  return found
+}
+
+function tabPanelOf(tree, id) {
+  let found
+  const walk = node => {
+    if (found !== undefined || node === null || typeof node !== 'object') return
+    if (Array.isArray(node)) return node.forEach(walk)
+    if (node.props?.id === `dsh-proxy-panel-${id}`) found = node
+    if (node.children) walk(node.children)
+  }
+  walk(tree)
+  return found
+}
+
 /** The status pill sits at the end of the card header. */
 function pillTextOf(card) {
   const header = card?.children?.find?.(child => child?.type === 'header')
@@ -618,7 +656,7 @@ test('N6: the default password and card passwords toggle independently', async (
     assert.equal(defaultInput?.props.type, 'password')
     assert.equal(cardInput?.props.type, 'password')
 
-    const defaultReveal = findButtons(tree).find(button => button.props['aria-label'] === '显示')
+    const defaultReveal = findButtons(defaultBlockOf(tree)).find(button => button.props['aria-label'] === '显示')
     assert.ok(defaultReveal)
     defaultReveal.props.onClick()
 
@@ -678,7 +716,7 @@ test('N6: a provider named default cannot share the default password visibility'
     await settle()
 
     const tree = render()
-    const defaultReveal = findButtons(tree).find(button => button.props['aria-label'] === '显示')
+    const defaultReveal = findButtons(defaultBlockOf(tree)).find(button => button.props['aria-label'] === '显示')
     assert.ok(defaultReveal)
     defaultReveal.props.onClick()
 
@@ -4553,16 +4591,16 @@ test('N19: the list toolbar sits directly above the cards it controls', async ()
   try {
     const harness = mountPlugin(mod)
     const [tree] = renderPage(mod, harness)
-    const list = tree.children.find(child => child?.props?.key === 'provider-list')
-    assert.ok(list, 'the provider list is its own group')
+    const list = tabPanelOf(tree, 'providers')
+    assert.ok(list, 'the provider list has its own tab panel')
     const order = list.children.filter(child => child !== null && child !== undefined)
     const toolbarIndex = order.findIndex(child => child.props?.key === 'list-toolbar')
     const sectionIndex = order.findIndex(child => child.type === 'section')
-    assert.ok(toolbarIndex >= 0, 'the toolbar is inside the list group')
+    assert.ok(toolbarIndex >= 0, 'the toolbar is inside the list panel')
     if (sectionIndex >= 0) {
       assert.ok(toolbarIndex < sectionIndex, 'the toolbar comes BEFORE the first card')
     }
-    // Nothing that belongs to the card list may appear outside its group.
+    // Nothing that belongs to the card list may appear outside its panel.
     const outside = tree.children.filter(
       child => child?.props?.key === 'status-chips' || child?.props?.key === 'list-toolbar',
     )
@@ -4572,22 +4610,45 @@ test('N19: the list toolbar sits directly above the cards it controls', async ()
   }
 })
 
-test('N19: page-level settings are grouped under their own heading', async () => {
+test('N19/N24: page-level blocks live in their own tabs instead of one long scroll', async () => {
   const { mod, restore } = loadBundle()
   try {
     const harness = mountPlugin(mod)
     const [tree] = renderPage(mod, harness)
-    const settings = tree.children.find(child => child?.props?.key === 'page-settings')
-    assert.ok(settings, 'page settings are one group')
+
+    const bar = tabBarOf(tree)
+    assert.ok(bar, 'the page renders a tab strip')
+    const labels = textsOf(bar)
+    for (const label of ['代理预设', '全局设置', 'Provider 列表', '备份与恢复']) {
+      assert.ok(labels.includes(label), `missing tab: ${label}`)
+    }
+
+    // Each block is inside its own panel, and no block leaks into a sibling.
+    const presets = tabPanelOf(tree, 'presets')
     assert.ok(
-      textsOf(settings).includes('页面设置'),
-      'the group carries a heading so the page has two clear halves',
+      presets.children.some(child => child?.props?.key === 'default-proxy'),
+      'the default endpoint belongs to the presets tab',
     )
-    assert.ok(textsOf(tree).includes('Provider 列表'), 'and the list half is labelled too')
-    for (const key of ['default-proxy', 'profile-manager', 'global-settings', 'backup']) {
+    assert.ok(
+      presets.children.some(child => child?.props?.key === 'profile-manager'),
+      'the named presets belong to the presets tab',
+    )
+    assert.ok(
+      tabPanelOf(tree, 'global').children.some(child => child?.props?.key === 'global-settings'),
+      'the advanced settings belong to the global tab',
+    )
+    assert.ok(
+      tabPanelOf(tree, 'backup').children.some(child => child?.props?.key === 'backup'),
+      'backup belongs to the backup tab',
+    )
+    for (const [id, foreign] of [
+      ['global', 'backup'],
+      ['backup', 'global-settings'],
+      ['presets', 'list-toolbar'],
+    ]) {
       assert.ok(
-        settings.children.some(child => child?.props?.key === key),
-        `${key} belongs to the page-settings group`,
+        !tabPanelOf(tree, id).children.some(child => child?.props?.key === foreign),
+        `${foreign} must not leak into the ${id} tab`,
       )
     }
   } finally {
@@ -5631,7 +5692,7 @@ test('N15: the default block offers the common-client presets', async () => {
   try {
     const harness = mountPlugin(mod)
     const [tree] = renderPage(mod, harness)
-    const picker = quickImportOf(tree, 'Clash / Mihomo')
+    const picker = quickImportOf(defaultBlockOf(tree), 'Clash / Mihomo')
     assert.ok(picker, 'the page must offer a quick-import picker')
     const options = textsOf(picker)
     for (const label of [
@@ -5653,7 +5714,7 @@ test('N15: choosing Clash fills protocol, host and port in ONE write', async () 
     const harness = mountPlugin(mod)
     const [, render] = renderPage(mod, harness)
     await settle()
-    const picker = quickImportOf(render(), 'Clash / Mihomo')
+    const picker = quickImportOf(defaultBlockOf(render()), 'Clash / Mihomo')
     picker.props.onChange({ target: { value: 'clash' } })
     await writeSettle()
     assert.deepEqual(harness.writes[0].ops, [
@@ -5674,7 +5735,7 @@ test('N15: the V2Ray SOCKS5 preset imports port 10808 and socks5', async () => {
     const harness = mountPlugin(mod)
     const [, render] = renderPage(mod, harness)
     await settle()
-    quickImportOf(render(), 'V2Ray / Xray SOCKS5').props.onChange({ target: { value: 'v2ray-socks' } })
+    quickImportOf(defaultBlockOf(render()), 'V2Ray / Xray SOCKS5').props.onChange({ target: { value: 'v2ray-socks' } })
     await writeSettle()
     const ops = harness.writes[0].ops
     assert.deepEqual(
@@ -6927,6 +6988,134 @@ test('N24: the web-search card carries a search badge naming its chain', async (
     assert.ok(
       !textsOf(reasoningCard).some(text => text.includes('[搜索]')),
       'model cards are not mislabelled as search routes',
+    )
+  } finally {
+    restore()
+  }
+})
+// ---- tabs: one settings section at a time ----
+
+test('tabs: the page opens on the provider tab and marks exactly one tab selected', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [tree] = renderPage(mod, harness)
+
+    const bar = tabBarOf(tree)
+    assert.ok(bar, 'the tab strip renders')
+    const tabs = bar.children
+    assert.equal(tabs.length, 4, 'four sections, four tabs')
+    assert.deepEqual(
+      tabs.map(tab => textsOf(tab).join('')),
+      ['Provider 列表', '代理预设', '全局设置', '备份与恢复'],
+      'the tabs are labelled with the sections they replace',
+    )
+    assert.deepEqual(
+      tabs.map(tab => tab.props['aria-selected']),
+      [true, false, false, false],
+      'exactly one tab is selected, and it is the provider list',
+    )
+    assert.deepEqual(
+      tabs.map(tab => tab.props['aria-controls']),
+      [
+        'dsh-proxy-panel-providers',
+        'dsh-proxy-panel-presets',
+        'dsh-proxy-panel-global',
+        'dsh-proxy-panel-backup',
+      ],
+      'each tab points at the panel it controls',
+    )
+
+    for (const id of ['providers', 'presets', 'global', 'backup']) {
+      const panel = tabPanelOf(tree, id)
+      assert.ok(panel, `the ${id} panel renders`)
+      assert.equal(panel.props.role, 'tabpanel')
+      assert.equal(panel.props['aria-labelledby'], `dsh-proxy-tab-${id}`)
+      assert.equal(panel.props.hidden, id !== 'providers', `only the provider panel is visible`)
+    }
+    // The dashboard is not a setting: it stays above the tabs on every view.
+    assert.ok(
+      tree.children.some(child => child?.props?.key === 'dashboard-container'),
+      'the dashboard stays outside the tabs',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('tabs: switching tabs shows one panel and is remembered across a remount', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const first = mountPlugin(mod)
+    const [, render] = renderPage(mod, first)
+    const backupTab = tabBarOf(render()).children.find(
+      tab => textsOf(tab).join('') === '备份与恢复',
+    )
+    assert.ok(backupTab, 'the backup tab exists')
+    backupTab.props.onClick()
+
+    const switched = render()
+    assert.equal(tabPanelOf(switched, 'backup').props.hidden, false, 'the backup panel is visible')
+    assert.equal(tabPanelOf(switched, 'providers').props.hidden, true, 'the provider panel is hidden')
+    assert.deepEqual(
+      tabBarOf(switched).children.map(tab => tab.props['aria-selected']),
+      [false, false, false, true],
+    )
+    const stored = JSON.parse(globalThis.localStorage.getItem('dsh-provider-proxy:view'))
+    assert.equal(stored.tab, 'backup', 'the choice is persisted as a view preference')
+
+    // A NEW mount, exactly like re-entering the page.
+    const second = mountPlugin(mod)
+    const [tree] = renderPage(mod, second)
+    assert.equal(
+      tabPanelOf(tree, 'backup').props.hidden,
+      false,
+      'the page reopens on the tab the user left',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('tabs: a corrupt stored tab falls back to the provider list', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    globalThis.localStorage.setItem('dsh-provider-proxy:view', JSON.stringify({ tab: 'nope' }))
+    const harness = mountPlugin(mod)
+    const [tree] = renderPage(mod, harness)
+    assert.equal(tabPanelOf(tree, 'providers').props.hidden, false, 'an unknown tab is ignored')
+    assert.deepEqual(
+      tabBarOf(tree).children.map(tab => tab.props['aria-selected']),
+      [true, false, false, false],
+    )
+  } finally {
+    restore()
+  }
+})
+test('tabs: arriving on a tab opens its single panel instead of showing a collapsed copy', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+
+    const tab = label =>
+      tabBarOf(render()).children.find(item => textsOf(item).join('') === label)
+    tab('代理预设').props.onClick()
+    assert.equal(
+      profileManagerOf(render()).props.open,
+      true,
+      'the presets tab opens the manager it is named after',
+    )
+    tab('全局设置').props.onClick()
+    assert.equal(
+      globalBlockOf(render()).props.open,
+      true,
+      'the global tab opens the advanced panel it is named after',
+    )
+    assert.equal(
+      tabPanelOf(render(), 'presets').props.hidden,
+      true,
+      'the presets panel is hidden while another tab is open',
     )
   } finally {
     restore()
