@@ -7,6 +7,7 @@ import {
   calculateSuccessRate,
   calculateAverageLatency,
   calculateTotalHits,
+  calculateTrafficSplit,
   formatNumber,
   countUnreachableProviders,
   apply,
@@ -261,4 +262,50 @@ test('N23: countUnreachableProviders counts only enabled unreachable routes', ()
   })
   assert.equal(resUnreachable.count, 2)
   assert.deepEqual(resUnreachable.unreachableIds, ['p1', 'p4'])
+})
+
+test('N24: calculateTrafficSplit classifies forwarded requests without inventing any', () => {
+  // Nothing has run yet: both halves are zero and the total still agrees.
+  const empty = calculateTrafficSplit({}, undefined)
+  assert.deepEqual(empty, {
+    total: 0,
+    reasoning: 0,
+    search: 0,
+    directSearch: 0,
+    formatted: '推理 0 · 搜索 0',
+  })
+
+  // The halves ADD UP to the total the other metric shows.
+  const split = calculateTrafficSplit({ deepseek: 7, sensenova: 2, 'web-search': 3 }, { direct: 1 })
+  assert.equal(split.total, 12)
+  assert.equal(split.search, 3)
+  assert.equal(split.reasoning, 9)
+  assert.equal(split.directSearch, 1)
+  assert.equal(split.formatted, '推理 9 · 搜索 3（直连 1）')
+
+  // No reserved route in the map at all: everything is reasoning.
+  const reasoningOnly = calculateTrafficSplit({ deepseek: 4 }, undefined)
+  assert.equal(reasoningOnly.search, 0)
+  assert.equal(reasoningOnly.reasoning, 4)
+  assert.equal(reasoningOnly.formatted, '推理 4 · 搜索 0')
+
+  // A direct-only search strategy still reports the direct calls separately
+  // instead of folding them into a proxied count they never earned.
+  const directOnly = calculateTrafficSplit({}, { direct: 5 })
+  assert.equal(directOnly.total, 0)
+  assert.equal(directOnly.search, 0)
+  assert.equal(directOnly.formatted, '推理 0 · 搜索 0（直连 5）')
+
+  // English wording, and a search count larger than the map's total (a reset
+  // raced a poll) must never produce a negative reasoning count.
+  assert.equal(calculateTrafficSplit({}, undefined, false).formatted, 'Reasoning 0 · Search 0')
+  const clamped = calculateTrafficSplit({ 'web-search': 3 }, undefined, false)
+  assert.equal(clamped.reasoning, 0, 'a negative reasoning count is clamped, not rendered')
+  assert.equal(clamped.search, 3)
+
+  // Garbage in the map is ignored rather than formatted as NaN.
+  const garbage = calculateTrafficSplit({ 'web-search': Number.NaN }, { direct: Number.NaN })
+  assert.equal(garbage.search, 0)
+  assert.equal(garbage.directSearch, 0)
+  assert.equal(garbage.formatted, '推理 0 · 搜索 0')
 })

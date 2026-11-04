@@ -34,6 +34,13 @@ import {
 } from './config.js'
 import { detectProxyEnv } from './proxy-env.js'
 import { effectiveRoute, type ProfileMap } from './presets.js'
+import {
+  normalizeSearchSplitConfig,
+  resolveSearchPlan,
+  searchSplitProblem,
+  type SearchPlan,
+  type SearchSplitConfig,
+} from './search-split.js'
 
 export const name = 'dsh-provider-proxy'
 export const inject = ['llm']
@@ -48,6 +55,47 @@ export const inject = ['llm']
  * special case in every one of those places.
  */
 export const WEB_SEARCH_KEY = 'web-search'
+
+/**
+ * The id the dedicated search dispatcher is built under (N24).
+ *
+ * It is deliberately NOT a provider id: the entry never enters `current`, so it
+ * cannot appear as a card, be probed by the heartbeat, or be edited in the
+ * provider dictionary. It exists only for the `llm` router's sibling seam,
+ * `ctx.web.search`, and is rebuilt from `searchProxyProfileId` whenever the
+ * settings change.
+ */
+const SEARCH_DEDICATED_KEY = 'search-split'
+
+/** Search traffic counters, published for the dashboard's `[搜索]` classification. */
+export interface SearchTrafficState {
+  /** The configured strategy, after normalization. */
+  strategy: SearchSplitConfig['searchProxyStrategy']
+  /** The bound preset id ('' means the web-search card's own endpoint). */
+  profileId: string
+  /** The chain the NEXT search call would take. */
+  plan: SearchPlan['kind']
+  /** Why that chain was chosen, for the page's explanation. */
+  reason: SearchPlan['reason']
+  /** The dedicated endpoint's credential-free origin, when one is built. */
+  endpoint?: string
+  /** Why search traffic cannot be routed, when the plan is blocked. */
+  problem?: string
+  /** Search calls initiated (proxied + direct + failed). */
+  hits: number
+  /** Calls that left through a proxy. */
+  proxied: number
+  /** Calls that used the native network path. */
+  direct: number
+  /** Calls that failed outright. */
+  failed: number
+  /** When the most recent search call began. */
+  lastAt?: number
+  /** Whether the last completed call got a usable answer. */
+  ok?: boolean
+  /** The status or failure code of the last completed call. */
+  code?: string
+}
 
 /**
  * The Config this fiber receives.
@@ -73,6 +121,10 @@ interface ProxyConfig {
   readonly heartbeatEnabled?: unknown
   readonly heartbeatInterval?: unknown
   readonly heartbeatConsecutiveFails?: unknown
+  /** Which chain carries `web_search` traffic (N24), or the Volatile wrapper. */
+  readonly searchProxyStrategy?: unknown
+  /** The preset a `dedicated` search strategy routes through, or the wrapper. */
+  readonly searchProxyProfileId?: unknown
 }
 
 function plainProviders(
@@ -152,6 +204,20 @@ function plainEnableFallbackDirect(config: ProxyConfig | undefined): boolean {
   return fiberBool(config?.enableFallbackDirect)
 }
 
+/**
+ * Read the two search-split settings, Volatile like every other setting.
+ *
+ * Normalized through the shared module rather than compared field by field: the
+ * page's preview and the Host's decision must answer the same question from the
+ * same draft, and an unknown strategy must degrade to `inherit` here too.
+ */
+function plainSearchSplit(config: ProxyConfig | undefined): SearchSplitConfig {
+  return normalizeSearchSplitConfig({
+    searchProxyStrategy: fiberValue(config?.searchProxyStrategy),
+    searchProxyProfileId: fiberValue(config?.searchProxyProfileId),
+  })
+}
+
 export function apply(ctx: any, config?: ProxyConfig): void {
   const router = acquireFetchRouter()
   let current = new Map<string, RouteEntry>()
@@ -160,6 +226,31 @@ export function apply(ctx: any, config?: ProxyConfig): void {
   const heartbeatStates = new Map<string, HeartbeatState>()
   /** Whether a `web` service exists, i.e. whether the reserved route has anything to carry. */
   let webAvailable = false
+
+  /**
+   * The dedicated search dispatcher, when `searchProxyStrategy` is `dedicated`
+   * and a preset is bound. Not a provider route: it never enters `current`, is
+   * never published as a card, and is retired by `rebuild` exactly once.
+   */
+  let searchDedicated: RouteEntry | undefined
+  /** Why the bound search preset could not be built, when it could not. */
+  let searchDedicatedProblem: string | undefined
+  /**
+   * Search traffic counters, kept apart from `hits` because the dashboard
+   * classifies calls as `[推理]` / `[搜索]`. `hits` still counts proxied search
+   * requests under the reserved id (so the card and the total stay truthful);
+   * these counters additionally see the calls that never crossed a proxy.
+   *
+   * Counters survive a rebuild (a settings write) exactly like `hits`: they are
+   * a record of what happened, not of how the traffic is currently configured.
+   */
+  const searchCounters = { hits: 0, proxied: 0, direct: 0, failed: 0 } as {
+    hits: number
+    proxied: number
+    direct: number
+    failed: number
+  }
+  let searchLast: { lastAt?: number; ok?: boolean; code?: string } = {}
 
   // Request counts, keyed by provider id. Held OUTSIDE the proxy table so a
   // rebuild (a settings write) never resets them; only a plugin reload does.
@@ -183,14 +274,14 @@ export function apply(ctx: any, config?: ProxyConfig): void {
    * that belongs to a call which in fact succeeded.
    */
   const lastUse = new Map<string, { startedAt: number; at?: number; ok?: boolean; code?: string; fallback?: boolean }>()
-  const bump = (provider: string, token: number): void => {
+  const bump = (provider: string, token: number | undefined): void => {
     hits.set(provider, (hits.get(provider) ?? 0) + 1)
     if (routeStates.get(provider)?.token !== token) return
     // Only the START moves here. The outcome fields are written once a request
     // settles, so an in-flight call cannot overwrite the last COMPLETED result.
     lastUse.set(provider, { ...lastUse.get(provider), startedAt: Date.now() })
   }
-  const settle = (provider: string, token: number) => (ok: boolean, detail: unknown, meta?: { fallback?: boolean }): void => {
+  const settle = (provider: string, token: number | undefined) => (ok: boolean, detail: unknown, meta?: { fallback?: boolean }): void => {
     if (routeStates.get(provider)?.token !== token) return
     const previous = lastUse.get(provider)
     if (meta?.fallback && ok) {
@@ -221,6 +312,65 @@ export function apply(ctx: any, config?: ProxyConfig): void {
           })
         }
       }
+    }
+  }
+
+  /**
+   * Resolve the chain the next `web_search` call takes, and the payload the
+   * settings page classifies calls with.
+   *
+   * `current` is read LIVE, so a card switched on seconds ago is already
+   * visible; the dedicated dispatcher comes from the last rebuild, which is the
+   * only place it can be built without leaking one per request.
+   */
+  const searchSplitState = (): {
+    split: SearchSplitConfig
+    plan: SearchPlan
+    problem: string | undefined
+    snapshot: SearchTrafficState
+  } => {
+    const split = plainSearchSplit(config)
+    const profiles = plainProfiles(config)
+    const profileId = split.searchProxyProfileId
+    const presetExists = profileId.length > 0 && profiles[profileId] !== undefined
+    const plan = resolveSearchPlan({
+      strategy: split.searchProxyStrategy,
+      profileId,
+      cardAvailable: current.has(WEB_SEARCH_KEY),
+      presetExists,
+      presetReady: searchDedicated !== undefined,
+      bypassAll: plainBypassAll(config),
+    })
+    const problem =
+      plan.kind === 'blocked'
+        ? // The operator-facing wording first: it names the preset and says the
+          // call is REFUSED rather than leaked direct. The builder's own text
+          // (`provider "search-split" …`) is the fallback, not the message.
+          (searchSplitProblem({
+            strategy: split.searchProxyStrategy,
+            profileId,
+            presetExists,
+            presetReady: searchDedicated !== undefined,
+          }) ??
+          searchDedicatedProblem ??
+          '搜索分流配置不可用')
+        : undefined
+    return {
+      split,
+      plan,
+      problem,
+      snapshot: {
+        strategy: split.searchProxyStrategy,
+        profileId,
+        plan: plan.kind,
+        reason: plan.reason,
+        ...(plan.kind === 'dedicated' && searchDedicated !== undefined
+          ? { endpoint: searchDedicated.proxyOrigin }
+          : {}),
+        ...(problem === undefined ? {} : { problem }),
+        ...searchCounters,
+        ...searchLast,
+      },
     }
   }
 
@@ -1045,6 +1195,35 @@ export function apply(ctx: any, config?: ProxyConfig): void {
       }
       routeStates.set(provider, { fingerprint, enabled: raw?.enabled === true, token })
     }
+
+    // The dedicated search endpoint (N24) is a route like any other, but it is
+    // NOT in the provider dictionary: it is derived from one preset. It is built
+    // through the same builder a card uses, so its dispatcher, SOCKS5 TLS
+    // options and target-host rules are identical — and it is retired exactly
+    // the way the table retires routes, after the new one is live, so a search
+    // in flight keeps a working dispatcher.
+    const split = plainSearchSplit(config)
+    const previousSearch = searchDedicated
+    searchDedicated = undefined
+    searchDedicatedProblem = undefined
+    if (split.searchProxyStrategy === 'dedicated' && split.searchProxyProfileId.length > 0) {
+      const built = buildRouteEntry(
+        SEARCH_DEDICATED_KEY,
+        { enabled: true, profileId: split.searchProxyProfileId },
+        {
+          defaultProxy: normalizeDefaultProxy(defaultProxy),
+          profiles,
+          requireEnabled: true,
+          localDirect,
+        },
+      )
+      if (built.ok) searchDedicated = built.entry
+      else searchDedicatedProblem = bareMessage(built.problem)
+    }
+    if (previousSearch !== undefined) {
+      void previousSearch.dispatcher.close().catch(() => undefined)
+    }
+
     pruneCheckCache()
     // Retire the previous table only after the new one is live, so an in-flight
     // stream keeps a dispatcher that still works.
@@ -1166,6 +1345,9 @@ export function apply(ctx: any, config?: ProxyConfig): void {
               hits: Object.fromEntries(hits),
               lastUse: Object.fromEntries(lastUse),
               heartbeat: Object.fromEntries(heartbeatStates),
+              // N24: the resolved search chain plus its counters, so the page can
+              // classify calls without asking the Host again per card.
+              search: searchSplitState().snapshot,
             })
             res.writeHead(200, {
               'content-type': 'application/json; charset=utf-8',
@@ -1186,6 +1368,14 @@ export function apply(ctx: any, config?: ProxyConfig): void {
         path: '/dsh-provider-proxy/reset-hits',
         handler: (_req: any, res: any) => {
           hits.clear()
+          // The search counters are the same kind of record as `hits`, so the
+          // one Reset button clears both; the strategy and the plan are
+          // configuration, not history, and stay.
+          searchCounters.hits = 0
+          searchCounters.proxied = 0
+          searchCounters.direct = 0
+          searchCounters.failed = 0
+          searchLast = {}
           const text = JSON.stringify({ ok: true })
           res.writeHead(200, {
             'content-type': 'application/json; charset=utf-8',
@@ -1308,6 +1498,12 @@ export function apply(ctx: any, config?: ProxyConfig): void {
   // propagates through `await`, and the search is await-to-completion rather than
   // a lazily-consumed stream, so no per-iterator wrapping is needed here.
   //
+  // N24: the scope also carries `trafficType: 'search'`, and WHICH dispatcher it
+  // carries is decided per call by `searchProxyStrategy` — the reserved card,
+  // a preset-derived dedicated dispatcher, or the native path. The decision is
+  // deferred to call time (not to mount time) so a settings write takes effect
+  // on the very next search.
+  //
   // Two preconditions make this work, and a future provider could break either:
   // the tool accesses `ctx.web.search` afresh on every call (no early
   // destructure), and the provider's `search()` awaits to completion.
@@ -1317,16 +1513,93 @@ export function apply(ctx: any, config?: ProxyConfig): void {
     webAvailable = true
     const original = web.search
     const patched = function (this: unknown, request: unknown, signal?: unknown): unknown {
-      const route = current.get(WEB_SEARCH_KEY)
-      if (route === undefined) return original.call(this, request, signal)
+      const { plan, problem } = searchSplitState()
       const token = routeStates.get(WEB_SEARCH_KEY)?.token
-      if (token === undefined) return original.call(this, request, signal)
+      const startedAt = Date.now()
+      searchCounters.hits += 1
+      searchLast = { ...searchLast, lastAt: startedAt }
+      /** The reserved card's last-call line, refreshed for a call that never crossed a proxy. */
+      const touchSearchCard = (): void => {
+        if (routeStates.get(WEB_SEARCH_KEY)?.token !== token) return
+        lastUse.set(WEB_SEARCH_KEY, { ...lastUse.get(WEB_SEARCH_KEY), startedAt })
+      }
+
+      // Fail-closed: a `dedicated` binding that cannot be honoured REFUSES the
+      // call instead of quietly changing the egress. A direct call would put the
+      // searcher's real address on a network the user routed around, which is
+      // exactly what they asked not to happen.
+      if (plan.kind === 'blocked') {
+        searchCounters.failed += 1
+        searchLast = { lastAt: startedAt, ok: false, code: 'SEARCH_PROXY_UNAVAILABLE' }
+        return Promise.reject(
+          new Error(`dsh-provider-proxy: ${problem ?? '搜索分流配置不可用'}`),
+        )
+      }
+
+      if (plan.kind === 'direct') {
+        searchCounters.direct += 1
+        touchSearchCard()
+        const direct = Promise.resolve().then(() => original.call(this, request, signal)) as Promise<unknown>
+        // The native path has no router scope to report through, so the outcome
+        // is recorded here. `/providers` and the card's last-use line both read
+        // these counters, and a search that failed must not look idle.
+        void direct.then(
+          (response: unknown) => {
+            const status = (response as { status?: unknown } | undefined)?.status
+            const ok = typeof status === 'number' ? status < 500 : true
+            if (!ok) searchCounters.failed += 1
+            searchLast = { lastAt: startedAt, ok, code: ok ? String(status ?? '') : String(status ?? 'ERROR') }
+            settle(WEB_SEARCH_KEY, token)(ok, response, {})
+          },
+          (error: unknown) => {
+            searchCounters.failed += 1
+            searchLast = { lastAt: startedAt, ok: false, code: failureCodeOf(error) }
+            settle(WEB_SEARCH_KEY, token)(false, error, {})
+          },
+        )
+        return direct
+      }
+
+      // `dedicated` names the preset-derived entry; `card` the reserved route.
+      // Both exist by construction — the plan is only produced for a route the
+      // table (or the rebuild) actually carries.
+      const route = plan.kind === 'dedicated' ? searchDedicated : current.get(WEB_SEARCH_KEY)
+      if (route === undefined) {
+        searchCounters.direct += 1
+        touchSearchCard()
+        return original.call(this, request, signal)
+      }
       return router.run(
         {
           dispatcher: route.dispatcher,
-          onHit: () => bump(WEB_SEARCH_KEY, token),
-          onSettle: settle(WEB_SEARCH_KEY, token),
-          decide: route.decide,
+          trafficType: 'search',
+          onHit: () => {
+            searchCounters.proxied += 1
+            bump(WEB_SEARCH_KEY, token)
+          },
+          onSettle: (ok, detail, meta) => {
+            if (!ok) searchCounters.failed += 1
+            searchLast = {
+              lastAt: startedAt,
+              ok,
+              code: ok
+                ? String((detail as { status?: unknown } | undefined)?.status ?? '')
+                : failureCodeOf(detail),
+            }
+            settle(WEB_SEARCH_KEY, token)(ok, detail, meta)
+          },
+          // The route's own target-host rules still decide (localDirect, a
+          // bypassHosts match, an onlyHosts miss). A direct verdict is recorded,
+          // because a search that did not use the proxy is exactly what the
+          // dashboard's `[搜索]` classification must show.
+          decide: (host: string | undefined) => {
+            const verdict = route.decide(host)
+            if (verdict === 'direct') {
+              searchCounters.direct += 1
+              touchSearchCard()
+            }
+            return verdict
+          },
           enableFallbackDirect: plainEnableFallbackDirect(config),
           bypassAll: plainBypassAll(config),
         },
@@ -1365,6 +1638,10 @@ export function apply(ctx: any, config?: ProxyConfig): void {
         return router.wrap(
           {
             dispatcher: route.dispatcher,
+            // N24: model calls are the other half of the split, so the scope
+            // says which one it carries. A rule that ever needs to treat search
+            // differently can read it without a second router.
+            trafficType: 'reasoning',
             onHit: () => bump(provider, token),
             onSettle: settle(provider, token),
             decide: route.decide,
@@ -1399,6 +1676,13 @@ export function apply(ctx: any, config?: ProxyConfig): void {
       await rebuildQueue.catch(() => undefined)
       await closeTable(current)
       current = new Map()
+      // The dedicated search dispatcher is not part of `current`, so the table
+      // close above cannot reach it; it must be released on the same teardown.
+      if (searchDedicated !== undefined) {
+        const dedicated = searchDedicated
+        searchDedicated = undefined
+        await dedicated.dispatcher.close().catch(() => undefined)
+      }
       router.release()
     }
   }, 'dsh-provider-proxy: provider-scoped proxy routing')
@@ -1417,6 +1701,8 @@ export function apply(ctx: any, config?: ProxyConfig): void {
       hits: Object.fromEntries(hits),
       lastUse: Object.fromEntries(lastUse),
       heartbeat: Object.fromEntries(heartbeatStates),
+      /** N24: the resolved search chain, its endpoint and its counters. */
+      search: searchSplitState().snapshot,
       setHeartbeatState: (provider: string, state: HeartbeatState) => heartbeatStates.set(provider, state),
       triggerHeartbeatCycle: () => runHeartbeatCycle(),
       selfCheckCache: (() => {
@@ -1443,6 +1729,18 @@ export function apply(ctx: any, config?: ProxyConfig): void {
 }
 
 export { acquireFetchRouter, kNativeFetch, isNetworkFailoverError } from './fetch-router.js'
+export type { TrafficContext, TrafficType } from './fetch-router.js'
+export {
+  SEARCH_PROXY_STRATEGIES,
+  DEFAULT_SEARCH_PROXY_STRATEGY,
+  normalizeSearchSplitConfig,
+  resolveSearchPlan,
+  searchSplitProblem,
+  type SearchPlan,
+  type SearchPlanInput,
+  type SearchProxyStrategy,
+  type SearchSplitConfig,
+} from './search-split.js'
 export {
   buildDecide,
   buildRouteEntry,
@@ -1492,6 +1790,7 @@ export {
   calculateSuccessRate,
   calculateAverageLatency,
   calculateTotalHits,
+  calculateTrafficSplit,
   formatNumber,
   countUnreachableProviders,
 } from './dashboard.js'

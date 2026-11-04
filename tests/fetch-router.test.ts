@@ -275,3 +275,55 @@ test('decide sees undefined for a target it cannot parse', async () => {
     router.release()
   }
 })
+
+test('decide is told which traffic type the scope carries (N24)', async () => {
+  const router = acquireFetchRouter()
+  const agent = new ProxyAgent({ uri: 'http://127.0.0.1:1' })
+  const calls: Array<{ host: string | undefined; type: unknown }> = []
+
+  const decide = (host: string | undefined, context: { trafficType?: unknown }) => {
+    calls.push({ host, type: context.trafficType })
+    return 'direct' as const
+  }
+
+  try {
+    // A search scope and a reasoning scope, each carrying its own label.
+    for (const trafficType of ['search', 'reasoning'] as const) {
+      const stream = router.wrap(
+        { dispatcher: agent, trafficType, decide },
+        () => (async function* () {
+          await fetch('http://127.0.0.1:1/labelled')
+          yield 1
+        })(),
+      )
+      await assert.rejects(async () => {
+        for await (const _ of stream) {
+          // the verdict is `direct`, so this fails on the loopback target
+        }
+      })
+    }
+    assert.deepEqual(
+      calls.map(call => call.type),
+      ['search', 'reasoning'],
+      'the rule can tell the two traffic types apart without a second router',
+    )
+
+    // A scope that does not say stays undefined rather than being guessed.
+    const unlabelled = router.wrap(
+      { dispatcher: agent, decide },
+      () => (async function* () {
+        await fetch('http://127.0.0.1:1/labelled')
+        yield 1
+      })(),
+    )
+    await assert.rejects(async () => {
+      for await (const _ of unlabelled) {
+        // same direct verdict
+      }
+    })
+    assert.equal(calls.at(-1)?.type, undefined)
+  } finally {
+    await agent.close()
+    router.release()
+  }
+})

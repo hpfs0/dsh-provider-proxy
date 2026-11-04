@@ -42,6 +42,23 @@ export interface DispatcherLike {
   close(): Promise<void>
 }
 
+/**
+ * The kind of traffic one router scope carries (N24).
+ *
+ * DSH exposes no provider identity on `ctx.web.search`, so the distinction has
+ * to be made where the scope is entered: the `llm/stream` wrapper marks
+ * `reasoning`, the `ctx.web.search` wrapper marks `search`. A scope that does
+ * not say (every pre-1.1.0 call site, including the tests) stays `undefined`,
+ * which is why the field is optional rather than defaulted here — this module
+ * must not invent an answer it does not have.
+ */
+export type TrafficType = 'reasoning' | 'search'
+
+/** What a route's target-host rules are told about the request. */
+export interface TrafficContext {
+  trafficType?: TrafficType
+}
+
 export const kNativeFetch = Symbol.for('dsh-provider-proxy.native-fetch')
 
 export function isNetworkFailoverError(error: unknown): boolean {
@@ -101,8 +118,14 @@ export interface RouterStore {
    * Decide whether one request is proxied or sent directly, given its target
    * host (`undefined` when the input carries no parsable URL). Absent means
    * "always proxy within this scope".
+   *
+   * The second argument carries the scope's traffic type, so a rule that only
+   * applies to search (or only to model calls) can tell them apart without a
+   * second router. Existing one-argument rules keep working unchanged.
    */
-  decide?: (host: string | undefined) => 'proxy' | 'direct'
+  decide?: (host: string | undefined, context: TrafficContext) => 'proxy' | 'direct'
+  /** What this scope carries; see {@link TrafficType}. */
+  trafficType?: TrafficType
   enableFallbackDirect?: boolean
   onFallback?: () => void
   bypassAll?: boolean
@@ -180,7 +203,10 @@ function installSharedRouter(): RouterState {
 
     // A `direct` verdict from the route's target-host rules keeps the native
     // path, exactly as if there were no scope at all.
-    if (active.decide !== undefined && active.decide(requestHost(input)) === 'direct') {
+    if (
+      active.decide !== undefined &&
+      active.decide(requestHost(input), { trafficType: active.trafficType }) === 'direct'
+    ) {
       return originalFetch.call(globalThis, input, init)
     }
     // Counted at INITIATION: the request is about to cross the proxy. A stream

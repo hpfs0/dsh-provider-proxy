@@ -178,3 +178,49 @@ export function countUnreachableProviders(
     unreachableIds,
   }
 }
+
+/** The search half of the split, as the Host publishes it (N24). */
+export interface SearchTrafficLike {
+  hits?: number
+  proxied?: number
+  direct?: number
+  failed?: number
+}
+
+/**
+ * Classify forwarded requests as reasoning vs search (N24).
+ *
+ * The metric it feeds is "requests that crossed a proxy", so the two halves must
+ * ADD UP to that total: a search call that went direct is reported separately as
+ * `directSearch` instead of being folded into a proxied count it never earned.
+ *
+ * `proxiedSearch` comes from the reserved route's hit counter rather than from
+ * the search payload, because that counter is the same one every other metric
+ * already reads; the payload's `direct`/`failed` counts are additive detail.
+ */
+export function calculateTrafficSplit(
+  hits: Record<string, number | undefined>,
+  search: SearchTrafficLike | undefined,
+  isZh = true,
+  searchRowId = 'web-search',
+): { total: number; reasoning: number; search: number; directSearch: number; formatted: string } {
+  const total = calculateTotalHits(hits).total
+  const raw = hits[searchRowId]
+  const searchProxied =
+    typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0
+  const reasoning = Math.max(0, total - searchProxied)
+  const rawDirect = search?.direct
+  const directSearch =
+    typeof rawDirect === 'number' && Number.isFinite(rawDirect) && rawDirect > 0
+      ? Math.floor(rawDirect)
+      : 0
+
+  const reasoningText = formatNumber(reasoning)
+  const searchText = formatNumber(searchProxied)
+  const directText = isZh ? `（直连 ${formatNumber(directSearch)}）` : ` (direct ${formatNumber(directSearch)})`
+  const formatted = isZh
+    ? `推理 ${reasoningText} · 搜索 ${searchText}${directSearch > 0 ? directText : ''}`
+    : `Reasoning ${reasoningText} · Search ${searchText}${directSearch > 0 ? directText : ''}`
+
+  return { total, reasoning, search: searchProxied, directSearch, formatted }
+}

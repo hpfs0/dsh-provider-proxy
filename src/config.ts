@@ -20,6 +20,11 @@
 import { createRequire } from 'node:module'
 
 import { proxyHostProblem } from './proxy-address.js'
+import {
+  SEARCH_PROXY_STRATEGIES,
+  normalizeSearchSplitConfig,
+  type SearchProxyStrategy,
+} from './search-split.js'
 
 // Imported statically so the bundler inlines it, making the package
 // self-contained. `loadSchemastery` below still PREFERS the profile's own copy
@@ -220,6 +225,22 @@ export const Config = z.object({
    * Default is 2.
    */
   heartbeatConsecutiveFails: vol(z.number().default(2)),
+  /**
+   * Which chain carries `web_search` traffic (N24):
+   * `inherit` (default) uses the reserved `web-search` card exactly as 1.0.0
+   * did, `dedicated` uses `searchProxyProfileId`, `direct` forces a native
+   * direct fetch, and `custom` hands the card complete control.
+   *
+   * Volatile like every other setting: switching it must affect the very next
+   * search without remounting the plugin.
+   */
+  searchProxyStrategy: vol(z.union(SEARCH_PROXY_STRATEGIES).default('inherit')),
+  /**
+   * The named preset a `dedicated` search strategy routes through. Empty means
+   * "use the web-search card's own endpoint", which is how a search-only
+   * endpoint is configured without inventing a second transport editor.
+   */
+  searchProxyProfileId: vol(z.string().default('')),
 })
 
 export interface ProviderProxyRouteValue {
@@ -260,6 +281,8 @@ export interface ConfigShape {
   heartbeatEnabled: boolean
   heartbeatInterval: number
   heartbeatConsecutiveFails: number
+  searchProxyStrategy: SearchProxyStrategy
+  searchProxyProfileId: string
 }
 
 export interface HeartbeatConfig {
