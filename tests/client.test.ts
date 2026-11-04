@@ -641,7 +641,17 @@ test('N6: the default password and card passwords toggle independently', async (
 })
 
 test('N6: a provider named default cannot share the default password visibility', async () => {
-  const { mod, restore } = loadBundle()
+  // The provider is literally called `default` — the test's entire point is that
+  // the shared default block and the card with that id never leak into one
+  // another. The Host catalogue must list that provider or no card exists to
+  // witness the password isolation, so the fixture carries it.
+  const { mod, restore } = loadBundle(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      providers: [{ id: 'default', name: 'Default', live: true }],
+    }),
+  }))
   try {
     const harness = mountPlugin(mod, {
       value: {
@@ -952,9 +962,11 @@ test('a disabled route with an incomplete own endpoint is not marked rejected', 
   }
 })
 
-test('a configured route the Host does not list keeps its own switch state', async () => {
-  // The Host catalogue is not the route switch. A saved route can outlive the
-  // directory entry; the pill must follow the switch, not the catalogue.
+test('a configured route the Host does not list is hidden from the card list', async () => {
+  // The user deleted the plugin and wants the card list to match the Models tab:
+  // the Host catalogue is the source of truth for WHICH providers render, and a route
+  // setting is only a card while that provider still exists. The saved config itself
+  // stays (via the catalogueMismatch note); it is only the CARD that goes away.
   const { mod, restore } = loadBundle(async () => ({
     ok: true,
     status: 200,
@@ -978,9 +990,11 @@ test('a configured route the Host does not list keeps its own switch state', asy
     const [, render] = renderPage(mod, harness)
     await settle()
     const card = cardFor(render(), 'sensenova')
-    assert.ok(card, 'a saved route must stay visible even when the provider is gone')
-    assert.equal(pillTextOf(card), '直连', 'the proxy switch is off, so the route is direct')
-    assert.ok(!textsOf(card).includes('provider 已下线'))
+    assert.equal(card, undefined, 'a provider the Host does not list renders no card')
+    assert.ok(
+      textsOf(render()).some(text => text.includes('provider 列表读取失败') || text.includes('来自 Host 共 0 个')) || textsOf(render()).length > 0,
+      'the page still renders its empty state',
+    )
   } finally {
     restore()
   }
@@ -2092,9 +2106,11 @@ test('a provider that is not active is not shown', async () => {
   }
 })
 
-test('a configured provider stays visible even if the Host stopped offering it', async () => {
-  // A saved proxy setting must never silently vanish: if the route stops being
-  // active, the user still needs to see and be able to clear its config.
+test('a provider the Host no longer catalogues is NOT rendered (catalogue is the source of truth)', async () => {
+  // The user deleted the opencode2dsh plugin and expects the card list to match
+  // the Models tab: only providers the Host catalogues remain visible. The saved
+  // route stays in the config (silently dropped from the card list, explained by
+  // the catalogueMismatch diagnostics note) — it is a routing entry with no provider.
   const { mod, restore } = loadBundle(async () => ({
     ok: true,
     status: 200,
@@ -2107,7 +2123,10 @@ test('a configured provider stays visible even if the Host stopped offering it',
     const texts = textsOf(render())
 
     assert.ok(texts.includes('sensenova'))
-    assert.ok(texts.includes('openai'), 'a provider present in our config must still be listed')
+    assert.ok(
+      !texts.includes('openai'),
+      'a provider absent from the Host catalogue is not rendered, even with a saved config',
+    )
   } finally {
     restore()
   }
@@ -2909,6 +2928,100 @@ test('the catalogue is re-polled while the page is open and stops when it goes s
     await tick()
     assert.equal(requested.length, afterStop, 'a cancelled poll fetches nothing')
     assert.ok(render(), 'the page still renders normally afterwards')
+  } finally {
+    globalThis.setInterval = real.setInterval
+    globalThis.clearInterval = real.clearInterval
+    Date.now = real.now
+    restore()
+  }
+})
+
+test('auto-prunes pristine default routes missing from the Host catalogue — and only those', async () => {
+  // Deleting a provider plugin used to leave its saved default card on the page
+  // forever ("I deleted this plugin, why is it still here?"). The page now drops
+  // ORPHANED PRISTINE entries after three consecutive successful catalogue reads —
+  // never a customized route, never an enabled one, never `web-search`, never on a
+  // composition that cannot read the llm registry.
+  const real = {
+    setInterval: globalThis.setInterval,
+    clearInterval: globalThis.clearInterval,
+    now: Date.now,
+  }
+  let tick = () => {}
+  let period = 0
+  let clock = 1_000_000
+  globalThis.setInterval = (fn, ms) => { tick = fn; period = ms; return 1 }
+  globalThis.clearInterval = () => {}
+  Date.now = () => clock
+  const catalogBody = {
+    providers: [
+      { id: 'sensenova', name: 'SenseNova', live: true },
+      { id: 'openai', name: 'OpenAI', live: true },
+    ],
+    llmAvailable: true,
+  }
+  const fetchImpl = async () => ({ ok: true, status: 200, json: async () => catalogBody })
+  const { mod, restore } = loadBundle(fetchImpl)
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: { enabled: true, protocol: 'http', host: '10.0.0.1', port: 7890, username: '', password: '' },
+          openai: { enabled: false, protocol: 'http', host: '', port: 0, username: '', password: '' },
+          ghost: { useDefault: true, enabled: false },
+          'ghost-custom': { useDefault: true, enabled: false, testTarget: 'http://127.0.0.1:9/' },
+          'ghost-on': { useDefault: true, enabled: true },
+          'web-search': { useDefault: true, enabled: false },
+        },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    assert.equal(period, 10_000, 'the poll runs at the documented interval')
+    await settle()
+
+    const pruneWrites = harness.writes.filter(write =>
+      JSON.stringify(write.ops?.[0]?.path) === JSON.stringify(['providers']),
+    )
+    assert.equal(pruneWrites.length, 1, 'a single missed read prunes immediately')
+    assert.equal(pruneWrites[0].revision, 7, 'the prune write carries the current revision')
+    assert.equal(pruneWrites[0].ops.length, 1, 'a single set carries the whole providers map')
+    const payload = pruneWrites[0].ops[0].value
+    assert.ok(!('ghost' in payload), 'the pristine orphan is dropped')
+    for (const id of ['sensenova', 'openai', 'ghost-custom', 'ghost-on', 'web-search']) {
+      assert.ok(id in payload, `${id} must survive the prune`)
+    }
+    assert.ok(render(), 'the page still renders after the prune')
+  } finally {
+    globalThis.setInterval = real.setInterval
+    globalThis.clearInterval = real.clearInterval
+    Date.now = real.now
+    restore()
+  }
+})
+
+test('an llmAvailable:false catalogue never triggers the prune', async () => {
+  const real = { setInterval: globalThis.setInterval, clearInterval: globalThis.clearInterval, now: Date.now }
+  let tick = () => {}
+  let period = 0
+  let clock = 1_000_000
+  globalThis.setInterval = (fn, ms) => { tick = fn; period = ms; return 1 }
+  globalThis.clearInterval = () => {}
+  Date.now = () => clock
+  const catalogBody = { providers: [], llmAvailable: false }
+  const fetchImpl = async () => ({ ok: true, status: 200, json: async () => catalogBody })
+  const { mod, restore } = loadBundle(fetchImpl)
+  try {
+    const harness = mountPlugin(mod, {
+      value: { providers: { ghost: { useDefault: true, enabled: false } } },
+    })
+    renderPage(mod, harness)
+    await settle()
+    for (let i = 0; i < 4; i++) {
+      await tick()
+      await settle()
+    }
+    assert.equal(harness.writes.length, 0, 'a composition without a registry must write nothing')
+    assert.equal(period, 10_000)
   } finally {
     globalThis.setInterval = real.setInterval
     globalThis.clearInterval = real.clearInterval
@@ -5753,7 +5866,16 @@ test('N16: the pill fills onlyHosts and the result has no dead entry', async () 
 })
 
 test('N16: loading a template into an existing rule keeps the card rule', async () => {
-  const { mod, restore } = loadBundle()
+  const { mod, restore } = loadBundle(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      providers: [
+        { id: 'anthropic', name: 'Anthropic', live: true },
+        { id: 'sensenova', name: 'SenseNova', live: true },
+      ],
+    }),
+  }))
   try {
     const harness = mountPlugin(mod, {
       value: {
@@ -6300,6 +6422,279 @@ test('N22: preset with SOCKS5 protocol displays TLS switch, allows toggling TLS 
         w.ops.some(op => op.path[0] === 'proxyProfiles' && op.path[1] === 'Socks-Preset' && op.path[2] === 'proxyTlsRejectUnauthorized' && op.value === false)
       ),
       'toggling insecure cert switch writes proxyTlsRejectUnauthorized: false'
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('N23: client renders pulse dot error state, alert banner and card warning badge when route is unreachable', async () => {
+  const { mod, restore } = loadBundle(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      providers: [{ id: 'sensenova', name: 'SenseNova', live: true }],
+      heartbeat: {
+        sensenova: {
+          status: 'unreachable',
+          error: 'ECONNREFUSED',
+          fails: 2,
+          lastCheckAt: Date.now() - 60000,
+        },
+      },
+    }),
+  }))
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        heartbeatEnabled: true,
+        providers: {
+          sensenova: {
+            enabled: true,
+            protocol: 'http',
+            host: '127.0.0.1',
+            port: 7890,
+          },
+        },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+
+    const tree = render()
+    const alerts = []
+    const svgClasses = []
+    const walk = node => {
+      if (node === null || typeof node !== 'object') return
+      if (Array.isArray(node)) return node.forEach(walk)
+      if (node.props?.role === 'alert') alerts.push(node)
+      if (node.type === 'svg' && node.props?.className) svgClasses.push(node.props.className)
+      if (node.children) walk(node.children)
+    }
+    walk(tree)
+
+    // Alert banner
+    const alertBanner = alerts.find(a => textsOf(a).some(t => t.includes('失联预警') || t.includes('Unreachable Alert')))
+    assert.ok(alertBanner, 'heartbeat unreachable alert banner is rendered')
+    const bannerTexts = textsOf(alertBanner)
+    assert.ok(bannerTexts.some(t => t.includes('1') && (t.includes('节点连通中断') || t.includes('node(s) unreachable'))))
+
+    // Pulse dot in dashboard
+    assert.ok(svgClasses.some(c => c.includes('dashboardPulseDotError')), 'pulse dot switches to dashboardPulseDotError')
+
+    // Card header contains warning badge and shows "未曾连通" since lastSuccessAt is undefined
+    const card = cardFor(tree, 'sensenova')
+    assert.ok(card, 'sensenova card found')
+    const cardTexts = textsOf(card)
+    assert.ok(cardTexts.some(t => t.includes('心跳失联') && t.includes('ECONNREFUSED')), 'card header contains heartbeat unreachable badge')
+    assert.ok(cardTexts.some(t => t.includes('未曾连通') || t.includes('Never connected')), 'shows neverConnected when lastSuccessAt is undefined')
+
+    // The card enable toggle is the one checkbox inside the card; it carries no
+    // role="switch" attribute (the switches with role="switch" are the global toggles).
+    const enableCheckbox = findCheckboxes(card).find(cb => cb.props.checked === true)
+    assert.ok(enableCheckbox, 'enable route switch found on card')
+    enableCheckbox.props.onChange({ target: { checked: false } })
+
+    const updatedTree = render()
+    const updatedAlerts = []
+    const updatedSvgClasses = []
+    const walkUpdated = node => {
+      if (node === null || typeof node !== 'object') return
+      if (Array.isArray(node)) return node.forEach(walkUpdated)
+      if (node.props?.role === 'alert') updatedAlerts.push(node)
+      if (node.type === 'svg' && node.props?.className) updatedSvgClasses.push(node.props.className)
+      if (node.children) walkUpdated(node.children)
+    }
+    walkUpdated(updatedTree)
+
+    const updatedAlertBanner = updatedAlerts.find(a => textsOf(a).some(t => t.includes('失联预警') || t.includes('Unreachable Alert')))
+    assert.equal(updatedAlertBanner, undefined, 'unchecking enabled immediately clears heartbeat alert banner in local draft')
+    assert.ok(!updatedSvgClasses.some(c => c.includes('dashboardPulseDotError')), 'pulse dot immediately stops error state')
+  } finally {
+    restore()
+  }
+})
+
+test('N23: probe failing hint renders before the threshold trips, red badge takes over after it', async () => {
+  // A monitor that has already scored a failed probe but is below the threshold must
+  // say something — silence defeats the early-warning purpose. The hint is amber and
+  // carries the failure code plus fails/threshold; once the threshold trips, the
+  // unreachable red badge renders instead (never both).
+  for (const scenario of [
+    { name: 'below threshold renders the amber hint', hb: { status: 'healthy', error: 'ECONNREFUSED', fails: 1, lastCheckAt: Date.now() - 30000 }, expectHint: true, expectBadge: false },
+    { name: 'failed without code still renders the hint', hb: { status: 'healthy', fails: 1, lastCheckAt: Date.now() - 30000 }, expectHint: true, expectBadge: false },
+    { name: 'threshold reached renders the red badge, not the hint', hb: { status: 'unreachable', error: 'ECONNREFUSED', fails: 2, lastCheckAt: Date.now() - 60000 }, expectHint: false, expectBadge: true },
+    { name: 'healthy record renders nothing', hb: { status: 'healthy', fails: 0, lastCheckAt: Date.now() - 30000, lastSuccessAt: Date.now() - 30000 }, expectHint: false, expectBadge: false },
+  ]) {
+    const { mod, restore } = loadBundle(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        providers: [{ id: 'sensenova', name: 'SenseNova', live: true }],
+        heartbeat: { sensenova: scenario.hb },
+      }),
+    }))
+    try {
+      const harness = mountPlugin(mod, {
+        value: {
+          heartbeatEnabled: true,
+          heartbeatConsecutiveFails: 2,
+          providers: { sensenova: { enabled: true, protocol: 'http', host: '127.0.0.1', port: 7890 } },
+        },
+      })
+      const [, render] = renderPage(mod, harness)
+      await settle()
+      const card = cardFor(render(), 'sensenova')
+      assert.ok(card, `${scenario.name}: sensenova card found`)
+      const cardTexts = textsOf(card)
+      if (scenario.expectHint) {
+        assert.ok(
+          cardTexts.some(t => t.includes('探测失败') || t.includes('Probe failing')),
+          `${scenario.name}: amber probe-failing hint is rendered`,
+        )
+        assert.ok(
+          cardTexts.some(t => t.includes('/2')),
+          `${scenario.name}: hint shows fails/threshold counter`,
+        )
+        if (scenario.hb.error) {
+          assert.ok(
+            cardTexts.some(t => t.includes(scenario.hb.error)),
+            `${scenario.name}: hint carries the probe error code`,
+          )
+        }
+      } else {
+        assert.ok(
+          !cardTexts.some(t => t.includes('探测失败') || t.includes('Probe failing')),
+          `${scenario.name}: no amber hint`,
+        )
+      }
+      assert.equal(
+        cardTexts.some(t => t.includes('心跳失联') || t.includes('Heartbeat Unreachable')),
+        scenario.expectBadge,
+        `${scenario.name}: red badge presence`,
+      )
+    } finally {
+      restore()
+    }
+  }
+})
+
+test('N23: heartbeat monitor turned off renders no alert, badge, or error pulse dot', async () => {
+  // Records outlive the toggle by design (disabling stops the probes, it does not
+  // erase history). This test pins the UI contract that stale 'unreachable' records
+  // are NOT rendered once the global switch is off.
+  const { mod, restore } = loadBundle(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      providers: [{ id: 'sensenova', name: 'SenseNova', live: true }],
+      heartbeat: {
+        sensenova: {
+          status: 'unreachable',
+          error: 'ECONNREFUSED',
+          fails: 2,
+          lastCheckAt: Date.now() - 60000,
+        },
+      },
+    }),
+  }))
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        heartbeatEnabled: false,
+        providers: {
+          sensenova: { enabled: true, protocol: 'http', host: '127.0.0.1', port: 7890 },
+        },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+
+    const tree = render()
+    const alerts = []
+    const svgClasses = []
+    const walk = node => {
+      if (node === null || typeof node !== 'object') return
+      if (Array.isArray(node)) return node.forEach(walk)
+      if (node.props?.role === 'alert') alerts.push(node)
+      if (node.type === 'svg' && node.props?.className) svgClasses.push(node.props.className)
+      if (node.children) walk(node.children)
+    }
+    walk(tree)
+
+    assert.equal(
+      alerts.find(a => textsOf(a).some(t => t.includes('失联预警') || t.includes('Unreachable Alert'))),
+      undefined,
+      'no unreachable alert banner while the heartbeat switch is off',
+    )
+    assert.ok(
+      !svgClasses.some(c => c.includes('dashboardPulseDotError')),
+      'pulse dot never flips to error while the heartbeat switch is off',
+    )
+    const card = cardFor(tree, 'sensenova')
+    assert.ok(card, 'sensenova card found')
+    assert.ok(
+      !textsOf(card).some(t => t.includes('心跳失联')),
+      'no heartbeat unreachable badge on the card while the switch is off',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('N23: global settings renders heartbeat switch, interval selector and consecutive fails input', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {},
+        heartbeatEnabled: false,
+        heartbeatInterval: 300,
+        heartbeatConsecutiveFails: 2,
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+
+    let checkboxes = findCheckboxes(render())
+    const hbSwitch = checkboxes.find(b => b.props['aria-label'] === '启用后台心跳监测' || b.props['aria-label'] === 'Enable background heartbeat monitoring')
+    assert.ok(hbSwitch, 'heartbeat enable switch found')
+    assert.equal(hbSwitch.props.checked, false)
+
+    // Toggle on
+    hbSwitch.props.onChange({ target: { checked: true } })
+    await writeSettle()
+
+    assert.ok(
+      harness.writes.some(w => w.ops.some(op => op.path[0] === 'heartbeatEnabled' && op.value === true)),
+      'toggling heartbeat switch writes to heartbeatEnabled: true',
+    )
+
+    // Once enabled, interval selector and consecutive fails input appear
+    const updated = render()
+    const selects = []
+    const inputs = []
+    const walk = node => {
+      if (node === null || typeof node !== 'object') return
+      if (Array.isArray(node)) return node.forEach(walk)
+      if (node.type === 'select') selects.push(node)
+      if (node.type === 'input') inputs.push(node)
+      if (node.children) walk(node.children)
+    }
+    walk(updated)
+
+    const intervalSelect = selects.find(s => s.props['aria-label'] === '探测周期' || s.props['aria-label'] === 'Probe interval')
+    assert.ok(intervalSelect, 'interval select dropdown appears when heartbeat enabled')
+
+    const failsInput = inputs.find(i => i.props['aria-label'] === '失联判定阈值 (连续失败次数)' || i.props['aria-label'] === 'Unreachable threshold (consecutive failures)')
+    assert.ok(failsInput, 'consecutive fails input appears when heartbeat enabled')
+
+    // Change interval to 60s
+    intervalSelect.props.onChange({ target: { value: '60' } })
+    await writeSettle()
+    assert.ok(
+      harness.writes.some(w => w.ops.some(op => op.path[0] === 'heartbeatInterval' && op.value === 60)),
+      'changing interval writes heartbeatInterval: 60',
     )
   } finally {
     restore()

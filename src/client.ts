@@ -3,6 +3,7 @@ import {
   calculateSuccessRate,
   calculateAverageLatency,
   calculateTotalHits,
+  countUnreachableProviders,
 } from './dashboard.js'
 /**
  * dsh-provider-proxy — browser half.
@@ -243,7 +244,22 @@ async function writeConfig(ctx: any, ops: readonly unknown[]): Promise<void> {
  * already configured is kept regardless, so a saved setting never silently
  * disappears from view.
  */
-function knownProviders(configured: Record<string, RouteValue>, published: ProviderRow[]): ProviderRow[] {
+/**
+ * The provider rows, read from the Host AND the saved configuration.
+ *
+ * The Host catalogue is authoritative: a provider that the Host no longer
+ * registers — whether or not the user deleted its plugin — is not a provider the
+ * user can select, so it is not a card. With `allowSavedOrphans` the saved config
+ * may keep a ghost row (name cached, live:false) for a provider that the Host
+ * still knows but no longer offers live; a provider the Host does not know at ALL
+ * is dropped entirely. When the catalogue fails the saved config is kept as the
+ * fallback so the page never degrades to an empty list.
+ */
+function knownProviders(
+  configured: Record<string, RouteValue>,
+  published: ProviderRow[],
+  allowSavedOrphans = false,
+): ProviderRow[] {
   const rows = new Map<string, ProviderRow>()
   const byId = new Map<string, ProviderRow>()
   for (const row of published) {
@@ -256,10 +272,105 @@ function knownProviders(configured: Record<string, RouteValue>, published: Provi
     // its provider live. `live` comes from the Host catalogue exclusively; using
     // `route.enabled` here made a card flip between "offline" and "proxied" as
     // the user toggled the switch, while no provider became available at all.
+    //
+    // A provider the Host does not know at ALL — typically a plugin the user
+    // deleted — is not rendered, even if it has a saved route: there is no
+    // provider to proxy to. Only a saved route whose provider the Host still
+    // knows, but ships disabled, keeps a card (with `allowSavedOrphans`).
     const known = byId.get(id)
+    if (known === undefined && !allowSavedOrphans) continue
     rows.set(id, { id, name: known?.name ?? id, live: known?.live === true })
   }
   return [...rows.values()].sort(byName)
+}
+
+/**
+ * The reserved web-search route rides in the same dictionary. Its Host entry
+ * only exists when the web service does, so the prune must never touch it.
+ */
+const RESERVED_PROVIDER_IDS = new Set(['web-search'])
+
+/**
+ * A saved route entry this page has never actually shaped.
+ *
+ * "Pristine" means: only the two keys the defaults flow writes — `useDefault`
+ * and `enabled` — and the route is not enabled. Anything else (a host, a
+ * protocol, a `testTarget`, a credential, `enabled: true`) means the user
+ * touched it, so a vanished provider gets a flag row, never a deletion.
+ */
+function isPristineDefaultRoute(value: unknown): boolean {
+  if (value === null || typeof value !== 'object') return false
+  const keys = Object.keys(value)
+  if (keys.length === 0) return false
+  if (!keys.every(key => key === 'enabled' || key === 'useDefault')) return false
+  return (value as { enabled?: unknown }).enabled !== true
+}
+
+/** How many consecutive successful catalogue reads may miss an id before its entry is dropped. */
+const ORPHAN_PRUNE_STREAK = 1
+/** Per provider id: how many consecutive successful reads missed it. Only prunes at the threshold. */
+const orphanAbsentStreak = new Map<string, number>()
+
+/**
+ * Drop saved route entries whose provider the Host has forgotten — the page's
+ * answer to "I deleted the plugin, why is the card still there?".
+ *
+ * Safety rails, because deleting a user's data silently is the failure mode we
+ * are here to avoid:
+ *  - the Host must actually be able to read its llm registry (`llmAvailable`),
+ *    so a composition without one never prunes;
+ *  - the id must be missed by at least `ORPHAN_PRUNE_STREAK` successful reads
+ *    (mount + every 10 s poll) — one read is enough in the common case: a single
+ *    missed catalogue read is already authoritative for a pristine entry, while
+ *    the shared risk (a transient reading) is traded away below;
+ *  - the entry must be a pristine default (`{ useDefault, enabled: false? }` only,
+ *    never enabled, no custom host/target/credential of any kind);
+ *  - it is not touched mid-edit: an id with a pending draft is preserved;
+ *  - `web-search` is reserved and never pruned;
+ *  - the write goes through the same `enqueueWrite`/revision path as settings edits.
+ * Customized orphans keep the existing "listed but not in the Host catalogue" row.
+ */
+function maybePruneOrphans(opts: {
+  ctx: any
+  configured: Record<string, RouteValue>
+  draft: Record<string, RouteValue>
+  catalog: Catalog
+  messages: { pruned: string; label: string }
+  note: (value: any) => void
+  onError: (value: any) => void
+}): void {
+  const { ctx, configured, draft, catalog, messages, note, onError } = opts
+  if (catalog.error !== undefined || catalog.llmAvailable !== true) return
+  const publishedIds = new Set((catalog.publishedRows ?? []).map(row => row.id))
+  const candidateIds = new Set<string>()
+  const prunable: string[] = []
+  for (const id of Object.keys(configured)) {
+    if (RESERVED_PROVIDER_IDS.has(id)) continue
+    if (!isPristineDefaultRoute(configured[id])) continue
+    if (draft[id] !== undefined) continue
+    if (publishedIds.has(id)) continue
+    candidateIds.add(id)
+    const streak = (orphanAbsentStreak.get(id) ?? 0) + 1
+    orphanAbsentStreak.set(id, streak)
+    if (streak >= ORPHAN_PRUNE_STREAK) prunable.push(id)
+  }
+  // Ids that stopped being candidates (re-appeared, became customized, left the
+  // config, gained a draft) lose their streak, so nothing stale is ever acted on.
+  for (const id of [...orphanAbsentStreak.keys()]) {
+    if (!candidateIds.has(id)) orphanAbsentStreak.delete(id)
+  }
+  if (prunable.length === 0) return
+  for (const id of prunable) orphanAbsentStreak.delete(id)
+  const pruned = new Set(prunable)
+  const next = { ...configured, ...draft }
+  for (const id of pruned) delete next[id]
+  void enqueueWrite(() =>
+    writeConfig(ctx, [{ op: 'set', path: ['providers'], value: next }])
+      .then(() => note(`${messages.pruned}${prunable.join('、')}`))
+      .catch((error: any) => {
+        onError({ label: messages.label, message: String(error?.message ?? error) })
+      }),
+  )
 }
 
 /**
@@ -431,6 +542,14 @@ type LastUse = {
   fallback?: boolean
 }
 
+type HeartbeatState = {
+  status: 'healthy' | 'unreachable'
+  lastCheckAt?: number
+  lastSuccessAt?: number
+  latencyMs?: number | null
+  error?: string
+  fails?: number
+}
 /** What the Host endpoint publishes: provider rows, hit counts, rejected routes. */
 type Catalog = {
   rows: ProviderRow[]
@@ -443,6 +562,7 @@ type Catalog = {
   hits: Record<string, number>
   problems: Record<string, string>
   lastUse: Record<string, LastUse>
+  heartbeat?: Record<string, HeartbeatState>
   bypassAll?: boolean
   /**
    * The forward proxy the Host inherited from its environment, if any. The
@@ -452,6 +572,12 @@ type Catalog = {
   environmentProxy?: DetectedProxy | null
   /** Set when the FIRST read failed; a later successful poll clears it. */
   error?: string
+  /**
+   * Published by the Host: whether it can read the llm registry at all. The page
+   * gates auto-pruning of vanished default routes on it — a composition with
+   * no llm service must never trigger the prune, even though the list is empty.
+   */
+  llmAvailable?: boolean
 }
 
 /** One proxy detected in the Host's environment (see `src/proxy-env.ts`). */
@@ -557,8 +683,26 @@ async function fetchCatalog(): Promise<Catalog> {
       hadCredentials: candidate.hadCredentials === true,
     }
   })()
+  const heartbeat: Record<string, HeartbeatState> = {}
+  const publishedHeartbeat = body?.heartbeat
+  if (publishedHeartbeat !== null && typeof publishedHeartbeat === 'object') {
+    for (const [id, raw] of Object.entries(publishedHeartbeat)) {
+      const entry = raw as any
+      if (entry && (entry.status === 'healthy' || entry.status === 'unreachable')) {
+        heartbeat[id] = {
+          status: entry.status,
+          lastCheckAt: typeof entry.lastCheckAt === 'number' ? entry.lastCheckAt : undefined,
+          lastSuccessAt: typeof entry.lastSuccessAt === 'number' ? entry.lastSuccessAt : undefined,
+          latencyMs: typeof entry.latencyMs === 'number' ? entry.latencyMs : null,
+          error: typeof entry.error === 'string' ? entry.error : undefined,
+          fails: typeof entry.fails === 'number' ? entry.fails : 0,
+        }
+      }
+    }
+  }
   const bypassAll = body?.bypassAll === true
-  return { rows, publishedRows: rows, hits, problems, lastUse, environmentProxy, bypassAll }
+  const llmAvailable = body?.llmAvailable === true
+  return { rows, publishedRows: rows, hits, problems, lastUse, heartbeat, environmentProxy, bypassAll, llmAvailable }
 }
 
 /**
@@ -819,6 +963,15 @@ const TEST_RELEVANT_FIELDS = new Set([
   'testTarget',
   'useDefault',
 ])
+
+/**
+ * Background-monitor knobs. They only reconfigure the periodic probe; they change
+ * NOTHING about how a click on a card's self-check button would route. Invalidate
+ * the cached self-check answers for the OTHER global fields (which do change
+ * routing), but never for these — toggling the monitor must not wipe the answer
+ * the user asked for a moment ago.
+ */
+const HEARTBEAT_GLOBAL_FIELDS = new Set(['heartbeatEnabled', 'heartbeatInterval', 'heartbeatConsecutiveFails'])
 
 /** The provider directory, cached module-side. See renderPage. */
 let directoryCache: ProviderRow[] | undefined
@@ -1419,6 +1572,33 @@ const S = {
     borderColor: 'var(--dsw-alias-state-warning-border, rgba(210, 153, 34, 0.5))',
     background: 'var(--dsw-alias-state-warning-subtle, rgba(210, 153, 34, 0.12))',
   },
+  heartbeatAlertBanner: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    padding: '10px 14px',
+    borderRadius: '8px',
+    background: 'var(--dsw-alias-state-error-subtle, rgba(248, 81, 73, 0.12))',
+    borderWidth: '1px',
+    borderStyle: 'solid',
+    borderColor: 'var(--dsw-alias-state-error-border, rgba(248, 81, 73, 0.4))',
+    color: 'var(--dsw-alias-state-error-primary, #f85149)',
+    fontSize: '12px',
+    lineHeight: '1.5',
+  },
+  heartbeatWarningBadge: {
+    display: 'inline-block',
+    padding: '1px 6px',
+    borderRadius: '4px',
+    background: 'var(--dsw-alias-state-warning-subtle, rgba(210, 153, 34, 0.15))',
+    borderWidth: '1px',
+    borderStyle: 'solid',
+    borderColor: 'var(--dsw-alias-state-warning-border, rgba(210, 153, 34, 0.4))',
+    color: 'var(--dsw-alias-state-warning-primary, #d29922)',
+    fontSize: '11px',
+    fontWeight: 500,
+    whiteSpace: 'nowrap',
+  },
   bypassAlertBanner: {
     display: 'flex',
     alignItems: 'center',
@@ -1473,6 +1653,7 @@ function renderPage(ctx: any): unknown {
           hits: {},
           problems: {},
           lastUse: {},
+          heartbeat: {},
           error: String(error?.message ?? error),
         })
       })
@@ -1482,6 +1663,7 @@ function renderPage(ctx: any): unknown {
       hits: {} as Record<string, number>,
       problems: {} as Record<string, string>,
       lastUse: {} as Record<string, LastUse>,
+      heartbeat: {} as Record<string, HeartbeatState>,
       environmentProxy: null as DetectedProxy | null,
       bypassAll: false as boolean,
       error: undefined as string | undefined,
@@ -1490,18 +1672,29 @@ function renderPage(ctx: any): unknown {
   })
   // The setter is published right after the hook so the initializer's promise
   // can reach it. It is re-published on every render, so the latest wins.
-  catalogueSetter = catalog =>
+  catalogueSetter = catalog => {
+    maybePruneOrphans({
+      ctx,
+      configured,
+      draft,
+      catalog,
+      messages: { pruned: t.orphanPruned, label: t.orphanPrunedLabel },
+      note: setSavedNote,
+      onError: value => setSaveError(value),
+    })
     setState({
       rows: catalog.rows,
       publishedRows: catalog.publishedRows,
       hits: catalog.hits,
       problems: catalog.problems,
       lastUse: catalog.lastUse,
+      heartbeat: catalog.heartbeat ?? {},
       environmentProxy: catalog.environmentProxy ?? null,
       bypassAll: catalog.bypassAll === true,
       error: catalog.error,
       pending: false,
     })
+  }
   // Keeps the catalogue (rows, hit counts, rejected routes) current while the
   // page is open; see the function's own notes for the staleness handling.
   touchCatalogPolling()
@@ -1510,6 +1703,7 @@ function renderPage(ctx: any): unknown {
   const publishedRows = state.publishedRows ?? []
   const hits = state.hits ?? {}
   const lastUse = state.lastUse ?? {}
+  const heartbeat = state.heartbeat ?? {}
 
   /**
    * The one-line last-use summary for a card, or `undefined` when the route has
@@ -1530,6 +1724,41 @@ function renderPage(ctx: any): unknown {
     if (use.ok === true) return `${t.recentOk}${relativeTime(use.at ?? use.startedAt ?? Date.now(), t)}`
     if (use.ok === false) return `${t.recentFail}${use.code ?? 'ERROR'}`
     return `${t.recentStarted}${relativeTime(use.startedAt ?? use.at ?? Date.now(), t)}`
+  }
+  /**
+   * The shared unreachable badge, rendered at two sites (card header / compact row).
+   * Extracted so a change to the wording — or the `globalHeartbeatEnabled` gate that
+   * keeps a persisted record from leaking into the page while the monitor is off —
+   * can never be applied to only one of them.
+   */
+  const heartbeatBadge = (rowId: string, enabled: boolean) => {
+    const entry = heartbeat[rowId]
+    if (!globalHeartbeatEnabled || !enabled || entry?.status !== 'unreachable') return null
+    return h(
+      'span',
+      { className: styles.heartbeatWarningBadge, style: S.heartbeatWarningBadge },
+      `${t.heartbeatUnreachableTag}${entry.error ? ` (${entry.error})` : ''}`,
+    )
+  }
+  /**
+   * The amber pre-alert: consecutive failed probes that have NOT yet reached the
+   * threshold. Without it, a monitor that has already detected trouble says nothing
+   * until the Nth failure — a 60s+ of silence inside the feature whose whole job is
+   * early warning. Rendered only while the record is `healthy` with fails > 0, so it
+   * never double-renders alongside the red badge.
+   */
+  const heartbeatProbeHint = (rowId: string, enabled: boolean) => {
+    const entry = heartbeat[rowId]
+    if (!globalHeartbeatEnabled || !enabled || entry === undefined || entry.status === 'unreachable') return null
+    const fails = entry.fails ?? 0
+    if (fails <= 0) return null
+    return h(
+      'span',
+      {
+        style: { ...S.hits, color: 'var(--dsw-alias-state-warning-primary, #d29922)' },
+      },
+      `${t.heartbeatProbeFailing}${entry.error ? ` (${entry.error})` : ''} ${fails}/${globalHeartbeatConsecutiveFails}`,
+    )
   }
   // Rendered straight from state rather than through `note()`: `diagnostics` is
   // cleared at the start of every render, so a note written when the catalog
@@ -1870,7 +2099,13 @@ function renderPage(ctx: any): unknown {
     })()
   }
 
-  const rows = knownProviders({ ...configured, ...draft }, published)
+  const rows = knownProviders(
+    { ...configured, ...draft },
+    published,
+    // Keep the saved list only until the catalogue is authoritative (or when the
+    // catalogue fails); once it loads it decides which saved rows exist.
+    state.pending === true || state.error !== undefined,
+  )
 
   /** Cards whose effective endpoint comes from the shared default. */
   const inheritingIds = (): string[] =>
@@ -1957,10 +2192,10 @@ function renderPage(ctx: any): unknown {
     })
   }
 
-  /** One advanced global control: draft, invalidate every check, persist. */
-  const bindGlobal = (field: 'testUrl' | 'localDirect' | 'enableFallbackDirect' | 'bypassAll') => (value: unknown) => {
+  /** One advanced global control: draft, persist, and invalidate cached checks only when the routing verdict can change. */
+  const bindGlobal = (field: 'testUrl' | 'localDirect' | 'enableFallbackDirect' | 'bypassAll' | 'heartbeatEnabled' | 'heartbeatInterval' | 'heartbeatConsecutiveFails') => (value: unknown) => {
     editGlobal(field, value)
-    invalidateTests(rows.map(row => row.id))
+    if (!HEARTBEAT_GLOBAL_FIELDS.has(field)) invalidateTests(rows.map(row => row.id))
     save(`\u0000global\u0000${field}`, [field], field, value, () => {
       setGlobalDraft((current: any) => {
         if (current[field] === undefined) return current
@@ -3111,11 +3346,17 @@ function renderPage(ctx: any): unknown {
   const storedLocalDirect = snapshot.value?.localDirect !== false
   const storedEnableFallbackDirect = snapshot.value?.enableFallbackDirect === true
   const storedBypassAll = snapshot.value?.bypassAll === true || state.bypassAll === true
+  const storedHeartbeatEnabled = snapshot.value?.heartbeatEnabled === true
+  const storedHeartbeatInterval = typeof snapshot.value?.heartbeatInterval === 'number' ? snapshot.value.heartbeatInterval : 300
+  const storedHeartbeatConsecutiveFails = typeof snapshot.value?.heartbeatConsecutiveFails === 'number' ? snapshot.value.heartbeatConsecutiveFails : 2
   const globalBypassAll =
     typeof globalDraft.bypassAll === 'boolean'
       ? globalDraft.bypassAll
       : storedBypassAll
   const globalTestUrl = typeof globalDraft.testUrl === 'string' ? globalDraft.testUrl : storedTestUrl
+  const globalHeartbeatEnabled = typeof globalDraft.heartbeatEnabled === 'boolean' ? globalDraft.heartbeatEnabled : storedHeartbeatEnabled
+  const globalHeartbeatInterval = typeof globalDraft.heartbeatInterval === 'number' ? globalDraft.heartbeatInterval : storedHeartbeatInterval
+  const globalHeartbeatConsecutiveFails = typeof globalDraft.heartbeatConsecutiveFails === 'number' ? globalDraft.heartbeatConsecutiveFails : storedHeartbeatConsecutiveFails
   const globalLocalDirect =
     typeof globalDraft.localDirect === 'boolean' ? globalDraft.localDirect : storedLocalDirect
   const globalEnableFallbackDirect =
@@ -3345,6 +3586,65 @@ function renderPage(ctx: any): unknown {
             role: 'alert',
           },
           t.fallbackSecurityWarning,
+        )
+      : null,
+    h(
+      'label',
+      { className: styles.toggle, style: { ...S.toggle, marginTop: '8px' } },
+      h('input', {
+        type: 'checkbox',
+        role: 'switch',
+        'aria-checked': globalHeartbeatEnabled,
+        'aria-label': t.heartbeatEnable,
+        checked: globalHeartbeatEnabled,
+        onChange: (event: any) => bindGlobal('heartbeatEnabled')(event.target.checked === true),
+      }),
+      h('span', null, t.heartbeatEnable),
+    ),
+    h(
+      'p',
+      { className: styles.hint, style: { ...S.hint, margin: '2px 0 0' } },
+      globalHeartbeatEnabled ? t.heartbeatEnableOnHint : t.heartbeatEnableOffHint,
+    ),
+    globalHeartbeatEnabled
+      ? h(
+          'div',
+          { style: { display: 'flex', gap: '16px', marginTop: '8px', flexWrap: 'wrap' } },
+          h(
+            'label',
+            { className: styles.field, style: { ...S.field, flex: '1 1 200px' } },
+            h('span', { className: styles.label, style: S.label }, t.heartbeatInterval),
+            h(
+              'select',
+              {
+                className: styles.input,
+                style: S.input,
+                value: String(globalHeartbeatInterval),
+                onChange: (event: any) => bindGlobal('heartbeatInterval')(Number(event.target.value) || 300),
+                'aria-label': t.heartbeatInterval,
+              },
+              h('option', { value: '60' }, t.heartbeatInterval60),
+              h('option', { value: '300' }, t.heartbeatInterval300),
+              h('option', { value: '900' }, t.heartbeatInterval900),
+              h('option', { value: '1800' }, t.heartbeatInterval1800),
+            ),
+          ),
+          h(
+            'label',
+            { className: styles.field, style: { ...S.field, flex: '1 1 200px' } },
+            h('span', { className: styles.label, style: S.label }, t.heartbeatConsecutiveFails),
+            h('input', {
+              className: styles.input,
+              style: S.input,
+              type: 'number',
+              min: 1,
+              max: 10,
+              value: globalHeartbeatConsecutiveFails,
+              onChange: (event: any) => bindGlobal('heartbeatConsecutiveFails')(Math.max(1, Math.min(10, parseInt(event.target.value, 10) || 2))),
+              'aria-label': t.heartbeatConsecutiveFails,
+            }),
+            h('span', { className: styles.hint, style: S.hint }, t.heartbeatConsecutiveFailsHint),
+          ),
         )
       : null,
     ],
@@ -3674,6 +3974,16 @@ function renderPage(ctx: any): unknown {
                     `${t.hitCountPrefix}${hits[row.id] ?? 0}${t.hitCountSuffix}`,
                   )
                 : null,
+              heartbeatBadge(row.id, route.enabled),
+              globalHeartbeatEnabled && route.enabled && heartbeat[row.id]?.status === 'unreachable'
+                ? h(
+                    'span',
+                    { style: { ...S.hits, color: 'var(--dsw-alias-state-warning-primary, #d29922)' } },
+                    heartbeat[row.id]?.lastSuccessAt
+                      ? `${t.lastSuccessPrefix}${relativeTime(heartbeat[row.id]!.lastSuccessAt!, t)}`
+                      : t.neverConnected,
+                  )
+                : heartbeatProbeHint(row.id, route.enabled),
               // The last-use line. A failure takes the error colour, same rule as
               // a failed self-check: it is an answer, not decoration.
               lastText === undefined
@@ -4053,6 +4363,8 @@ function renderPage(ctx: any): unknown {
               },
               endpointText,
             ),
+            heartbeatBadge(row.id, route.enabled),
+            heartbeatProbeHint(row.id, route.enabled),
             lastText === undefined
               ? null
               : h(
@@ -4215,6 +4527,14 @@ function renderPage(ctx: any): unknown {
     }
   }
   const coverage = calculateCoverage(rows, effectiveConfigured, effectiveProblems, isZh)
+  // Heartbeat is strictly opt-in. Turning it off stops the probes but deliberately
+  // keeps the recorded history, so without this gate the red banner and badges would
+  // outlive the toggle forever, rendered from a stale snapshot. Only render alerts
+  // while the global switch is on.
+  const unreachable = globalHeartbeatEnabled
+    ? countUnreachableProviders(rows, effectiveConfigured, heartbeat)
+    : { count: 0, unreachableIds: [] as string[] }
+  const hasUnreachable = unreachable.count > 0
   const successRate = calculateSuccessRate(lastUse, isZh)
   const avgLatency = calculateAverageLatency(tests)
   const totalHits = calculateTotalHits(hits)
@@ -4246,20 +4566,20 @@ function renderPage(ctx: any): unknown {
             height: 10,
             viewBox: '0 0 10 10',
             style: { flexShrink: 0, display: 'inline-block', verticalAlign: 'middle', marginRight: '2px' },
-            className: globalBypassAll ? styles.dashboardPulseDotWarning : styles.dashboardPulseDot,
+            className: globalBypassAll ? styles.dashboardPulseDotWarning : (hasUnreachable ? styles.dashboardPulseDotError : styles.dashboardPulseDot),
             'aria-hidden': 'true',
           },
           h('circle', {
             cx: 5,
             cy: 5,
             r: 4.5,
-            fill: globalBypassAll ? 'rgba(210, 153, 34, 0.25)' : 'rgba(35, 134, 54, 0.25)',
+            fill: globalBypassAll ? 'rgba(210, 153, 34, 0.25)' : (hasUnreachable ? 'rgba(248, 81, 73, 0.25)' : 'rgba(35, 134, 54, 0.25)'),
           }),
           h('circle', {
             cx: 5,
             cy: 5,
             r: 3,
-            fill: globalBypassAll ? 'var(--dsw-alias-state-warning-primary, #d29922)' : 'var(--dsw-alias-state-success-primary, #238636)',
+            fill: globalBypassAll ? 'var(--dsw-alias-state-warning-primary, #d29922)' : (hasUnreachable ? 'var(--dsw-alias-state-error-primary, #f85149)' : 'var(--dsw-alias-state-success-primary, #238636)'),
           }),
         ),
         h('span', { className: styles.dashboardTitle, style: S.dashboardTitle }, t.dashboardTitle),
@@ -4304,6 +4624,37 @@ function renderPage(ctx: any): unknown {
             h('line', { x1: 12, y1: 17, x2: 12.01, y2: 17 }),
           ),
           h('div', null, h('strong', null, t.bypassAllBannerTitle), ' ', t.bypassAllBannerText),
+        )
+      : null,
+    hasUnreachable
+      ? h(
+          'div',
+          { className: styles.heartbeatAlertBanner, role: 'alert', style: S.heartbeatAlertBanner },
+          h(
+            'svg',
+            {
+              width: 16,
+              height: 16,
+              viewBox: '0 0 24 24',
+              fill: 'none',
+              stroke: 'currentColor',
+              strokeWidth: 2,
+              strokeLinecap: 'round',
+              strokeLinejoin: 'round',
+              style: { flexShrink: 0 },
+              'aria-hidden': 'true',
+            },
+            h('path', { d: 'm21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z' }),
+            h('line', { x1: 12, y1: 9, x2: 12, y2: 13 }),
+            h('line', { x1: 12, y1: 17, x2: 12.01, y2: 17 }),
+          ),
+          h(
+            'div',
+            null,
+            h('strong', null, `${t.heartbeatAlertPrefix}：${unreachable.count} ${t.heartbeatAlertCountUnit}`),
+            ' ',
+            `(${unreachable.unreachableIds.map(id => rows.find(r => r.id === id)?.name || id).join(', ')})`,
+          ),
         )
       : null,
     h(
@@ -4686,6 +5037,24 @@ const EN = {
   metricHitsTitle: 'Total Requests',
   resetHits: 'Reset',
   resetHitsHint: 'Reset hit counts for all providers',
+  heartbeatEnable: 'Enable background heartbeat monitoring',
+  heartbeatEnableOnHint: 'On: Periodically sends lightweight probes to enabled providers to detect outages early.',
+  heartbeatEnableOffHint: 'Off (default): Zero unsolicited traffic; no background probes.',
+  heartbeatInterval: 'Probe interval',
+  heartbeatInterval60: '60s (1 min)',
+  heartbeatInterval300: '300s (5 min, default)',
+  heartbeatInterval900: '900s (15 min)',
+  heartbeatInterval1800: '1800s (30 min)',
+  heartbeatConsecutiveFails: 'Unreachable threshold (consecutive failures)',
+  heartbeatConsecutiveFailsHint: 'Trigger unreachable alert after this many consecutive failures (default 2)',
+  heartbeatAlertPrefix: 'Unreachable Alert',
+  heartbeatAlertCountUnit: 'proxy node(s) unreachable',
+  heartbeatUnreachableTag: 'Heartbeat Unreachable',
+  heartbeatProbeFailing: 'Probe failing',
+  orphanPruned: 'Auto-removed default routes whose provider the Host no longer lists: ',
+  orphanPrunedLabel: 'auto-prune',
+  neverConnected: 'Never connected',
+  lastSuccessPrefix: 'Last success: ',
   dashboardTitle: 'Runtime Health & Metrics',
   bypassAllToggle: 'Emergency Bypass All',
   bypassAllBannerTitle: '[Emergency Bypass Active]',
@@ -4852,6 +5221,24 @@ const ZH = {
   metricHitsTitle: '累计转发请求量',
   resetHits: '重置',
   resetHitsHint: '重置所有 provider 的转发命中计数',
+  heartbeatEnable: '启用后台心跳监测',
+  heartbeatEnableOnHint: '开启：定时向已启用的 Provider 发送轻量探测请求，提前发现失效节点并告警。',
+  heartbeatEnableOffHint: '关闭（默认）：遵循零额外流量原则，不进行后台探测。',
+  heartbeatInterval: '探测周期',
+  heartbeatInterval60: '60 秒 (1 分钟)',
+  heartbeatInterval300: '300 秒 (5 分钟，默认)',
+  heartbeatInterval900: '900 秒 (15 分钟)',
+  heartbeatInterval1800: '1800 秒 (30 分钟)',
+  heartbeatConsecutiveFails: '失联判定阈值 (连续失败次数)',
+  heartbeatConsecutiveFailsHint: '连续失败达到该次数后触发失联预警（默认 2 次）',
+  heartbeatAlertPrefix: '失联预警',
+  heartbeatAlertCountUnit: '个代理节点连通中断',
+  heartbeatUnreachableTag: '心跳失联',
+  heartbeatProbeFailing: '探测失败',
+  orphanPruned: '已自动清理 Host 目录中不存在的保存配置：',
+  orphanPrunedLabel: '自动清理',
+  neverConnected: '未曾连通',
+  lastSuccessPrefix: '上次成功: ',
   dashboardTitle: '运行监控与健康态势',
   bypassAllToggle: '全局紧急旁路 (Bypass All)',
   bypassAllBannerTitle: '[紧急旁路激活中]',
