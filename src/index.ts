@@ -1,3 +1,11 @@
+export interface HeartbeatState {
+  status: 'healthy' | 'unreachable'
+  lastCheckAt: number
+  lastSuccessAt?: number
+  latencyMs: number | null
+  error?: string
+  fails: number
+}
 /**
  * dsh-provider-proxy — Host half.
  *
@@ -20,6 +28,7 @@ import {
 } from './proxy-table.js'
 import {
   normalizeDefaultProxy,
+  normalizeHeartbeatConfig,
   type DefaultProxyValue,
   type ProviderProxyRouteValue,
 } from './config.js'
@@ -61,6 +70,9 @@ interface ProxyConfig {
   readonly bypassAll?: unknown
   /** The self-check URL, or the Volatile wrapper around it. */
   readonly testUrl?: unknown
+  readonly heartbeatEnabled?: unknown
+  readonly heartbeatInterval?: unknown
+  readonly heartbeatConsecutiveFails?: unknown
 }
 
 function plainProviders(
@@ -108,20 +120,36 @@ function plainLocalDirect(config: ProxyConfig | undefined): boolean {
   return value !== false
 }
 
-function plainBypassAll(config: ProxyConfig | undefined): boolean {
-  const raw = config?.bypassAll
-  if (raw === undefined) return false
-  const snapshot = (raw as { get?: () => unknown }).get
-  const value = typeof snapshot === 'function' ? snapshot.call(raw) : raw
-  return value === true
+/** Unwrap a schemastery `.volatile()` fiber field: `.get()` when present, else the raw value. */
+function fiberValue(raw: unknown): unknown {
+  const snapshot = (raw as { get?: () => unknown } | undefined)?.get
+  return typeof snapshot === 'function' ? snapshot.call(raw as never) : raw
 }
 
+const fiberBool = (raw: unknown): boolean => fiberValue(raw) === true
+const fiberNumber = (raw: unknown): number | undefined => {
+  const value = Number(fiberValue(raw))
+  return Number.isFinite(value) ? value : undefined
+}
+
+function plainBypassAll(config: ProxyConfig | undefined): boolean {
+  return fiberBool(config?.bypassAll)
+}
+
+
+function plainHeartbeatEnabled(config: ProxyConfig | undefined): boolean {
+  return normalizeHeartbeatConfig({ heartbeatEnabled: fiberValue(config?.heartbeatEnabled) as boolean | undefined }).heartbeatEnabled
+}
+
+function plainHeartbeatInterval(config: ProxyConfig | undefined): number {
+  return normalizeHeartbeatConfig({ heartbeatInterval: fiberNumber(config?.heartbeatInterval) }).heartbeatInterval
+}
+
+function plainHeartbeatConsecutiveFails(config: ProxyConfig | undefined): number {
+  return normalizeHeartbeatConfig({ heartbeatConsecutiveFails: fiberNumber(config?.heartbeatConsecutiveFails) }).heartbeatConsecutiveFails
+}
 function plainEnableFallbackDirect(config: ProxyConfig | undefined): boolean {
-  const raw = config?.enableFallbackDirect
-  if (raw === undefined) return false
-  const snapshot = (raw as { get?: () => unknown }).get
-  const value = typeof snapshot === 'function' ? snapshot.call(raw) : raw
-  return value === true
+  return fiberBool(config?.enableFallbackDirect)
 }
 
 export function apply(ctx: any, config?: ProxyConfig): void {
@@ -129,6 +157,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
   let current = new Map<string, RouteEntry>()
   let problems = new Map<string, string>()
   let closed = false
+  const heartbeatStates = new Map<string, HeartbeatState>()
   /** Whether a `web` service exists, i.e. whether the reserved route has anything to carry. */
   let webAvailable = false
 
@@ -180,6 +209,18 @@ export function apply(ctx: any, config?: ProxyConfig): void {
         code: ok ? String((detail as { status?: unknown } | undefined)?.status ?? '') : failureCodeOf(detail),
         ...(meta?.fallback ? { fallback: true } : {}),
       })
+      if (ok) {
+        const hb = heartbeatStates.get(provider)
+        if (hb !== undefined) {
+          heartbeatStates.set(provider, {
+            ...hb,
+            status: 'healthy',
+            fails: 0,
+            error: undefined,
+            lastSuccessAt: Date.now(),
+          })
+        }
+      }
     }
   }
 
@@ -494,6 +535,12 @@ export function apply(ctx: any, config?: ProxyConfig): void {
    * report a broken proxy as a success — the one failure this whole feature
    * exists to eliminate.
    */
+  // NB: probeHeartbeatTarget (below) shares the same verdict rules — userinfo is
+  // stripped before the request, a viaProxy 407 is a proxy-side failure, any
+  // status < 500 counts as reachable, only 5xx (or transport errors) count as
+  // failures — but it is an EARLIED background probe (HEAD → GET on 405/501,
+  // 5s cap), so the two deliberately stay separate instead of parameterising a
+  // shared helper. Change a shared rule here? Change it there too.
   const probeTarget = async (
     target: string,
     route: RouteEntry,
@@ -737,7 +784,17 @@ export function apply(ctx: any, config?: ProxyConfig): void {
       const { targets, source } = selfCheckTargetsOf(provider, route.testTarget)
       for (const target of targets) {
         const outcome = await probeTarget(target, route)
-        if (outcome.ok === true) return { ...outcome, targetSource: source }
+        if (outcome.ok === true) {
+          heartbeatStates.set(provider, {
+            status: 'healthy',
+            lastCheckAt: Date.now(),
+            lastSuccessAt: Date.now(),
+            latencyMs: typeof outcome.ms === 'number' ? outcome.ms : null,
+            fails: 0,
+            error: undefined,
+          })
+          return { ...outcome, targetSource: source }
+        }
         last = outcome
         // 407 is about the PROXY, not the target: another candidate would ask the
         // same question and get the same answer.
@@ -761,6 +818,188 @@ export function apply(ctx: any, config?: ProxyConfig): void {
     // A context without a logger still works; the diagnostics getter remains.
   }
 
+
+  const HEARTBEAT_PROBE_TIMEOUT_MS = 5_000
+  // See the matching note at probeTarget: the verdict rules are IDENTICAL (no
+  // userinfo on the wire, viaProxy 407 → proxy-side failure, status < 500 →
+  // reachable). The heartbeat probe (HEAD with Range fallback to GET, 5s budget,
+  // no JSON body) is intentionally smaller — do not grow it into probeTarget's
+  // shape; change shared rules in both or in neither.
+  const probeHeartbeatTarget = async (
+    target: string,
+    route: RouteEntry,
+  ): Promise<{ ok: boolean; latencyMs: number; error?: string }> => {
+    let host: string | undefined
+    try {
+      host = new URL(target).hostname
+    } catch {
+      return { ok: false, latencyMs: 0, error: 'INVALID_URL' }
+    }
+    const viaProxy = route.decide(host) === 'proxy'
+    const started = performance.now()
+    const cleanTarget = ((): string => {
+      try {
+        const u = new URL(target)
+        u.username = ''
+        u.password = ''
+        return u.toString()
+      } catch {
+        return target
+      }
+    })()
+    const runProbe = async (method: string) => {
+      return await undiciFetch(cleanTarget, {
+        method,
+        ...(viaProxy ? { dispatcher: route.dispatcher } : {}),
+        signal: AbortSignal.timeout(HEARTBEAT_PROBE_TIMEOUT_MS),
+        headers: method === 'GET' ? { Range: 'bytes=0-0' } : undefined,
+      } as never)
+    }
+    try {
+      let response = await runProbe('HEAD')
+      if (response.status === 405 || response.status === 501) {
+        void (response as any).body?.cancel().catch(() => {})
+        response = await runProbe('GET')
+      }
+      void (response as any).body?.cancel().catch(() => {})
+      const ms = Math.round(performance.now() - started)
+      if (viaProxy && response.status === 407) {
+        return { ok: false, latencyMs: ms, error: 'HTTP_407' }
+      }
+      if (response.status < 500) {
+        return { ok: true, latencyMs: ms }
+      }
+      return { ok: false, latencyMs: ms, error: `HTTP_${response.status}` }
+    } catch (error) {
+      const ms = Math.round(performance.now() - started)
+      const code = failureCodeOf(error)
+      return { ok: false, latencyMs: ms, error: code }
+    }
+  }
+
+  /**
+   * The in-flight cycle, if any. Triggering while a cycle is already running returns
+   * the SAME promise instead of doing nothing, so "trigger, then assert" is
+   * deterministic for the test conduit — and never starts a duplicate probe burst.
+   */
+  let heartbeatActive: Promise<void> | undefined
+  const runHeartbeatCycle = (): Promise<void> => {
+    if (closed) return Promise.resolve()
+    if (heartbeatActive) return heartbeatActive
+    if (!plainHeartbeatEnabled(config)) return Promise.resolve()
+    heartbeatActive = (async () => {
+      // Yield before touching anything: the assignment to heartbeatActive completes
+      // first, so the unconditional clear below can never erase a handle that is
+      // still needed. The in-flight guard above guarantees we are the only runner.
+      await Promise.resolve()
+      try {
+      const providers = plainProviders(config)
+      const enabledProviders = Object.entries(providers)
+        .filter(([id, p]) => p?.enabled === true && current.has(id))
+        .map(([id]) => id)
+      for (const id of [...heartbeatStates.keys()]) {
+        if (!enabledProviders.includes(id)) {
+          heartbeatStates.delete(id)
+        }
+      }
+      if (enabledProviders.length === 0) return
+      const threshold = plainHeartbeatConsecutiveFails(config)
+      const CONCURRENCY = 2
+      const queue = [...enabledProviders]
+      const worker = async () => {
+        while (queue.length > 0 && !closed) {
+          const provider = queue.shift()
+          if (!provider) break
+          const route = current.get(provider)
+          if (!route) continue
+          const jitterMs = 20 + Math.floor(Math.random() * 80)
+          await new Promise(r => setTimeout(r, jitterMs))
+          if (closed) break
+          const { targets } = selfCheckTargetsOf(provider, route.testTarget)
+          const target = targets[0] ?? DEFAULT_TEST_URL
+          const result = await probeHeartbeatTarget(target, route)
+          if (closed) break
+          const currentRecord = heartbeatStates.get(provider)
+          if (result.ok) {
+            heartbeatStates.set(provider, {
+              status: 'healthy',
+              lastCheckAt: Date.now(),
+              lastSuccessAt: Date.now(),
+              latencyMs: result.latencyMs,
+              error: undefined,
+              fails: 0,
+            })
+          } else {
+            const fails = (currentRecord?.fails ?? 0) + 1
+            const isUnreachable = fails >= threshold
+            heartbeatStates.set(provider, {
+              status: isUnreachable ? 'unreachable' : (currentRecord?.status ?? 'healthy'),
+              lastCheckAt: Date.now(),
+              lastSuccessAt: currentRecord?.lastSuccessAt,
+              latencyMs: result.latencyMs,
+              error: result.error,
+              fails,
+            })
+          }
+        }
+      }
+      const workers = Array.from({ length: Math.min(CONCURRENCY, enabledProviders.length) }, () => worker())
+      await Promise.all(workers)
+      } finally {
+        // The in-flight guard above guarantees this is the only active cycle, so
+        // the outer assignment landed before this microtask ever runs.
+        heartbeatActive = undefined
+      }
+    })()
+    return heartbeatActive
+  }
+
+  /**
+   * The heartbeat timer is a PLAIN global timer, never `ctx.setInterval`.
+   *
+   * Cordis exposes `ctx.setInterval`/`ctx.clearInterval` as accessors over the
+   * `timer` service, and this plugin only injects `llm`. Reading either property
+   * therefore trips the context proxy guard — `cannot get property "timer"
+   * without inject` — and that throw happens outside any listener catch, so the
+   * Loader reports a fatal load failure and the Host process exits with 1. A
+   * `typeof ctx?.setInterval === 'function'` probe does NOT protect against it:
+   * the property READ itself is what throws. Owning the timer here keeps the
+   * plugin composition-agnostic (no extra `timer` requirement) and its lifetime
+   * explicit: the effect teardown in `apply` calls `stopHeartbeat`, and the
+   * `unref()` below keeps an idle Host from being held alive by the probe.
+   */
+  let heartbeatTimer: any = null
+  const stopHeartbeat = (): void => {
+    if (heartbeatTimer !== null) {
+      clearInterval(heartbeatTimer)
+      heartbeatTimer = null
+    }
+  }
+
+  const startHeartbeat = (): void => {
+    // `wasRunning` is read BEFORE the stop below resets the timer: an arm from
+    // null (mount with the setting persisted, or an off→on toggle) fires one
+    // cycle right away, so the user sees the probe result immediately instead
+    // of after a full interval. A re-arm from a running timer (any unrelated
+    // volatile edit) must NOT add outbound traffic — the interval keeps
+    // firing on its own schedule.
+    const wasRunning = heartbeatTimer !== null
+    stopHeartbeat()
+    if (closed) return
+    if (!plainHeartbeatEnabled(config)) return
+    const intervalMs = plainHeartbeatInterval(config) * 1000
+    heartbeatTimer = setInterval(() => {
+      // A probe cycle must never surface as an unhandled rejection: under the
+      // Loader that is a fatal Host error, not a logged warning.
+      void runHeartbeatCycle().catch(() => undefined)
+    }, intervalMs)
+    if (heartbeatTimer && typeof heartbeatTimer.unref === 'function') {
+      heartbeatTimer.unref()
+    }
+    if (!wasRunning) {
+      void runHeartbeatCycle().catch(() => undefined)
+    }
+  }
   const rebuild = (): Promise<void> => {
     // One snapshot feeds the table, the route-state diff and every cleanup.
     // Reading the Volatile fields more than once could mix two settings writes.
@@ -774,6 +1013,11 @@ export function apply(ctx: any, config?: ProxyConfig): void {
     problems = next.problems
 
     const configured = new Set(Object.keys(providers))
+    for (const provider of [...heartbeatStates.keys()]) {
+      if (!configured.has(provider) || providers[provider]?.enabled !== true) {
+        heartbeatStates.delete(provider)
+      }
+    }
     for (const provider of [...routeStates.keys()]) {
       if (configured.has(provider)) continue
       routeStates.delete(provider)
@@ -825,7 +1069,9 @@ export function apply(ctx: any, config?: ProxyConfig): void {
     }
   }
 
-  enqueueRebuild()
+  // Mount path: a rebuild failure must not become an unhandled rejection.
+  enqueueRebuild().catch(() => undefined)
+  startHeartbeat()
 
   /**
    * The provider catalogue, read from `ctx.llm` where it is actually available.
@@ -835,7 +1081,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
    * `webServer` service is confirmed live, and the shipped dsh-llm-retry-settings
    * registers its routes the same way.
    */
-  const catalog = (): { providers: { id: string; name: string; live: boolean }[] } => {
+  const catalog = (): { providers: { id: string; name: string; live: boolean }[]; llmAvailable: boolean } => {
     const live = new Set<string>()
     const out: { id: string; name: string; live: boolean }[] = []
     const seen = new Set<string>()
@@ -873,7 +1119,13 @@ export function apply(ctx: any, config?: ProxyConfig): void {
       out.push({ id: WEB_SEARCH_KEY, name: 'Web 搜索', live: true })
     }
     out.sort((a, b) => a.name.localeCompare(b.name))
-    return { providers: out }
+    return {
+      providers: out,
+      // Says whether the Host can actually read the registry. The page uses this
+      // before auto-pruning saved routes whose provider vanished: a composition
+      // with no llm service at all must never trigger destructive writes.
+      llmAvailable: typeof (ctx as any)?.llm?.listProviders === 'function',
+    }
   }
 
   /**
@@ -913,6 +1165,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
               ),
               hits: Object.fromEntries(hits),
               lastUse: Object.fromEntries(lastUse),
+              heartbeat: Object.fromEntries(heartbeatStates),
             })
             res.writeHead(200, {
               'content-type': 'application/json; charset=utf-8',
@@ -1125,14 +1378,24 @@ export function apply(ctx: any, config?: ProxyConfig): void {
     )
 
     const onConfig = (): void => {
-      void enqueueRebuild()
+      // enqueueRebuild() returns a REJECTED promise when rebuild() throws, and the
+      // two-arg `.then` keeps that rejection from surfacing as an unhandled one —
+      // the same class of error that used to take the Host down. startHeartbeat
+      // must run on both paths so a rebuild failure cannot silently freeze the
+      // previous timer with stale config.
+      void enqueueRebuild().then(
+        () => startHeartbeat(),
+        () => startHeartbeat(),
+      )
     }
     ctx.on('loader/volatile-update', onConfig, { global: true })
 
     return async () => {
-      stop()
       if (closed) return
       closed = true
+      stop()
+      stopHeartbeat()
+      heartbeatStates.clear()
       await rebuildQueue.catch(() => undefined)
       await closeTable(current)
       current = new Map()
@@ -1153,6 +1416,9 @@ export function apply(ctx: any, config?: ProxyConfig): void {
       problems: Object.fromEntries(problems),
       hits: Object.fromEntries(hits),
       lastUse: Object.fromEntries(lastUse),
+      heartbeat: Object.fromEntries(heartbeatStates),
+      setHeartbeatState: (provider: string, state: HeartbeatState) => heartbeatStates.set(provider, state),
+      triggerHeartbeatCycle: () => runHeartbeatCycle(),
       selfCheckCache: (() => {
         let expiredEntries = 0
         let maxPerProvider = 0
@@ -1227,4 +1493,6 @@ export {
   calculateAverageLatency,
   calculateTotalHits,
   formatNumber,
+  countUnreachableProviders,
 } from './dashboard.js'
+export { normalizeHeartbeatConfig, type HeartbeatConfig } from './config.js'

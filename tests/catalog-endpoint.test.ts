@@ -58,6 +58,7 @@ test('the endpoint lists live and configurable providers', () => {
   })
   const { status, body } = get(routes)
   assert.equal(status, 200)
+  assert.equal(body.llmAvailable, true, 'the Host can read its registry, so the page may auto-prune vanished defaults')
   assert.deepEqual(
     [...body.providers].sort((a, b) => a.id.localeCompare(b.id)),
     [
@@ -108,6 +109,7 @@ test('a composition without an llm service still answers, with an empty list', (
   const { routes } = mountHost({})
   const { status, body } = get(routes)
   assert.equal(status, 200)
+  assert.equal(body.llmAvailable, false, 'no registry: the page must not auto-prune on this signal')
   assert.deepEqual(body.providers, [])
 })
 

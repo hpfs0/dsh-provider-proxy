@@ -205,6 +205,21 @@ export const Config = z.object({
    * IP echo service, which lets the check report the exit address.
    */
   testUrl: vol(z.string().default('https://api.ipify.org?format=json')),
+  /**
+   * Whether periodic background heartbeat monitoring is enabled.
+   * Off by default to respect zero unsolicited traffic principle.
+   */
+  heartbeatEnabled: vol(z.boolean().default(false)),
+  /**
+   * Heartbeat probing interval in seconds.
+   * Supported preset cycles: 60s, 300s, 900s, 1800s. Default is 300s.
+   */
+  heartbeatInterval: vol(z.number().default(300)),
+  /**
+   * Number of consecutive probe failures required before alerting that a route is unreachable.
+   * Default is 2.
+   */
+  heartbeatConsecutiveFails: vol(z.number().default(2)),
 })
 
 export interface ProviderProxyRouteValue {
@@ -242,6 +257,32 @@ export interface ConfigShape {
   enableFallbackDirect: boolean
   bypassAll: boolean
   testUrl: string
+  heartbeatEnabled: boolean
+  heartbeatInterval: number
+  heartbeatConsecutiveFails: number
+}
+
+export interface HeartbeatConfig {
+  heartbeatEnabled: boolean
+  heartbeatInterval: number
+  heartbeatConsecutiveFails: number
+}
+
+/**
+ * Normalize heartbeat configuration.
+ * Bounds interval to minimum 10s (default 300s) and consecutive fails to minimum 1 (default 2).
+ */
+export function normalizeHeartbeatConfig(raw?: Partial<HeartbeatConfig>): HeartbeatConfig {
+  const enabled = raw?.heartbeatEnabled === true
+  const intervalRaw = Number(raw?.heartbeatInterval)
+  const interval = Number.isFinite(intervalRaw) && intervalRaw >= 10 ? Math.floor(intervalRaw) : 300
+  const failsRaw = Number(raw?.heartbeatConsecutiveFails)
+  const fails = Number.isFinite(failsRaw) && failsRaw >= 1 ? Math.floor(failsRaw) : 2
+  return {
+    heartbeatEnabled: enabled,
+    heartbeatInterval: interval,
+    heartbeatConsecutiveFails: fails,
+  }
 }
 
 /** Read a schemastery-parsed object's plain value, whichever shape it takes. */

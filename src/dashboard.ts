@@ -21,6 +21,14 @@ export interface ProviderRowLike {
   live?: boolean
 }
 
+export interface HeartbeatStateLike {
+  status: 'healthy' | 'unreachable'
+  lastCheckAt?: number
+  lastSuccessAt?: number
+  latencyMs?: number | null
+  error?: string
+  fails?: number
+}
 export interface ConfiguredRouteLike {
   enabled?: boolean
 }
@@ -143,5 +151,30 @@ export function calculateTotalHits(
   return {
     total,
     formatted: formatNumber(total),
+  }
+}
+
+/**
+ * Count how many enabled providers are currently marked unreachable by heartbeat monitoring.
+ * Returns the count and the unique list of unreachable provider IDs.
+ */
+export function countUnreachableProviders(
+  rows: readonly ProviderRowLike[],
+  configured: Record<string, ConfiguredRouteLike | undefined>,
+  heartbeat: Record<string, HeartbeatStateLike | undefined> = {},
+): { count: number; unreachableIds: string[] } {
+  const seen = new Set<string>()
+  const unreachableIds: string[] = []
+  for (const row of rows) {
+    if (seen.has(row.id)) continue
+    seen.add(row.id)
+    const config = configured[row.id]
+    if (config?.enabled === true && heartbeat[row.id]?.status === 'unreachable') {
+      unreachableIds.push(row.id)
+    }
+  }
+  return {
+    count: unreachableIds.length,
+    unreachableIds,
   }
 }

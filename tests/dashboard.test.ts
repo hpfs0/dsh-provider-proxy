@@ -8,6 +8,7 @@ import {
   calculateAverageLatency,
   calculateTotalHits,
   formatNumber,
+  countUnreachableProviders,
   apply,
 } from '../lib/index.js'
 
@@ -219,4 +220,45 @@ test('N19: reset-hits endpoint clears hits counter on Host', async () => {
   providersRoute.handler({}, pres)
   const body = JSON.parse(providersJson)
   assert.deepEqual(body.hits, {}, 'hits must be empty after reset')
+})
+
+test('N23: countUnreachableProviders counts only enabled unreachable routes', () => {
+  // 1. Empty case
+  const empty = countUnreachableProviders([], {})
+  assert.equal(empty.count, 0)
+  assert.deepEqual(empty.unreachableIds, [])
+
+  const rows = [
+    { id: 'p1', name: 'Provider 1', live: true },
+    { id: 'p2', name: 'Provider 2', live: true },
+    { id: 'p3', name: 'Provider 3', live: true },
+    { id: 'p4', name: 'Provider 4', live: false },
+  ]
+
+  const configured = {
+    p1: { enabled: true },
+    p2: { enabled: false }, // disabled route
+    p3: { enabled: true },
+    p4: { enabled: true },
+  }
+
+  // 2. All healthy or no heartbeat records
+  const resHealthy = countUnreachableProviders(rows, configured, {
+    p1: { status: 'healthy', fails: 0 },
+    p2: { status: 'healthy', fails: 0 },
+    p3: { status: 'healthy', fails: 0 },
+  })
+  assert.equal(resHealthy.count, 0)
+  assert.deepEqual(resHealthy.unreachableIds, [])
+
+  // 3. Unreachable states mixed with disabled and unconfigured
+  const resUnreachable = countUnreachableProviders(rows, configured, {
+    p1: { status: 'unreachable', error: 'ECONNREFUSED', fails: 2 },
+    p2: { status: 'unreachable', error: 'TIMEOUT', fails: 3 }, // disabled -> MUST NOT count
+    p3: { status: 'healthy', fails: 0 },
+    p4: { status: 'unreachable', error: 'EHOSTUNREACH', fails: 2 },
+    pUnknown: { status: 'unreachable', fails: 5 }, // not in rows -> MUST NOT count
+  })
+  assert.equal(resUnreachable.count, 2)
+  assert.deepEqual(resUnreachable.unreachableIds, ['p1', 'p4'])
 })
