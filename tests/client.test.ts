@@ -3670,8 +3670,8 @@ test('the card names the last failure instead of only flagging it', async () => 
     await settle()
     const texts = textsOf(render())
     assert.ok(
-      texts.includes('最近失败 ECONNREFUSED'),
-      'the failure is named with its machine code, so it points somewhere',
+      texts.includes('[推理] 最近失败 ECONNREFUSED'),
+      'the failure is named with its machine code, so it points somewhere — and classified as reasoning traffic (N24)',
     )
     assert.ok(
       JSON.stringify(render()).includes('dsw-alias-state-error-primary'),
@@ -3699,8 +3699,8 @@ test('the card shows when a healthy route last ran', async () => {
     const [, render] = renderPage(mod, harness)
     await settle()
     assert.ok(
-      textsOf(render()).includes('最近成功 3 分钟前'),
-      'a healthy route says how long ago it last worked',
+      textsOf(render()).includes('[推理] 最近成功 3 分钟前'),
+      'a healthy route says how long ago it last worked, classified as reasoning traffic',
     )
     assert.ok(
       !JSON.stringify(render()).includes('最近失败'),
@@ -3732,7 +3732,7 @@ test('a request that has only STARTED is shown as a call at its start time', asy
     await settle()
     const texts = textsOf(render())
     assert.ok(
-      texts.includes('最近调用 1 分钟前'),
+      texts.includes('[推理] 最近调用 1 分钟前'),
       'a started-but-unsettled call is shown by its start time',
     )
     assert.ok(
@@ -3766,7 +3766,7 @@ test('the time a healthy route shows is its FINISH time, not a newer start', asy
     const [, render] = renderPage(mod, harness)
     await settle()
     assert.ok(
-      textsOf(render()).includes('最近成功 5 分钟前'),
+      textsOf(render()).includes('[推理] 最近成功 5 分钟前'),
       'the success line uses `at` (finish), not the newer `startedAt`',
     )
   } finally {
@@ -6695,6 +6695,238 @@ test('N23: global settings renders heartbeat switch, interval selector and conse
     assert.ok(
       harness.writes.some(w => w.ops.some(op => op.path[0] === 'heartbeatInterval' && op.value === 60)),
       'changing interval writes heartbeatInterval: 60',
+    )
+  } finally {
+    restore()
+  }
+})
+
+// ---- N24: search / reasoning traffic split UI ----
+
+/** Every `<select>` in a subtree. */
+function selectsOf(tree) {
+  const out = []
+  const walk = node => {
+    if (node === null || typeof node !== 'object') return
+    if (Array.isArray(node)) return node.forEach(walk)
+    if (node.type === 'select') out.push(node)
+    if (node.children) walk(node.children)
+  }
+  walk(tree)
+  return out
+}
+
+test('N24: global settings renders the split strategy and writes it', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          'web-search': { enabled: true, protocol: 'http', host: '127.0.0.1', port: 7890 },
+        },
+        searchProxyStrategy: 'inherit',
+        searchProxyProfileId: '',
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+
+    const block = globalBlockOf(render())
+    assert.ok(block, 'the global settings block must render')
+    const select = selectsOf(block).find(
+      s => s.props['aria-label'] === '搜索分流策略' || s.props['aria-label'] === 'Search routing strategy',
+    )
+    assert.ok(select, 'the split strategy select must exist')
+    assert.deepEqual(
+      select.children.filter(Boolean).map(option => option.props.value),
+      ['inherit', 'dedicated', 'direct', 'custom'],
+      'all four strategies are offered, in menu order',
+    )
+    assert.equal(select.props.value, 'inherit', 'inherit is the default')
+    assert.ok(
+      textsOf(block).some(text => text.includes('当前解析：搜索经由「Web 搜索」卡片路由')),
+      'the block explains what the current setting resolves to',
+    )
+
+    select.props.onChange({ target: { value: 'direct' } })
+    await writeSettle()
+    assert.ok(
+      harness.writes.some(w => w.ops.some(op => op.path[0] === 'searchProxyStrategy' && op.value === 'direct')),
+      'changing the strategy writes searchProxyStrategy',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('N24: a dedicated strategy binds a preset and previews its endpoint', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {},
+        searchProxyStrategy: 'dedicated',
+        searchProxyProfileId: '',
+        proxyProfiles: { hk: { protocol: 'http', host: '127.0.0.1', port: 1080 } },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+
+    const block = globalBlockOf(render())
+    const select = selectsOf(block).find(
+      s => s.props['aria-label'] === '搜索代理预设' || s.props['aria-label'] === 'Search proxy preset',
+    )
+    assert.ok(select, 'the preset binding select appears under dedicated')
+    assert.deepEqual(
+      select.children.filter(Boolean).map(option => option.props.value),
+      ['', 'hk'],
+      'the empty option means "use the card endpoint"; the preset is listed',
+    )
+    assert.equal(select.props.value, '', 'nothing is bound by default')
+    assert.ok(
+      textsOf(block).some(text => text.includes('使用「Web 搜索」卡片自带端点')),
+      'the unbound state says which endpoint will be used',
+    )
+
+    select.props.onChange({ target: { value: 'hk' } })
+    await writeSettle()
+    assert.ok(
+      harness.writes.some(w => w.ops.some(op => op.path[0] === 'searchProxyProfileId' && op.value === 'hk')),
+      'binding a preset writes searchProxyProfileId',
+    )
+
+    // After the draft updates, the preview names the resolved endpoint.
+    const updated = globalBlockOf(render())
+    assert.ok(
+      textsOf(updated).some(text => text.includes('搜索使用独立代理端点：http://127.0.0.1:1080')),
+      'the preview resolves the bound preset to its endpoint',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('N24: a missing preset renders the refusal preview instead of pretending it works', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {},
+        searchProxyStrategy: 'dedicated',
+        searchProxyProfileId: 'gone',
+        proxyProfiles: {},
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+
+    const block = globalBlockOf(render())
+    assert.ok(
+      textsOf(block).some(text => text.includes('搜索请求将被拒绝') && text.includes('「gone」')),
+      'the settings page warns before any search is attempted',
+    )
+    assert.ok(
+      textsOf(block).some(text => text.includes('（预设已丢失——搜索将被拒绝）')),
+      'the dangling binding stays visible in the picker rather than showing an unrelated preset',
+    )
+    const alert = textsOf(block).find(text => text.includes('搜索请求将被拒绝'))
+    assert.ok(alert, 'the warning is rendered')
+  } finally {
+    restore()
+  }
+})
+
+test('N24: a blocked search plan renders the dashboard refusal banner', async () => {
+  const problem = '搜索分流绑定的预设「gone」不存在，搜索请求已被拒绝（不会改走直连）'
+  const { mod, restore } = loadBundle(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      providers: [{ id: 'sensenova', name: 'SenseNova', live: true }],
+      search: {
+        strategy: 'dedicated',
+        profileId: 'gone',
+        plan: 'blocked',
+        reason: 'missing-preset',
+        problem,
+        hits: 3,
+        failed: 3,
+      },
+    }),
+  }))
+  try {
+    const harness = mountPlugin(mod, { value: { providers: {} } })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+
+    const texts = textsOf(render())
+    assert.ok(
+      texts.some(text => text.includes('搜索分流正在拒绝请求')),
+      'the banner names the failure state',
+    )
+    assert.ok(
+      texts.some(text => text.includes(problem)),
+      "and carries the Host's reason verbatim",
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('N24: the dashboard splits forwarded requests into reasoning and search', async () => {
+  const { mod, restore } = loadBundle(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      providers: [{ id: 'sensenova', name: 'SenseNova', live: true }],
+      hits: { sensenova: 4, 'web-search': 2 },
+      search: { strategy: 'inherit', plan: 'card', hits: 2, proxied: 2, direct: 1 },
+    }),
+  }))
+  try {
+    const harness = mountPlugin(mod, { value: { providers: {} } })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+
+    const texts = textsOf(render())
+    assert.ok(
+      texts.some(text => text.includes('会话累计 · 推理 4 · 搜索 2（直连 1）')),
+      'the hits metric explains the total as a split, including direct searches',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('N24: the web-search card carries a search badge naming its chain', async () => {
+  const { mod, restore } = loadBundle(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      providers: [
+        { id: 'sensenova', name: 'SenseNova', live: true },
+        { id: 'web-search', name: 'Web 搜索', live: true },
+      ],
+      search: { strategy: 'dedicated', plan: 'dedicated', endpoint: 'http://127.0.0.1:1080', hits: 1, proxied: 1 },
+    }),
+  }))
+  try {
+    const harness = mountPlugin(mod, { value: { providers: {} } })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+
+    const card = cardFor(render(), 'web-search')
+    assert.ok(card, 'the reserved card is rendered')
+    assert.ok(
+      textsOf(card).some(text => text.includes('[搜索] 独立搜索代理 · http://127.0.0.1:1080')),
+      'the card says search traffic is on a dedicated proxy',
+    )
+    const reasoningCard = cardFor(render(), 'sensenova')
+    assert.ok(reasoningCard, 'a model card is rendered')
+    assert.ok(
+      !textsOf(reasoningCard).some(text => text.includes('[搜索]')),
+      'model cards are not mislabelled as search routes',
     )
   } finally {
     restore()

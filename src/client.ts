@@ -3,6 +3,7 @@ import {
   calculateSuccessRate,
   calculateAverageLatency,
   calculateTotalHits,
+  calculateTrafficSplit,
   countUnreachableProviders,
 } from './dashboard.js'
 /**
@@ -43,6 +44,13 @@ import {
 } from './presets.js'
 import { PROXY_CLIENT_PRESETS, proxyClientPreset } from './proxy-clients.js'
 import { backupCounts, backupFileName, backupOps, buildBackup, parseBackup } from './backup.js'
+import {
+  SEARCH_PROXY_STRATEGIES,
+  normalizeSearchSplitConfig,
+  resolveSearchPlan,
+  searchSplitProblem,
+  type SearchProxyStrategy,
+} from './search-split.js'
 
 type Protocol = 'http' | 'https' | 'socks5'
 
@@ -550,6 +558,28 @@ type HeartbeatState = {
   error?: string
   fails?: number
 }
+/**
+ * Search-traffic classification published by the Host (N24).
+ *
+ * `plan` is the chain the NEXT search call would take; the counters describe
+ * calls already made. Both are needed: the page must explain a broken binding
+ * before any search runs, and must classify calls that never crossed a proxy.
+ */
+type SearchTraffic = {
+  strategy?: string
+  profileId?: string
+  plan?: 'card' | 'dedicated' | 'direct' | 'blocked'
+  reason?: string
+  endpoint?: string
+  problem?: string
+  hits?: number
+  proxied?: number
+  direct?: number
+  failed?: number
+  lastAt?: number
+  ok?: boolean
+  code?: string
+}
 /** What the Host endpoint publishes: provider rows, hit counts, rejected routes. */
 type Catalog = {
   rows: ProviderRow[]
@@ -563,6 +593,8 @@ type Catalog = {
   problems: Record<string, string>
   lastUse: Record<string, LastUse>
   heartbeat?: Record<string, HeartbeatState>
+  /** N24: the resolved search chain and its counters. */
+  search?: SearchTraffic
   bypassAll?: boolean
   /**
    * The forward proxy the Host inherited from its environment, if any. The
@@ -603,6 +635,40 @@ function relativeTime(at: number, t: Record<string, string>): string {
   const hours = Math.floor(minutes / 60)
   if (hours < 24) return `${hours}${t.hoursAgo}`
   return `${Math.floor(hours / 24)}${t.daysAgo}`
+}
+
+/**
+ * Read the Host's search-traffic classification (N24).
+ *
+ * Every field is optional and type-checked: a Host from an older build
+ * publishes nothing here, and the page must keep working from the settings
+ * snapshot alone.
+ */
+function normalizeSearchTraffic(raw: unknown): SearchTraffic | undefined {
+  if (raw === null || raw === undefined || typeof raw !== 'object') return undefined
+  const value = raw as Record<string, unknown>
+  const out: SearchTraffic = {}
+  if (typeof value.strategy === 'string' && value.strategy.length > 0) out.strategy = value.strategy
+  if (typeof value.profileId === 'string' && value.profileId.length > 0) out.profileId = value.profileId
+  if (
+    value.plan === 'card' ||
+    value.plan === 'dedicated' ||
+    value.plan === 'direct' ||
+    value.plan === 'blocked'
+  ) {
+    out.plan = value.plan
+  }
+  if (typeof value.reason === 'string' && value.reason.length > 0) out.reason = value.reason
+  if (typeof value.endpoint === 'string' && value.endpoint.length > 0) out.endpoint = value.endpoint
+  if (typeof value.problem === 'string' && value.problem.length > 0) out.problem = value.problem
+  for (const key of ['hits', 'proxied', 'direct', 'failed'] as const) {
+    const count = value[key]
+    if (typeof count === 'number' && Number.isFinite(count) && count >= 0) out[key] = Math.floor(count)
+  }
+  if (typeof value.lastAt === 'number' && Number.isFinite(value.lastAt)) out.lastAt = value.lastAt
+  if (typeof value.ok === 'boolean') out.ok = value.ok
+  if (typeof value.code === 'string' && value.code.length > 0) out.code = value.code
+  return out
 }
 
 /** Read the Host's provider catalogue. Same-origin, so no token is needed. */
@@ -702,7 +768,19 @@ async function fetchCatalog(): Promise<Catalog> {
   }
   const bypassAll = body?.bypassAll === true
   const llmAvailable = body?.llmAvailable === true
-  return { rows, publishedRows: rows, hits, problems, lastUse, heartbeat, environmentProxy, bypassAll, llmAvailable }
+  const search = normalizeSearchTraffic(body?.search)
+  return {
+    rows,
+    publishedRows: rows,
+    hits,
+    problems,
+    lastUse,
+    heartbeat,
+    ...(search === undefined ? {} : { search }),
+    environmentProxy,
+    bypassAll,
+    llmAvailable,
+  }
 }
 
 /**
@@ -972,6 +1050,16 @@ const TEST_RELEVANT_FIELDS = new Set([
  * the user asked for a moment ago.
  */
 const HEARTBEAT_GLOBAL_FIELDS = new Set(['heartbeatEnabled', 'heartbeatInterval', 'heartbeatConsecutiveFails'])
+
+/**
+ * Split knobs (N24). Same reasoning as the heartbeat set: `searchProxyStrategy`
+ * and its binding change where SEARCH requests go, but a card's self-check still
+ * probes that card's own endpoint, so its cached answer is still valid.
+ */
+const SEARCH_GLOBAL_FIELDS = new Set(['searchProxyStrategy', 'searchProxyProfileId'])
+
+/** Global fields whose edit must NOT invalidate cached self-check answers. */
+const TEST_NEUTRAL_GLOBAL_FIELDS = new Set([...HEARTBEAT_GLOBAL_FIELDS, ...SEARCH_GLOBAL_FIELDS])
 
 /** The provider directory, cached module-side. See renderPage. */
 let directoryCache: ProviderRow[] | undefined
@@ -1613,6 +1701,50 @@ const S = {
     fontSize: '12px',
     lineHeight: '1.5',
   },
+  /** N24: the split block inside the advanced settings panel. */
+  searchSplitBox: {
+    marginTop: '10px',
+    paddingTop: '10px',
+    borderTopWidth: '1px',
+    borderTopStyle: 'solid',
+    borderTopColor: 'var(--dsw-alias-separator-secondary, rgba(128, 128, 128, 0.18))',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '8px',
+  },
+  searchSplitTitle: {
+    fontSize: '12px',
+    fontWeight: 600,
+    color: 'var(--dsw-alias-label-primary)',
+  },
+  /** The refused-search banner: same red as the unreachable alert, distinct key. */
+  searchAlertBanner: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    padding: '10px 14px',
+    borderRadius: '8px',
+    background: 'var(--dsw-alias-state-error-subtle, rgba(248, 81, 73, 0.12))',
+    borderWidth: '1px',
+    borderStyle: 'solid',
+    borderColor: 'var(--dsw-alias-state-error-border, rgba(248, 81, 73, 0.4))',
+    color: 'var(--dsw-alias-state-error-primary, #f85149)',
+    fontSize: '12px',
+    lineHeight: '1.5',
+  },
+  /** The per-card traffic-class badge (`[搜索] 跟随本卡片`). */
+  searchBadge: {
+    display: 'inline-block',
+    padding: '1px 6px',
+    borderRadius: '4px',
+    background: 'var(--dsw-alias-bg-layer-2, rgba(128, 128, 128, 0.12))',
+    borderWidth: '1px',
+    borderStyle: 'solid',
+    borderColor: 'var(--dsw-alias-separator-secondary, rgba(128, 128, 128, 0.25))',
+    color: 'var(--dsw-alias-label-secondary)',
+    fontSize: '11px',
+    whiteSpace: 'nowrap',
+  },
 } as const
 
 function renderPage(ctx: any): unknown {
@@ -1664,6 +1796,7 @@ function renderPage(ctx: any): unknown {
       problems: {} as Record<string, string>,
       lastUse: {} as Record<string, LastUse>,
       heartbeat: {} as Record<string, HeartbeatState>,
+      search: undefined as SearchTraffic | undefined,
       environmentProxy: null as DetectedProxy | null,
       bypassAll: false as boolean,
       error: undefined as string | undefined,
@@ -1689,6 +1822,7 @@ function renderPage(ctx: any): unknown {
       problems: catalog.problems,
       lastUse: catalog.lastUse,
       heartbeat: catalog.heartbeat ?? {},
+      search: catalog.search,
       environmentProxy: catalog.environmentProxy ?? null,
       bypassAll: catalog.bypassAll === true,
       error: catalog.error,
@@ -1704,6 +1838,7 @@ function renderPage(ctx: any): unknown {
   const hits = state.hits ?? {}
   const lastUse = state.lastUse ?? {}
   const heartbeat = state.heartbeat ?? {}
+  const searchTraffic = (state.search ?? {}) as SearchTraffic
 
   /**
    * The one-line last-use summary for a card, or `undefined` when the route has
@@ -1714,17 +1849,39 @@ function renderPage(ctx: any): unknown {
    * time its outcome belongs to. A request that has only STARTED uses
    * `startedAt`, so a still-in-flight call cannot make the page claim an outcome
    * it does not have yet.
+   *
+   * N24: the line is prefixed with the traffic class, because the same line now
+   * reports two different kinds of call. The reserved search route is `[搜索]`;
+   * every model route is `[推理]`.
    */
   const lastUseText = (id: string): string | undefined => {
     const use = lastUse[id]
     if (use === undefined) return undefined
+    const tag = RESERVED_PROVIDER_IDS.has(id) ? t.trafficSearchTag : t.trafficReasoningTag
     if (use.fallback === true || use.code === '[告警: 代理宕机，已降级直连]') {
-      return `${t.fallbackAlert}（${relativeTime(use.at ?? use.startedAt ?? Date.now(), t)}）`
+      return `${tag} ${t.fallbackAlert}（${relativeTime(use.at ?? use.startedAt ?? Date.now(), t)}）`
     }
-    if (use.ok === true) return `${t.recentOk}${relativeTime(use.at ?? use.startedAt ?? Date.now(), t)}`
-    if (use.ok === false) return `${t.recentFail}${use.code ?? 'ERROR'}`
-    return `${t.recentStarted}${relativeTime(use.startedAt ?? use.at ?? Date.now(), t)}`
+    if (use.ok === true) {
+      return `${tag} ${t.recentOk}${relativeTime(use.at ?? use.startedAt ?? Date.now(), t)}`
+    }
+    if (use.ok === false) return `${tag} ${t.recentFail}${use.code ?? 'ERROR'}`
+    return `${tag} ${t.recentStarted}${relativeTime(use.startedAt ?? use.at ?? Date.now(), t)}`
   }
+  /**
+   * The short split badge for the reserved search card: which chain its next
+   * call takes. Without it the card looks like an ordinary proxy route even when
+   * the strategy has taken search traffic away from it entirely.
+   */
+  const searchBadgeText = ((): string => {
+    if (searchTraffic.plan === 'dedicated') {
+      return `${t.searchBadgeDedicated}${
+        searchTraffic.endpoint === undefined ? '' : ` · ${searchTraffic.endpoint}`
+      }`
+    }
+    if (searchTraffic.plan === 'direct') return t.searchBadgeDirect
+    if (searchTraffic.plan === 'blocked') return t.searchBadgeBlocked
+    return t.searchBadgeCard
+  })()
   /**
    * The shared unreachable badge, rendered at two sites (card header / compact row).
    * Extracted so a change to the wording — or the `globalHeartbeatEnabled` gate that
@@ -2193,9 +2350,9 @@ function renderPage(ctx: any): unknown {
   }
 
   /** One advanced global control: draft, persist, and invalidate cached checks only when the routing verdict can change. */
-  const bindGlobal = (field: 'testUrl' | 'localDirect' | 'enableFallbackDirect' | 'bypassAll' | 'heartbeatEnabled' | 'heartbeatInterval' | 'heartbeatConsecutiveFails') => (value: unknown) => {
+  const bindGlobal = (field: 'testUrl' | 'localDirect' | 'enableFallbackDirect' | 'bypassAll' | 'heartbeatEnabled' | 'heartbeatInterval' | 'heartbeatConsecutiveFails' | 'searchProxyStrategy' | 'searchProxyProfileId') => (value: unknown) => {
     editGlobal(field, value)
-    if (!HEARTBEAT_GLOBAL_FIELDS.has(field)) invalidateTests(rows.map(row => row.id))
+    if (!TEST_NEUTRAL_GLOBAL_FIELDS.has(field)) invalidateTests(rows.map(row => row.id))
     save(`\u0000global\u0000${field}`, [field], field, value, () => {
       setGlobalDraft((current: any) => {
         if (current[field] === undefined) return current
@@ -3349,6 +3506,23 @@ function renderPage(ctx: any): unknown {
   const storedHeartbeatEnabled = snapshot.value?.heartbeatEnabled === true
   const storedHeartbeatInterval = typeof snapshot.value?.heartbeatInterval === 'number' ? snapshot.value.heartbeatInterval : 300
   const storedHeartbeatConsecutiveFails = typeof snapshot.value?.heartbeatConsecutiveFails === 'number' ? snapshot.value.heartbeatConsecutiveFails : 2
+  /**
+   * The split settings, read through the SHARED normalizer so this page and the
+   * Host cannot disagree about what an unknown strategy means.
+   */
+  const storedSearchSplit = normalizeSearchSplitConfig({
+    searchProxyStrategy: snapshot.value?.searchProxyStrategy,
+    searchProxyProfileId: snapshot.value?.searchProxyProfileId,
+  })
+  const globalSearchStrategy: SearchProxyStrategy =
+    typeof globalDraft.searchProxyStrategy === 'string'
+      ? normalizeSearchSplitConfig({ searchProxyStrategy: globalDraft.searchProxyStrategy })
+          .searchProxyStrategy
+      : storedSearchSplit.searchProxyStrategy
+  const globalSearchProfileId =
+    typeof globalDraft.searchProxyProfileId === 'string'
+      ? globalDraft.searchProxyProfileId.trim()
+      : storedSearchSplit.searchProxyProfileId
   const globalBypassAll =
     typeof globalDraft.bypassAll === 'boolean'
       ? globalDraft.bypassAll
@@ -3364,6 +3538,53 @@ function renderPage(ctx: any): unknown {
       ? globalDraft.enableFallbackDirect
       : storedEnableFallbackDirect
   const globalTestUrlHint = testUrlHint(globalTestUrl, t)
+
+  // ---- N24: the split preview, resolved with the SAME resolver the Host uses.
+  // Rendering the preview from a second implementation is how the page and the
+  // proxy end up disagreeing about what "dedicated" will actually do.
+  const searchProfileValue =
+    globalSearchProfileId.length > 0 ? profileValueOf(globalSearchProfileId) : undefined
+  const searchPresetExists = searchProfileValue !== undefined
+  const searchPresetReady =
+    searchProfileValue !== undefined && defaultProxyProblem(searchProfileValue) === undefined
+  const searchCardView = view({ ...configured['web-search'], ...draft['web-search'] })
+  const searchCardAvailable =
+    searchCardView.enabled === true && cardProblemText(cardEndpoint(searchCardView)) === undefined
+  const searchPlanPreview = resolveSearchPlan({
+    strategy: globalSearchStrategy,
+    profileId: globalSearchProfileId,
+    cardAvailable: searchCardAvailable,
+    presetExists: searchPresetExists,
+    presetReady: searchPresetReady,
+    bypassAll: globalBypassAll,
+  })
+  const searchPlanProblem = searchSplitProblem({
+    strategy: globalSearchStrategy,
+    profileId: globalSearchProfileId,
+    presetExists: searchPresetExists,
+    presetReady: searchPresetReady,
+  })
+  const searchPlanText = ((): string => {
+    if (globalBypassAll) return t.searchPlanBypass
+    if (searchPlanPreview.kind === 'dedicated') {
+      return `${t.searchPlanDedicated}${
+        searchProfileValue === undefined ? '' : endpointSummary(searchProfileValue)
+      }`
+    }
+    if (searchPlanPreview.kind === 'card') return t.searchPlanCard
+    if (searchPlanPreview.kind === 'blocked') {
+      return `${t.searchPlanBlocked}${searchPlanProblem ?? ''}`
+    }
+    return t.searchPlanDirect
+  })()
+  const searchStrategyHint =
+    globalSearchStrategy === 'dedicated'
+      ? t.searchStrategyDedicatedHint
+      : globalSearchStrategy === 'direct'
+        ? t.searchStrategyDirectHint
+        : globalSearchStrategy === 'custom'
+          ? t.searchStrategyCustomHint
+          : t.searchStrategyInheritHint
 
   /**
    * Download the current configuration as JSON.
@@ -3647,7 +3868,82 @@ function renderPage(ctx: any): unknown {
           ),
         )
       : null,
-    ],
+    h(
+      'div',
+      { className: styles.searchSplitBox, style: S.searchSplitBox, key: 'search-split' },
+      h('span', { style: S.searchSplitTitle }, t.searchSplitTitle),
+      h(
+        'label',
+        { className: styles.field, style: S.field },
+        h('span', { className: styles.label, style: S.label }, t.searchStrategy),
+        h(
+          'select',
+          {
+            className: styles.input,
+            style: S.input,
+            value: globalSearchStrategy,
+            onChange: (event: any) => bindGlobal('searchProxyStrategy')(event.target.value),
+            'aria-label': t.searchStrategy,
+          },
+          h('option', { value: 'inherit' }, t.searchStrategyInherit),
+          h('option', { value: 'dedicated' }, t.searchStrategyDedicated),
+          h('option', { value: 'direct' }, t.searchStrategyDirect),
+          h('option', { value: 'custom' }, t.searchStrategyCustom),
+        ),
+        h('span', { className: styles.hint, style: S.hint }, searchStrategyHint),
+      ),
+      globalSearchStrategy === 'dedicated'
+        ? h(
+            'label',
+            { className: styles.field, style: S.field },
+            h('span', { className: styles.label, style: S.label }, t.searchProfile),
+            h(
+              'select',
+              {
+                className: styles.input,
+                style: S.input,
+                value: globalSearchProfileId,
+                onChange: (event: any) => bindGlobal('searchProxyProfileId')(event.target.value),
+                'aria-label': t.searchProfile,
+              },
+              h('option', { value: '' }, t.searchProfileOwnEndpoint),
+              ...profileEntries.map(entry =>
+                h(
+                  'option',
+                  { value: entry.name, key: `search-profile-${entry.name}` },
+                  `${entry.name} · ${endpointSummary(entry.value)}`,
+                ),
+              ),
+              // A stored binding whose preset was deleted must stay visible:
+              // silently showing the first preset would misreport what the Host
+              // is about to do, which is to REFUSE the call.
+              globalSearchProfileId.length > 0 && !searchPresetExists
+                ? h(
+                    'option',
+                    { value: globalSearchProfileId, key: 'search-profile-missing' },
+                    `${globalSearchProfileId}${t.searchProfileMissingOptionSuffix}`,
+                  )
+                : null,
+            ),
+          )
+        : null,
+      h(
+        'p',
+        {
+          className: styles.hint,
+          style: {
+            ...S.hint,
+            margin: '2px 0 0',
+            ...(searchPlanProblem === undefined
+              ? {}
+              : { color: 'var(--dsw-alias-state-error-primary, #f85149)' }),
+          },
+          role: searchPlanProblem === undefined ? undefined : 'alert',
+        },
+        `${t.searchPlanPrefix}${searchPlanText}`,
+      ),
+    ),
+  ],
   })
 
   const routeStateOf = (row: ProviderRow): 'proxied' | 'direct' | 'rejected' => {
@@ -3965,6 +4261,22 @@ function renderPage(ctx: any): unknown {
               { className: styles.cardTitles, style: S.titles },
               h('span', { className: styles.name, style: S.name }, row.name),
               h('span', { className: styles.id, style: S.id }, row.id),
+              // N24: the reserved search card says which chain its next call
+              // takes; the strategy may have moved search traffic off this card.
+              RESERVED_PROVIDER_IDS.has(row.id)
+                ? h(
+                    'span',
+                    {
+                      className: styles.searchBadge,
+                      style: {
+                        ...S.searchBadge,
+                        ...(searchTraffic.plan === 'blocked' ? S.inheritWarning : {}),
+                      },
+                      key: `${row.id}:search-badge`,
+                    },
+                    `${t.trafficSearchTag} ${searchBadgeText}`,
+                  )
+                : null,
               // A disabled route can never have hits, so "0" there would only add
               // noise; the count shows once the route is on (or has counted).
               route.enabled || (hits[row.id] ?? 0) > 0
@@ -4350,6 +4662,20 @@ function renderPage(ctx: any): unknown {
             { style: S.compactLine, key: `compact:${row.id}:info` },
             h('span', { className: styles.name, style: { ...S.name, maxWidth: '160px' } }, row.name),
             h('span', { className: styles.id, style: S.id }, row.id),
+            RESERVED_PROVIDER_IDS.has(row.id)
+              ? h(
+                  'span',
+                  {
+                    className: styles.searchBadge,
+                    style: {
+                      ...S.searchBadge,
+                      ...(searchTraffic.plan === 'blocked' ? S.inheritWarning : {}),
+                    },
+                    key: `compact:${row.id}:search-badge`,
+                  },
+                  `${t.trafficSearchTag} ${searchBadgeText}`,
+                )
+              : null,
             h(
               'span',
               {
@@ -4538,10 +4864,13 @@ function renderPage(ctx: any): unknown {
   const successRate = calculateSuccessRate(lastUse, isZh)
   const avgLatency = calculateAverageLatency(tests)
   const totalHits = calculateTotalHits(hits)
+  // N24: the same forwarded-request total, classified. The two halves add up to
+  // `totalHits`, so the split explains the number instead of contradicting it.
+  const trafficSplit = calculateTrafficSplit(hits, searchTraffic, isZh)
 
   const resetHits = () => {
     globalThis.fetch?.('/dsh-provider-proxy/reset-hits', { method: 'POST' }).catch(() => {})
-    setState((current: any) => ({ ...current, hits: {} }))
+    setState((current: any) => ({ ...current, hits: {}, search: undefined }))
   }
 
   const dashboardBar = h(
@@ -4654,6 +4983,41 @@ function renderPage(ctx: any): unknown {
             h('strong', null, `${t.heartbeatAlertPrefix}：${unreachable.count} ${t.heartbeatAlertCountUnit}`),
             ' ',
             `(${unreachable.unreachableIds.map(id => rows.find(r => r.id === id)?.name || id).join(', ')})`,
+          ),
+        )
+      : null,
+    // N24: a `dedicated` binding the Host cannot honour refuses every search
+    // call. That is a deliberate, user-visible failure state, and the page has
+    // to say so — a silent zero in the search column would read as "unused".
+    searchTraffic.plan === 'blocked'
+      ? h(
+          'div',
+          { className: styles.searchAlertBanner, role: 'alert', style: S.searchAlertBanner, key: 'search-alert' },
+          h(
+            'svg',
+            {
+              width: 16,
+              height: 16,
+              viewBox: '0 0 24 24',
+              fill: 'none',
+              stroke: 'currentColor',
+              strokeWidth: 2,
+              strokeLinecap: 'round',
+              strokeLinejoin: 'round',
+              style: { flexShrink: 0 },
+              'aria-hidden': 'true',
+            },
+            h('path', { d: 'm21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z' }),
+            h('line', { x1: 12, y1: 9, x2: 12, y2: 13 }),
+            h('line', { x1: 12, y1: 17, x2: 12.01, y2: 17 }),
+          ),
+          h(
+            'div',
+            null,
+            h('strong', null, t.searchAlertBlockedTitle),
+            ' ',
+            t.searchAlertBlockedText,
+            searchTraffic.problem === undefined ? null : ` (${searchTraffic.problem})`,
           ),
         )
       : null,
@@ -4867,7 +5231,9 @@ function renderPage(ctx: any): unknown {
         h(
           'div',
           { className: styles.metricSub, style: S.metricSub },
-          isZh ? '会话累计代理请求' : 'Proxy requests count',
+          isZh
+            ? `会话累计 · ${trafficSplit.formatted}`
+            : `This session · ${trafficSplit.formatted}`,
         ),
       ),
     ),
@@ -5051,6 +5417,36 @@ const EN = {
   heartbeatAlertCountUnit: 'proxy node(s) unreachable',
   heartbeatUnreachableTag: 'Heartbeat Unreachable',
   heartbeatProbeFailing: 'Probe failing',
+  searchSplitTitle: 'Search traffic split',
+  searchStrategy: 'Search routing strategy',
+  searchStrategyInherit: 'Inherit: follow the Web Search card',
+  searchStrategyDedicated: 'Dedicated: bind one global search endpoint',
+  searchStrategyDirect: 'Direct: never proxy search traffic',
+  searchStrategyCustom: 'Custom: the Web Search card decides everything',
+  searchStrategyInheritHint: 'Default. `web_search` follows the "Web Search" card below: its endpoint and its target-host rules. With that card off, search goes direct.',
+  searchStrategyDedicatedHint: 'Search traffic always uses the bound preset. Leave the binding empty to use the endpoint typed on the "Web Search" card itself. If the binding is missing or unusable, search calls are REFUSED — never silently sent direct.',
+  searchStrategyDirectHint: 'Search bypasses every proxy this plugin manages (useful when a search engine challenges proxied requests). Model traffic is unaffected.',
+  searchStrategyCustomHint: 'Search is governed entirely by the "Web Search" card, including its only/bypass host rules. With that card off, search goes direct.',
+  searchProfile: 'Search proxy preset',
+  searchProfileOwnEndpoint: 'Use the "Web Search" card endpoint (no preset bound)',
+  searchProfileMissingOptionSuffix: ' (missing preset — search will be refused)',
+  searchPlanPrefix: 'Resolved: ',
+  searchPlanCard: 'search follows the "Web Search" card',
+  searchPlanDedicated: 'search uses its own proxy endpoint: ',
+  searchPlanDirect: 'search goes direct, no proxy involved',
+  searchPlanBypass: 'emergency bypass is ON — search goes direct regardless of this strategy',
+  searchPlanBlocked: 'search calls will be REFUSED: ',
+  searchAlertPrefix: 'Search Split Alert',
+  searchAlertBlockedTitle: '[Search Split Refusing Calls]',
+  searchAlertBlockedText: 'Search traffic is bound to a preset that is missing or unusable, so every search call is refused. Until this is fixed, model traffic still works. Pinning search to a broken route instead of silently leaking it direct is deliberate.',
+  searchDirectCount: 'direct',
+  searchFailedCount: 'refused/failed',
+  searchBadgeCard: 'follows this card',
+  searchBadgeDedicated: 'dedicated proxy',
+  searchBadgeDirect: 'direct',
+  searchBadgeBlocked: 'search refused',
+  trafficReasoningTag: '[Reasoning]',
+  trafficSearchTag: '[Search]',
   orphanPruned: 'Auto-removed default routes whose provider the Host no longer lists: ',
   orphanPrunedLabel: 'auto-prune',
   neverConnected: 'Never connected',
@@ -5235,6 +5631,36 @@ const ZH = {
   heartbeatAlertCountUnit: '个代理节点连通中断',
   heartbeatUnreachableTag: '心跳失联',
   heartbeatProbeFailing: '探测失败',
+  searchSplitTitle: '搜索流量分流',
+  searchStrategy: '搜索分流策略',
+  searchStrategyInherit: '继承：沿用 Web 搜索卡片',
+  searchStrategyDedicated: '独立：绑定一个全局搜索代理端点',
+  searchStrategyDirect: '直连：搜索流量永不经过代理',
+  searchStrategyCustom: '自定义：完全由 Web 搜索卡片决定',
+  searchStrategyInheritHint: '默认。`web_search` 沿用下方「Web 搜索」卡片的端点与目标域名规则；该卡片未启用时搜索直连。',
+  searchStrategyDedicatedHint: '搜索流量固定走绑定的代理预设；不绑定则使用「Web 搜索」卡片上直接填写的端点。绑定缺失或不可用时搜索请求会被拒绝，绝不悄悄改走直连。',
+  searchStrategyDirectHint: '搜索流量绕过本插件管理的所有代理（搜索引擎对代理请求弹验证码时用得上）。推理流量不受影响。',
+  searchStrategyCustomHint: '搜索流量完全交给「Web 搜索」卡片管辖，包括它的 only/bypass 域名规则；该卡片未启用时搜索直连。',
+  searchProfile: '搜索代理预设',
+  searchProfileOwnEndpoint: '使用「Web 搜索」卡片自带端点（未绑定预设）',
+  searchProfileMissingOptionSuffix: '（预设已丢失——搜索将被拒绝）',
+  searchPlanPrefix: '当前解析：',
+  searchPlanCard: '搜索经由「Web 搜索」卡片路由',
+  searchPlanDedicated: '搜索使用独立代理端点：',
+  searchPlanDirect: '搜索直连，不经过任何代理',
+  searchPlanBypass: '紧急全局直连已开启——搜索无视本策略一律直连',
+  searchPlanBlocked: '搜索请求将被拒绝：',
+  searchAlertPrefix: '搜索分流告警',
+  searchAlertBlockedTitle: '[搜索分流正在拒绝请求]',
+  searchAlertBlockedText: '搜索流量绑定的预设已丢失或不可用，因此每次搜索都会被拒绝；在修复前推理流量仍然正常。宁可拒绝也不悄悄改走直连，是这里刻意的选择。',
+  searchDirectCount: '直连',
+  searchFailedCount: '拒绝/失败',
+  searchBadgeCard: '跟随本卡片',
+  searchBadgeDedicated: '独立搜索代理',
+  searchBadgeDirect: '直连',
+  searchBadgeBlocked: '搜索被拒绝',
+  trafficReasoningTag: '[推理]',
+  trafficSearchTag: '[搜索]',
   orphanPruned: '已自动清理 Host 目录中不存在的保存配置：',
   orphanPrunedLabel: '自动清理',
   neverConnected: '未曾连通',
