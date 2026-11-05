@@ -1778,6 +1778,49 @@ const S = {
     fontSize: '11px',
     whiteSpace: 'nowrap',
   },
+  /** The split strategy radio group: one labelled row of four options. */
+  radioGroup: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: '8px',
+  },
+  radioOption: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '6px',
+    padding: '4px 10px',
+    borderRadius: '6px',
+    borderWidth: '1px',
+    borderStyle: 'solid',
+    borderColor: 'var(--dsw-alias-separator-secondary, rgba(128, 128, 128, 0.25))',
+    background: 'transparent',
+    fontSize: '12px',
+    cursor: 'pointer',
+  },
+  radioOptionActive: {
+    borderColor: 'var(--dsw-alias-state-success-primary, #238636)',
+    background: 'var(--dsw-alias-bg-layer-2, rgba(35, 134, 54, 0.10))',
+    fontWeight: 600,
+  },
+  /**
+   * The restore file picker: visually hidden, still focusable.
+   *
+   * `display: none` (the obvious spelling) removes it from the tab order, which
+   * left keyboard users with a "Restore configuration" button they could not
+   * press. Clipped to 1px instead, it keeps its place in the tab sequence.
+   */
+  fileInput: {
+    position: 'absolute',
+    width: '1px',
+    height: '1px',
+    margin: '-1px',
+    padding: 0,
+    overflow: 'hidden',
+    clip: 'rect(0 0 0 0)',
+    whiteSpace: 'nowrap',
+    borderWidth: 0,
+  },
 } as const
 
 function renderPage(ctx: any): unknown {
@@ -3649,6 +3692,14 @@ function renderPage(ctx: any): unknown {
         defaultProxy: { ...storedDefault, ...defaultDraft },
         localDirect: globalLocalDirect,
         testUrl: globalTestUrl,
+        // 1.1.0: the global switches are part of the configuration, so a backup
+        // that omitted them would restore a machine whose heartbeat and search
+        // routing silently came from the PREVIOUS state rather than the file.
+        heartbeatEnabled: globalHeartbeatEnabled,
+        heartbeatInterval: globalHeartbeatInterval,
+        heartbeatConsecutiveFails: globalHeartbeatConsecutiveFails,
+        searchProxyStrategy: globalSearchStrategy,
+        searchProxyProfileId: globalSearchProfileId,
       },
       { includePasswords },
     )
@@ -3692,7 +3743,7 @@ function renderPage(ctx: any): unknown {
     }
     const counts = backupCounts(parsed.document)
     const confirmed = globalThis.window?.confirm?.(
-      `${t.backupConfirm}${counts.providers}${t.backupConfirmProviders}${counts.profiles}${t.backupConfirmProfiles}`,
+      `${t.backupConfirm}${counts.providers}${t.backupConfirmProviders}${counts.profiles}${t.backupConfirmProfiles}${t.backupConfirmSettings}`,
     )
     if (confirmed !== true) return
     try {
@@ -3736,15 +3787,21 @@ function renderPage(ctx: any): unknown {
     h(
       'label',
       {
-        className: styles.testButton,
+        className: `${styles.testButton} ${styles.fileButton}`,
         style: { ...S.testButton, display: 'inline-flex', alignItems: 'center' },
         key: 'backup:import',
       },
       t.backupImport,
+      // Visually hidden but still FOCUSABLE, unlike `display: none`: the label
+      // is clickable either way, but only a focusable input can be reached with
+      // Tab and opened with Enter/Space. `aria-label` gives it a name of its own
+      // because the visible text belongs to the wrapping label element.
       h('input', {
+        className: styles.fileInput,
+        style: S.fileInput,
         type: 'file',
         accept: 'application/json,.json',
-        style: { display: 'none' },
+        'aria-label': t.backupImport,
         onChange: (event: any) => {
           const file = event?.target?.files?.[0]
           if (file !== undefined) void importBackupFile(file)
@@ -3921,30 +3978,70 @@ function renderPage(ctx: any): unknown {
       'div',
       { className: styles.searchSplitBox, style: S.searchSplitBox, key: 'search-split' },
       h('span', { style: S.searchSplitTitle }, t.searchSplitTitle),
+      // A RADIO GROUP, not a select: all four strategies have consequences that
+      // belong on screen (dedicated can REFUSE calls, direct skips a proxy the
+      // user configured), and a collapsed dropdown hides three of them. Native
+      // radios also give the group one tab stop with arrow-key navigation,
+      // which is exactly what `role="radiogroup"` promises.
       h(
-        'label',
-        { className: styles.field, style: S.field },
-        h('span', { className: styles.label, style: S.label }, t.searchStrategy),
+        'div',
+        {
+          className: styles.radioGroup,
+          style: S.radioGroup,
+          role: 'radiogroup',
+          // Named by the visible field label rather than the box header, so what a
+          // screen reader announces matches what a sighted user reads beside the
+          // options.
+          'aria-labelledby': 'dsh-proxy-split-label',
+          'aria-describedby': 'dsh-proxy-split-hint dsh-proxy-split-plan',
+          key: 'search-strategy',
+        },
         h(
-          'select',
-          {
-            className: styles.input,
-            style: S.input,
-            value: globalSearchStrategy,
-            onChange: (event: any) => bindGlobal('searchProxyStrategy')(event.target.value),
-            'aria-label': t.searchStrategy,
-          },
-          h('option', { value: 'inherit' }, t.searchStrategyInherit),
-          h('option', { value: 'dedicated' }, t.searchStrategyDedicated),
-          h('option', { value: 'direct' }, t.searchStrategyDirect),
-          h('option', { value: 'custom' }, t.searchStrategyCustom),
+          'span',
+          { className: styles.label, style: S.label, id: 'dsh-proxy-split-label' },
+          t.searchStrategy,
         ),
-        h('span', { className: styles.hint, style: S.hint }, searchStrategyHint),
+        ...([
+          ['inherit', t.searchStrategyInherit],
+          ['dedicated', t.searchStrategyDedicated],
+          ['direct', t.searchStrategyDirect],
+          ['custom', t.searchStrategyCustom],
+        ] as const).map(([value, label]) =>
+          h(
+            'label',
+            {
+              key: `strategy:${value}`,
+              className:
+                globalSearchStrategy === value ? styles.radioOptionActive : styles.radioOption,
+              style:
+                globalSearchStrategy === value
+                  ? { ...S.radioOption, ...S.radioOptionActive }
+                  : S.radioOption,
+            },
+            h('input', {
+              type: 'radio',
+              name: 'dsh-proxy-search-strategy',
+              value,
+              checked: globalSearchStrategy === value,
+              onChange: () => bindGlobal('searchProxyStrategy')(value),
+            }),
+            h('span', null, label),
+          ),
+        ),
+      ),
+      h(
+        'p',
+        {
+          className: styles.hint,
+          style: { ...S.hint, margin: '2px 0 0' },
+          id: 'dsh-proxy-split-hint',
+        },
+        searchStrategyHint,
       ),
       globalSearchStrategy === 'dedicated'
         ? h(
             'label',
-            { className: styles.field, style: S.field },
+            { className: styles.field, style: S.field, key: 'search-profile' },
             h('span', { className: styles.label, style: S.label }, t.searchProfile),
             h(
               'select',
@@ -3954,6 +4051,7 @@ function renderPage(ctx: any): unknown {
                 value: globalSearchProfileId,
                 onChange: (event: any) => bindGlobal('searchProxyProfileId')(event.target.value),
                 'aria-label': t.searchProfile,
+                'aria-describedby': 'dsh-proxy-split-plan',
               },
               h('option', { value: '' }, t.searchProfileOwnEndpoint),
               ...profileEntries.map(entry =>
@@ -3987,7 +4085,10 @@ function renderPage(ctx: any): unknown {
               ? {}
               : { color: 'var(--dsw-alias-state-error-primary, #f85149)' }),
           },
-          role: searchPlanProblem === undefined ? undefined : 'alert',
+          // Announced when it changes: the resolved chain is the answer to "what
+          // did I just pick", and a broken binding is an alert, not a footnote.
+          role: searchPlanProblem === undefined ? 'status' : 'alert',
+          id: 'dsh-proxy-split-plan',
         },
         `${t.searchPlanPrefix}${searchPlanText}`,
       ),
@@ -5635,6 +5736,8 @@ const EN = {
     'Restore this backup? The current configuration will be replaced.\n\nProviders: ',
   backupConfirmProviders: ', presets: ',
   backupConfirmProfiles: ' entry/entries.',
+  backupConfirmSettings:
+    '\n\nGlobal settings (advanced endpoint rules, heartbeat monitoring and the search split strategy) are replaced too.',
   backupRestored: 'Restored from backup, providers: ',
   backupTitle: 'Backup and restore',
   backupLead: 'Save the whole proxy configuration to a JSON file, or load one back.',
@@ -5849,6 +5952,7 @@ const ZH = {
   backupConfirm: '确认用该备份覆盖当前配置？\n\nprovider：',
   backupConfirmProviders: '，预设：',
   backupConfirmProfiles: ' 个。',
+  backupConfirmSettings: '\n\n全局设置（高级端点规则、心跳监测与搜索分流策略）也会一并被覆盖。',
   backupRestored: '已从备份恢复，provider：',
   backupTitle: '备份与恢复',
   backupLead: '把整份代理配置存成 JSON 文件，或从文件恢复。',

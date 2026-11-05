@@ -851,3 +851,55 @@ summary,
 :root[data-theme='light'] .tabActive {
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
 }
+/* ---- v1.1.0 N25: split strategy radio group + focusable file picker ---- */
+.radioGroup {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.radioOption {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--dsw-alias-separator-secondary, rgba(128, 128, 128, 0.25));
+  background: transparent;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.radioOptionActive {
+  border-color: var(--dsw-alias-state-success-primary, #238636);
+  background: var(--dsw-alias-bg-layer-2, rgba(35, 134, 54, 0.1));
+  font-weight: 600;
+}
+
+/* Keyboard focus must be visible on the option, not on the clipped input. */
+.radioOption:focus-within {
+  outline: 2px solid var(--dsw-alias-brand-primary, #2f81f7);
+  outline-offset: 2px;
+}
+
+/*
+ * The restore picker is clipped, not removed: `display: none` would take it out
+ * of the tab order and leave the button unreachable by keyboard.
+ */
+.fileInput {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.fileButton:focus-within {
+  outline: 2px solid var(--dsw-alias-brand-primary, #2f81f7);
+  outline-offset: 2px;
+}

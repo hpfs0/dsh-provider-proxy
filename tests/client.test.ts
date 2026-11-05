@@ -6182,10 +6182,28 @@ test('N17: an exported file round-trips into a single restore write', async () =
     assert.equal(writes.length, 1, 'a restore is ONE mutate call, so it cannot half apply')
     assert.deepEqual(
       writes[0].ops.map(op => op.path[0]),
-      ['providers', 'proxyProfiles', 'defaultProxy', 'localDirect', 'testUrl'],
+      [
+        'providers',
+        'proxyProfiles',
+        'defaultProxy',
+        'localDirect',
+        'testUrl',
+        // 1.1.0 sections travel in the SAME write (N25).
+        'heartbeatEnabled',
+        'heartbeatInterval',
+        'heartbeatConsecutiveFails',
+        'searchProxyStrategy',
+        'searchProxyProfileId',
+      ],
     )
     assert.equal(writes[0].ops[3].value, false, 'localDirect is restored, not defaulted')
     assert.equal(writes[0].ops[4].value, 'https://echo.example/ip')
+    assert.equal(
+      writes[0].ops[5].value,
+      false,
+      'the heartbeat stays off: an exported default must not arm the prober on restore',
+    )
+    assert.equal(writes[0].ops[8].value, 'inherit', 'and search keeps the pre-1.1.0 routing')
   } finally {
     download.restore()
     restore()
@@ -6777,6 +6795,17 @@ function selectsOf(tree) {
   return out
 }
 
+/** Every radio input in a subtree (the split strategy group). */
+function radiosOf(node, out = []) {
+  if (node === null || typeof node !== 'object') return out
+  if (Array.isArray(node)) {
+    node.forEach(n => radiosOf(n, out))
+    return out
+  }
+  if (node.type === 'input' && node.props?.type === 'radio') out.push(node)
+  if (node.children) radiosOf(node.children, out)
+  return out
+}
 test('N24: global settings renders the split strategy and writes it', async () => {
   const { mod, restore } = loadBundle()
   try {
@@ -6794,22 +6823,48 @@ test('N24: global settings renders the split strategy and writes it', async () =
 
     const block = globalBlockOf(render())
     assert.ok(block, 'the global settings block must render')
-    const select = selectsOf(block).find(
-      s => s.props['aria-label'] === '搜索分流策略' || s.props['aria-label'] === 'Search routing strategy',
-    )
-    assert.ok(select, 'the split strategy select must exist')
+    // N25: the four strategies are a RADIO GROUP, so all of them are visible and
+    // the group carries the accessible wiring a select used to get from its label.
+    const group = radiosOf(block)
     assert.deepEqual(
-      select.children.filter(Boolean).map(option => option.props.value),
+      group.map(radio => radio.props.value),
       ['inherit', 'dedicated', 'direct', 'custom'],
       'all four strategies are offered, in menu order',
     )
-    assert.equal(select.props.value, 'inherit', 'inherit is the default')
+    assert.deepEqual(
+      group.map(radio => radio.props.checked),
+      [true, false, false, false],
+      'inherit is the default',
+    )
+    assert.ok(
+      group.every(radio => radio.props.name === 'dsh-proxy-search-strategy'),
+      'one radio group, one name',
+    )
+    const radiogroup = (function find(node) {
+      if (node === null || typeof node !== 'object') return undefined
+      if (Array.isArray(node)) {
+        for (const child of node) {
+          const found = find(child)
+          if (found !== undefined) return found
+        }
+        return undefined
+      }
+      if (node.props?.role === 'radiogroup') return node
+      return node.children === undefined ? undefined : find(node.children)
+    })(block)
+    assert.ok(radiogroup, 'the group is a real radiogroup for assistive tech')
+    assert.equal(radiogroup.props['aria-labelledby'], 'dsh-proxy-split-label')
+    assert.equal(
+      radiogroup.props['aria-describedby'],
+      'dsh-proxy-split-hint dsh-proxy-split-plan',
+      'the hint and the resolved plan both describe the group',
+    )
     assert.ok(
       textsOf(block).some(text => text.includes('当前解析：搜索经由「Web 搜索」卡片路由')),
       'the block explains what the current setting resolves to',
     )
 
-    select.props.onChange({ target: { value: 'direct' } })
+    group.find(radio => radio.props.value === 'direct').props.onChange({ target: { checked: true } })
     await writeSettle()
     assert.ok(
       harness.writes.some(w => w.ops.some(op => op.path[0] === 'searchProxyStrategy' && op.value === 'direct')),
@@ -7116,6 +7171,256 @@ test('tabs: arriving on a tab opens its single panel instead of showing a collap
       tabPanelOf(render(), 'presets').props.hidden,
       true,
       'the presets panel is hidden while another tab is open',
+    )
+  } finally {
+    restore()
+  }
+})
+// ---- N25: accessibility invariants over the WHOLE rendered page ----
+
+/**
+ * Walk the tree carrying the chain of ancestors.
+ *
+ * Every accessibility rule below is about a CONTROL's surroundings — is there a
+ * label around it, does its `aria-labelledby` resolve, is it inside a tab panel
+ * that names it — so a flat list is not enough.
+ */
+function walkWithAncestors(node, visit, ancestors = []) {
+  if (node === null || node === undefined || typeof node === 'boolean') return
+  if (Array.isArray(node)) {
+    for (const item of node) walkWithAncestors(item, visit, ancestors)
+    return
+  }
+  if (typeof node === 'string' || typeof node === 'number') return
+  visit(node, ancestors)
+  if (node.children) walkWithAncestors(node.children, visit, [...ancestors, node])
+}
+
+/** Every element in the tree, in document order. */
+function allElements(tree) {
+  const out = []
+  walkWithAncestors(tree, node => out.push(node))
+  return out
+}
+
+/** Every id rendered anywhere, so an aria reference can be resolved. */
+function renderedIds(tree) {
+  const ids = new Set()
+  for (const node of allElements(tree)) {
+    if (typeof node.props?.id === 'string') ids.add(node.props.id)
+  }
+  return ids
+}
+
+/**
+ * The accessible name of a form control, following the browser's order of
+ * precedence closely enough for this page: `aria-labelledby`, then `aria-label`,
+ * then a wrapping `<label>`'s text.
+ */
+function accessibleName(control, ancestors) {
+  const labelledBy = control.props?.['aria-labelledby']
+  if (typeof labelledBy === 'string' && labelledBy.length > 0) return `#${labelledBy}`
+  if (typeof control.props?.['aria-label'] === 'string' && control.props['aria-label'].length > 0) {
+    return control.props['aria-label']
+  }
+  for (let index = ancestors.length - 1; index >= 0; index -= 1) {
+    const ancestor = ancestors[index]
+    if (ancestor.type !== 'label') continue
+    const text = textsOf(ancestor).join(' ').trim()
+    if (text.length > 0) return text
+  }
+  return ''
+}
+
+test('N25 a11y: every form control on the page has an accessible name', async () => {
+  // Inactive tab panels stay MOUNTED (only `hidden`), so one render covers the
+  // controls of all four tabs — including the ones a screen-reader user only
+  // reaches after switching tabs.
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const targets = []
+    walkWithAncestors(render(), (node, ancestors) => {
+      if (
+        (node.type === 'input' || node.type === 'select' || node.type === 'textarea') &&
+        node.props?.type !== 'hidden'
+      ) {
+        targets.push({ node, ancestors })
+      }
+    })
+    assert.ok(targets.length > 0, 'the page renders form controls')
+    const unnamed = targets.filter(({ node, ancestors }) => accessibleName(node, ancestors) === '')
+    assert.deepEqual(
+      unnamed.map(({ node }) => `${node.type}[${node.props?.type ?? 'text'}]`),
+      [],
+      'every control needs a name',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('N25 a11y: every button has a name and every alert carries text', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [tree] = renderPage(mod, harness)
+
+    const namelessButtons = allElements(tree).filter(
+      node =>
+        node.type === 'button' &&
+        textsOf(node).join('').trim().length === 0 &&
+        typeof node.props?.['aria-label'] !== 'string',
+    )
+    assert.deepEqual(namelessButtons, [], 'a button with no text needs aria-label')
+
+    for (const alert of allElements(tree).filter(node => node.props?.role === 'alert')) {
+      assert.ok(
+        textsOf(alert).join('').trim().length > 0,
+        'an empty role="alert" announces nothing and only fires on every render',
+      )
+    }
+  } finally {
+    restore()
+  }
+})
+
+test('N25 a11y: every aria reference resolves to an element that is rendered', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: { searchProxyStrategy: 'dedicated', searchProxyProfileId: 'gone' },
+    })
+    const [tree] = renderPage(mod, harness)
+    const ids = renderedIds(tree)
+
+    const dangling = []
+    for (const node of allElements(tree)) {
+      for (const attribute of ['aria-labelledby', 'aria-describedby', 'aria-controls']) {
+        const value = node.props?.[attribute]
+        if (typeof value !== 'string') continue
+        for (const id of value.split(/\s+/).filter(part => part.length > 0)) {
+          if (!ids.has(id)) dangling.push(`${attribute}=${id}`)
+        }
+      }
+    }
+    assert.deepEqual(dangling, [], 'a reference to a missing id names nothing')
+  } finally {
+    restore()
+  }
+})
+// ---- N25: 1.1.0 sections in the backup, and the restore path's a11y ----
+
+test('N25: the export carries the heartbeat and split settings', async () => {
+  const { mod, restore } = loadBundle()
+  const download = stubDownloadEnvironment(true)
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: { enabled: true, protocol: 'http', host: '10.0.0.1', port: 7890 },
+        },
+        proxyProfiles: { TLS: { protocol: 'socks5', host: 'tls.example', port: 1081, proxyTls: true } },
+        heartbeatEnabled: true,
+        heartbeatInterval: 900,
+        heartbeatConsecutiveFails: 3,
+        searchProxyStrategy: 'dedicated',
+        searchProxyProfileId: 'TLS',
+      },
+    })
+    const [tree] = renderPage(mod, harness)
+    findButtons(backupBlockOf(tree))
+      .find(button => textsOf(button).includes('备份配置'))
+      .props.onClick()
+
+    const file = download.savedFile()
+    assert.ok(file, 'a file is written')
+    assert.equal(file.version, 2, 'the export declares the 1.1.0 schema')
+    assert.equal(file.heartbeatEnabled, true)
+    assert.equal(file.heartbeatInterval, 900)
+    assert.equal(file.heartbeatConsecutiveFails, 3)
+    assert.equal(file.searchProxyStrategy, 'dedicated')
+    assert.equal(file.searchProxyProfileId, 'TLS')
+    // The TLS preset travels with its flags, and the password is redacted by
+    // default (the confirm answer here is "include", so it is present).
+    assert.equal(file.proxyProfiles.TLS.proxyTls, true)
+  } finally {
+    download.restore()
+    restore()
+  }
+})
+
+test('N25: a mixed-version export still round-trips through the real page', async () => {
+  // The property that matters for a user: what this page WRITES, this page can
+  // READ back, including the sections added in 1.1.0.
+  const { mod, restore } = loadBundle()
+  const download = stubDownloadEnvironment(true)
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: {
+            enabled: true,
+            protocol: 'socks5',
+            host: '10.0.0.1',
+            port: 1080,
+            proxyTls: true,
+            proxyTlsRejectUnauthorized: false,
+          },
+        },
+        defaultProxy: { host: '127.0.0.1', port: 7890 },
+        heartbeatEnabled: false,
+        heartbeatInterval: 60,
+        heartbeatConsecutiveFails: 5,
+        searchProxyStrategy: 'direct',
+        searchProxyProfileId: '',
+      },
+    })
+    let [, render] = renderPage(mod, harness)
+    findButtons(backupBlockOf(render())).find(b => textsOf(b).includes('备份配置')).props.onClick()
+    const exported = download.state.text
+
+    const input = findFirstNodeOfType(backupBlockOf(render()), 'input')
+    await input.props.onChange({
+      target: { files: [{ text: async () => exported }], value: 'C:\\fake.json' },
+    })
+    await settle()
+
+    const restoreWrite = harness.writes.find(write => write.ops.length > 1)
+    const byPath = Object.fromEntries(restoreWrite.ops.map(op => [op.path[0], op.value]))
+    assert.equal(byPath.heartbeatEnabled, false)
+    assert.equal(byPath.heartbeatInterval, 60)
+    assert.equal(byPath.heartbeatConsecutiveFails, 5)
+    assert.equal(byPath.searchProxyStrategy, 'direct')
+    assert.equal(byPath.providers.sensenova.proxyTls, true, 'the TLS flag survives the round-trip')
+    assert.equal(byPath.providers.sensenova.proxyTlsRejectUnauthorized, false)
+  } finally {
+    download.restore()
+    restore()
+  }
+})
+
+test('N25 a11y: the restore picker stays in the tab order', async () => {
+  // `display: none` would make the only "restore" affordance mouse-only. The
+  // input must be clipped instead, named, and reachable.
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [tree] = renderPage(mod, harness)
+    const input = findFirstNodeOfType(backupBlockOf(tree), 'input')
+    assert.equal(input.props.type, 'file')
+    assert.equal(input.props['aria-label'], '恢复配置')
+    assert.notEqual(
+      input.props.style?.display,
+      'none',
+      'a display:none input is unreachable by keyboard, which is the whole bug',
+    )
+    assert.equal(input.props.style?.width, '1px', 'clipped to a pixel instead')
+    assert.ok(
+      String(input.props.className).includes('fileInput'),
+      'the clipped-input class is what keeps it focusable',
     )
   } finally {
     restore()
