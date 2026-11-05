@@ -6,6 +6,22 @@
  * functions on purpose: an export that wrote a shape the import rejects would
  * only be discovered by a user who had already lost their configuration.
  *
+ * VERSION HISTORY (import accepts every one of them):
+ * - 0.8.0 files carry `providers` / `defaultProxy` / `localDirect` / `testUrl`
+ *   and no `proxyProfiles` at all;
+ * - 1.0.0 files are `version: 1` and add `proxyProfiles`, plus `proxyTls` /
+ *   `proxyTlsRejectUnauthorized` inside every endpoint;
+ * - 1.1.0 files are `version: 2` and add the `heartbeatEnabled` /
+ *   `heartbeatInterval` / `heartbeatConsecutiveFails` and
+ *   `searchProxyStrategy` / `searchProxyProfileId` top-level fields.
+ *
+ * A missing section is filled with the CURRENT schema default, because a restore
+ * REPLACES the whole configuration: leaving a hidden 1.1.0 setting at whatever
+ * the file happened to omit would make the restored state depend on the state
+ * that preceded it. A file from a NEWER major version is refused instead, since
+ * its keys may have been re-shaped and a half-applied restore is worse than a
+ * clear error.
+ *
  * SECURITY: the password fields are the ONLY values with a redaction switch.
  * Everything else is address-like, and the plan's promise — a password lives
  * only in memory and `cordis.patch.yml` — is preserved because a redacted
@@ -20,10 +36,29 @@ import type {
   Protocol,
   ProviderProxyRouteValue,
 } from './config.js'
+import {
+  DEFAULT_SEARCH_PROXY_STRATEGY,
+  SEARCH_PROXY_STRATEGIES,
+  normalizeSearchSplitConfig,
+  type SearchProxyStrategy,
+} from './search-split.js'
 import { proxyHostProblem } from './proxy-address.js'
 
 /** Mirrors `PROTOCOLS` in config.ts; kept here so the browser never loads it. */
 const PROTOCOLS: readonly Protocol[] = ['http', 'https', 'socks5']
+
+/**
+ * The document version this build WRITES.
+ *
+ * A single constant, so `buildBackup` and `parseBackup` cannot disagree about
+ * what "current" means — the classic way a round-trip test passes while a real
+ * export/import pair silently loses a field.
+ */
+export const BACKUP_VERSION = 2
+
+/** The newest version this build can WRITE; anything above it is refused. */
+const MAX_SUPPORTED_VERSION = BACKUP_VERSION
+
 
 /**
  * Schema defaults for one endpoint.
@@ -48,13 +83,20 @@ function normalizeEndpoint(raw: Partial<DefaultProxyValue> | undefined): Default
 
 /** The document shape a backup carries. `version` identifies it. */
 export interface BackupDocument {
-  version: 1
+  version: typeof BACKUP_VERSION
   exportedAt: string
   providers: Record<string, ProviderProxyRouteValue>
   proxyProfiles: Record<string, DefaultProxyValue>
   defaultProxy: DefaultProxyValue
   localDirect: boolean
   testUrl: string
+  /** 1.1.0 — background heartbeat monitoring (N23). */
+  heartbeatEnabled: boolean
+  heartbeatInterval: number
+  heartbeatConsecutiveFails: number
+  /** 1.1.0 — search / reasoning traffic split (N24). */
+  searchProxyStrategy: SearchProxyStrategy
+  searchProxyProfileId: string
 }
 
 /** What the page holds, as far as export is concerned. */
@@ -64,10 +106,43 @@ export interface BackupSource {
   defaultProxy?: Partial<DefaultProxyValue>
   localDirect?: boolean
   testUrl?: string
+  /** 1.1.0 fields; omitted means "the schema default". */
+  heartbeatEnabled?: boolean
+  heartbeatInterval?: number
+  heartbeatConsecutiveFails?: number
+  searchProxyStrategy?: unknown
+  searchProxyProfileId?: unknown
 }
 
 /** Mirrors the schema default, so an empty export is still self-explanatory. */
 const FALLBACK_TEST_URL = 'https://api.ipify.org?format=json'
+
+/**
+ * Schema defaults for the heartbeat trio (N23).
+ *
+ * A local copy for the same bundling reason as `normalizeEndpoint`:
+ * `config.ts` needs `node:module`, which cannot be bundled for the browser.
+ * `tests/backup.test.ts` asserts this copy still agrees with
+ * `normalizeHeartbeatConfig`, so a drift is a failing test rather than a backup
+ * that quietly differs from the settings it describes.
+ */
+function normalizeHeartbeat(raw: {
+  heartbeatEnabled?: boolean
+  heartbeatInterval?: number
+  heartbeatConsecutiveFails?: number
+}): { heartbeatEnabled: boolean; heartbeatInterval: number; heartbeatConsecutiveFails: number } {
+  const intervalRaw = Number(raw.heartbeatInterval)
+  const failsRaw = Number(raw.heartbeatConsecutiveFails)
+  return {
+    // Strict `true`: a string "true" from a hand-edited file must not arm the
+    // background prober.
+    heartbeatEnabled: raw.heartbeatEnabled === true,
+    heartbeatInterval:
+      Number.isFinite(intervalRaw) && intervalRaw >= 10 ? Math.floor(intervalRaw) : 300,
+    heartbeatConsecutiveFails:
+      Number.isFinite(failsRaw) && failsRaw >= 1 ? Math.floor(failsRaw) : 2,
+  }
+}
 
 /**
  * Schema defaults for one raw route, WITHOUT enforcing endpoint completeness.
@@ -98,6 +173,22 @@ function fillRoute(raw: Partial<ProviderProxyRouteValue> | undefined): ProviderP
 }
 
 /**
+ * Empty ONE password field, whatever endpoint shape it belongs to.
+ *
+ * Redaction used to be spelled out at each of the three call sites (route,
+ * preset, default). That is exactly how a fourth site — the SOCKS5-over-TLS
+ * endpoints added in 1.1.0 — ends up shipping an unredacted secret. The
+ * endpoint types all carry `password`, so one generic helper covers every one
+ * of them by construction, and the compiler refuses any shape that does not.
+ */
+function redactPassword<T extends { password: string }>(endpoint: T): T {
+  // Emptied rather than deleted: a missing field would be re-defaulted to `''`
+  // on import anyway, and keeping the key makes the redaction visible to anyone
+  // who opens the file.
+  return { ...endpoint, password: '' }
+}
+
+/**
  * Build the document to write to disk.
  *
  * Redaction EMPTIES both password fields rather than deleting them: a missing
@@ -109,32 +200,38 @@ export function buildBackup(
   options: { includePasswords: boolean; now?: Date } = { includePasswords: false },
 ): BackupDocument {
   const include = options.includePasswords === true
-  const hide = (password: string): string => (include ? password : '')
+  const hide = <T extends { password: string }>(endpoint: T): T =>
+    include ? endpoint : redactPassword(endpoint)
 
   const providers: Record<string, ProviderProxyRouteValue> = {}
   for (const [id, raw] of Object.entries(source.providers ?? {})) {
-    const filled = fillRoute(raw)
-    providers[id] = { ...filled, password: hide(filled.password) }
+    providers[id] = hide(fillRoute(raw))
   }
 
   const proxyProfiles: Record<string, DefaultProxyValue> = {}
   for (const [name, raw] of Object.entries(source.proxyProfiles ?? {})) {
-    const filled = normalizeEndpoint(raw)
-    proxyProfiles[name] = { ...filled, password: hide(filled.password) }
+    proxyProfiles[name] = hide(normalizeEndpoint(raw))
   }
 
-  const defaultProxy = normalizeEndpoint(source.defaultProxy)
+  const defaultProxy = hide(normalizeEndpoint(source.defaultProxy))
+  const split = normalizeSearchSplitConfig({
+    searchProxyStrategy: source.searchProxyStrategy,
+    searchProxyProfileId: source.searchProxyProfileId,
+  })
   return {
-    version: 1,
+    version: BACKUP_VERSION,
     exportedAt: (options.now ?? new Date()).toISOString(),
     providers,
     proxyProfiles,
-    defaultProxy: { ...defaultProxy, password: hide(defaultProxy.password) },
+    defaultProxy,
     localDirect: source.localDirect !== false,
     testUrl:
       typeof source.testUrl === 'string' && source.testUrl.trim().length > 0
         ? source.testUrl
         : FALLBACK_TEST_URL,
+    ...normalizeHeartbeat(source),
+    searchProxyStrategy: split.searchProxyStrategy,
+    searchProxyProfileId: split.searchProxyProfileId,
   }
 }
 
@@ -175,6 +272,20 @@ export function parseBackup(text: string): BackupParseResult {
   if (!isPlainObject(parsed)) return { ok: false, error: '备份文件的顶层必须是一个对象' }
 
   const root = parsed
+  // A file from a NEWER major version may have re-shaped the keys this build
+  // reads, so it is refused instead of half-applied. A missing `version` is a
+  // 0.8.0 file, which is still readable field by field.
+  if (root.version !== undefined) {
+    if (typeof root.version !== 'number' || !Number.isFinite(root.version)) {
+      return { ok: false, error: 'version 必须是数字' }
+    }
+    if (root.version > MAX_SUPPORTED_VERSION) {
+      return {
+        ok: false,
+        error: `该备份来自更新版本的插件（version ${root.version}），本版本最高支持 ${MAX_SUPPORTED_VERSION}；请升级插件后再导入`,
+      }
+    }
+  }
   if (
     root.providers === undefined &&
     root.defaultProxy === undefined &&
@@ -200,6 +311,33 @@ export function parseBackup(text: string): BackupParseResult {
   }
   if (root.testUrl !== undefined && typeof root.testUrl !== 'string') {
     return { ok: false, error: 'testUrl 必须是字符串' }
+  }
+  // 1.1.0 sections. A wrong TYPE is an error (the restore would otherwise
+  // silently substitute the default); an ABSENT section is not — that is simply
+  // a pre-1.1.0 file, and it takes today's defaults.
+  if (root.heartbeatEnabled !== undefined && typeof root.heartbeatEnabled !== 'boolean') {
+    return { ok: false, error: 'heartbeatEnabled 必须是布尔值' }
+  }
+  for (const key of ['heartbeatInterval', 'heartbeatConsecutiveFails'] as const) {
+    if (root[key] !== undefined && (typeof root[key] !== 'number' || !Number.isFinite(root[key]))) {
+      return { ok: false, error: `${key} 必须是数字` }
+    }
+  }
+  if (
+    root.searchProxyStrategy !== undefined &&
+    !SEARCH_PROXY_STRATEGIES.includes(root.searchProxyStrategy as SearchProxyStrategy)
+  ) {
+    // Refused rather than degraded to `inherit` like the settings file does: the
+    // settings loader must survive a value written by a newer build, but a
+    // restore is an explicit, confirmed overwrite — an unknown strategy means
+    // the file and this build disagree about what will happen.
+    return {
+      ok: false,
+      error: `searchProxyStrategy 必须是 ${SEARCH_PROXY_STRATEGIES.join(' / ')}`,
+    }
+  }
+  if (root.searchProxyProfileId !== undefined && typeof root.searchProxyProfileId !== 'string') {
+    return { ok: false, error: 'searchProxyProfileId 必须是字符串' }
   }
 
   /** Field-type check shared by every endpoint-shaped object. */
@@ -263,8 +401,19 @@ export function parseBackup(text: string): BackupParseResult {
     if (why !== undefined) return { ok: false, error: why }
   }
 
+  const split = normalizeSearchSplitConfig({
+    searchProxyStrategy: root.searchProxyStrategy,
+    searchProxyProfileId: root.searchProxyProfileId,
+  })
+  const heartbeat = normalizeHeartbeat({
+    heartbeatEnabled: root.heartbeatEnabled as boolean | undefined,
+    heartbeatInterval: root.heartbeatInterval as number | undefined,
+    heartbeatConsecutiveFails: root.heartbeatConsecutiveFails as number | undefined,
+  })
   const document: BackupDocument = {
-    version: 1,
+    // Always the CURRENT version: the in-memory document is the upgraded form,
+    // so a 0.8.0 file that is exported again immediately becomes a 1.1.0 one.
+    version: BACKUP_VERSION,
     exportedAt: typeof root.exportedAt === 'string' ? root.exportedAt : '',
     providers,
     proxyProfiles,
@@ -274,6 +423,9 @@ export function parseBackup(text: string): BackupParseResult {
       typeof root.testUrl === 'string' && root.testUrl.trim().length > 0
         ? root.testUrl
         : FALLBACK_TEST_URL,
+    ...heartbeat,
+    searchProxyStrategy: split.searchProxyStrategy,
+    searchProxyProfileId: split.searchProxyProfileId,
   }
   return { ok: true, document }
 }
@@ -293,6 +445,15 @@ export function backupOps(document: BackupDocument): unknown[] {
     { op: 'set', path: ['defaultProxy'], value: document.defaultProxy },
     { op: 'set', path: ['localDirect'], value: document.localDirect },
     { op: 'set', path: ['testUrl'], value: document.testUrl },
+    // 1.1.0: a restore replaces the WHOLE configuration, so the global switches
+    // travel with it. Omitting them would leave the previous machine's heartbeat
+    // and split strategy silently in force after "restoring" a file that says
+    // nothing about them.
+    { op: 'set', path: ['heartbeatEnabled'], value: document.heartbeatEnabled },
+    { op: 'set', path: ['heartbeatInterval'], value: document.heartbeatInterval },
+    { op: 'set', path: ['heartbeatConsecutiveFails'], value: document.heartbeatConsecutiveFails },
+    { op: 'set', path: ['searchProxyStrategy'], value: document.searchProxyStrategy },
+    { op: 'set', path: ['searchProxyProfileId'], value: document.searchProxyProfileId },
   ]
 }
 

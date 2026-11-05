@@ -1761,6 +1761,7 @@ export {
   buildBackup,
   parseBackup,
   validateEnabledRoutes,
+  BACKUP_VERSION,
 } from './backup.js'
 export {
   PROVIDER_HOST_TEMPLATES,
