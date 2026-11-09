@@ -4214,12 +4214,27 @@ test('the bulk button points every card at the default, in ONE write', async () 
     const harness = mountPlugin(mod, {
       value: {
         defaultProxy: { protocol: 'http', host: '127.0.0.1', port: 7890, username: '', password: '' },
+        proxyProfiles: {
+          'HK-Proxy': { protocol: 'http', host: '10.9.9.9', port: 7892, username: '', password: '' },
+        },
         providers: {
           sensenova: {
             enabled: true,
             protocol: 'http',
             host: '10.0.0.1',
             port: 7890,
+            username: '',
+            password: '',
+          },
+          // P2-5: a card bound to a preset used to keep that binding, because
+          // `profileId` wins over `useDefault` on the Host side. The button said
+          // "all providers use the default" and this card's traffic did not.
+          openai: {
+            enabled: true,
+            profileId: 'HK-Proxy',
+            protocol: 'http',
+            host: '',
+            port: 0,
             username: '',
             password: '',
           },
@@ -4240,13 +4255,25 @@ test('the bulk button points every card at the default, in ONE write', async () 
     applyAll.props.onClick()
     await writeSettle()
     assert.equal(writes.length, 1, 'one write, not one table rebuild per card')
-    // Rows sort by name, so OpenAI precedes SenseNova.
+    // Rows sort by name, so OpenAI precedes SenseNova. Both binding fields move
+    // for EVERY card: the preset binding must be cleared, not merely outvoted.
     assert.deepEqual(
       writes[0].ops.map(op => [op.path[1], op.path[2], op.value]),
       [
+        ['openai', 'profileId', ''],
         ['openai', 'useDefault', true],
+        ['sensenova', 'profileId', ''],
         ['sensenova', 'useDefault', true],
       ],
+    )
+    const card = cardFor(render(), 'openai')
+    assert.ok(
+      textsOf(card).some(text => text.includes('使用默认代理')),
+      'the preset-bound card now names the default endpoint, without a remount',
+    )
+    assert.ok(
+      !textsOf(card).some(text => text.includes('使用预设 HK-Proxy')),
+      'it must stop claiming the preset it no longer routes through',
     )
   } finally {
     restore()

@@ -2602,23 +2602,35 @@ function renderPage(ctx: any): unknown {
   const applyDefaultToAll = (): void => {
     const ids = rows.map(row => row.id)
     if (ids.length === 0) return
+    // BOTH binding fields move. `profileId` wins over `useDefault` in the Host's
+    // resolver, so writing only `useDefault` left every card that was bound to a
+    // preset still routing through that OLD preset: the button promised "all
+    // providers use the default" and the traffic did not. `bindingFields` is the
+    // shared expression of the pair, so the page cannot invent a third spelling.
+    const fields = bindingFields({ kind: 'default' })
     setDraft((current: any) => {
       const next = { ...current }
-      for (const id of ids) next[id] = { ...next[id], useDefault: true }
+      for (const id of ids) {
+        next[id] = { ...next[id], profileId: fields.profileId, useDefault: fields.useDefault }
+      }
       return next
     })
     invalidateTests(ids)
     saveMany(
       '\u0000default\u0000applyAll',
-      ids.map(id => ({ op: 'set', path: ['providers', id, 'useDefault'], value: true })),
+      ids.flatMap(id => [
+        { op: 'set', path: ['providers', id, 'profileId'], value: fields.profileId },
+        { op: 'set', path: ['providers', id, 'useDefault'], value: fields.useDefault },
+      ]),
       `所有 provider 的 useDefault（${ids.length} 个）`,
       () =>
         setDraft((current: any) => {
           const next = { ...current }
           for (const id of ids) {
             const entry = next[id]
-            if (entry === undefined || entry.useDefault === undefined) continue
+            if (entry === undefined) continue
             const nextEntry = { ...entry }
+            delete nextEntry.profileId
             delete nextEntry.useDefault
             if (Object.keys(nextEntry).length === 0) delete next[id]
             else next[id] = nextEntry
