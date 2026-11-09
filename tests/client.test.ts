@@ -5875,6 +5875,100 @@ test('N14: renaming a preset moves the key and rebinds every route using it', as
   }
 })
 
+test('P2-6: renaming the search-split preset carries the binding with it', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {},
+        proxyProfiles: { 'HK-Proxy': { protocol: 'http', host: '127.0.0.1', port: 7891 } },
+        searchProxyStrategy: 'dedicated',
+        searchProxyProfileId: 'HK-Proxy',
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    assert.ok(
+      textsOf(globalBlockOf(render())).some(text =>
+        text.includes('搜索使用独立代理端点：http://127.0.0.1:7891'),
+      ),
+      'the binding starts out usable',
+    )
+
+    findButtons(profileManagerOf(render()))
+      .find(button => textsOf(button).includes('重命名'))
+      .props.onClick()
+    findInputsByPlaceholder(profileManagerOf(render()), '该代理预设的新名称：')[0]
+      .props.onChange({ target: { value: 'HK-Fast' } })
+    findButtons(profileManagerOf(render()))
+      .find(button => textsOf(button).includes('保存名称'))
+      .props.onClick()
+    await writeSettle()
+
+    const ops = harness.writes[0].ops
+    assert.deepEqual(
+      ops.at(-1),
+      { op: 'set', path: ['searchProxyProfileId'], value: 'HK-Fast' },
+      'the search split binding moves with the preset it names',
+    )
+    assert.equal(
+      ops.filter(op => op.path[0] === 'providers').length,
+      0,
+      'no provider was bound, so nothing else needed rewriting',
+    )
+    const block = globalBlockOf(render())
+    assert.ok(
+      textsOf(block).some(text => text.includes('搜索使用独立代理端点：http://127.0.0.1:7891')),
+      'search keeps a working binding after the rename',
+    )
+    assert.ok(
+      !textsOf(block).some(text => text.includes('搜索请求将被拒绝')),
+      'a rename must not turn search into a refused call',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('P2-6: deleting the search-split preset warns that search will be refused', async () => {
+  let confirmText
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {},
+        proxyProfiles: { 'HK-Proxy': { protocol: 'http', host: '127.0.0.1', port: 7891 } },
+        searchProxyStrategy: 'dedicated',
+        searchProxyProfileId: 'HK-Proxy',
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    globalThis.window = {
+      ...globalThis.window,
+      confirm: text => {
+        confirmText = text
+        return false
+      },
+    }
+    findButtons(profileManagerOf(render()))
+      .find(button => textsOf(button).includes('删除'))
+      .props.onClick()
+    assert.ok(
+      String(confirmText).includes('搜索分流'),
+      'the prompt must name the search split, which no provider row lists',
+    )
+    assert.ok(
+      String(confirmText).includes('searchProxyProfileId'),
+      'naming the setting is what tells the user where to rebind it',
+    )
+    await writeSettle()
+    assert.equal(harness.writes.length, 0, 'cancelling must not delete')
+  } finally {
+    restore()
+  }
+})
+
 test('N14: adding a preset works where window.prompt does not exist', async () => {
   // The Desktop host does not implement `window.prompt` — calling it throws and
   // a button wired to it does nothing at all, which is exactly how "clicking Add

@@ -2975,6 +2975,11 @@ function renderPage(ctx: any): unknown {
     delete next[from]
     next[to] = source
     const bound = routesBoundTo({ ...configured, ...draft }, from)
+    // The search split binding is NOT a provider route: it lives in the top-level
+    // `searchProxyProfileId`, so moving only the dictionary and the route bindings
+    // left it naming a preset that no longer existed, and the next search was
+    // refused as "preset missing" — a rename that broke search.
+    const searchBound = globalSearchProfileId === from
     setProfileDraft((current: any) => {
       const nextDraft = { ...current }
       delete nextDraft[from]
@@ -2988,12 +2993,14 @@ function renderPage(ctx: any): unknown {
         return nextDraft
       })
     }
+    if (searchBound) editGlobal('searchProxyProfileId', to)
     invalidateTests(bound)
     saveMany(
       '\u0000profile\u0000rename',
       [
         { op: 'set', path: ['proxyProfiles'], value: next },
         ...bound.map(id => ({ op: 'set', path: ['providers', id, 'profileId'], value: to })),
+        ...(searchBound ? [{ op: 'set', path: ['searchProxyProfileId'], value: to }] : []),
       ],
       `${t.profileNameLabel} ${from} → ${to}`,
       () => undefined,
@@ -3003,9 +3010,21 @@ function renderPage(ctx: any): unknown {
   /** Delete one preset. Routes bound to it keep their id, and say it is gone. */
   const deleteProfile = (name: string): void => {
     const bound = routesBoundTo({ ...configured, ...draft }, name)
+    // The search split may bind this preset too. It is deliberately NOT cleared:
+    // a `dedicated` search strategy refuses to run without a usable preset rather
+    // than silently going direct, and clearing it would make that refusal
+    // disappear while the user still believes search is proxied. The prompt is
+    // therefore the only place that can tell them, so it must.
+    const searchBound = globalSearchProfileId === name
+    const dependents = [
+      ...(bound.length === 0 ? [] : [`${t.profileDeleteInUse}${bound.join('、')}`]),
+      ...(searchBound ? [t.profileDeleteSearchInUse] : []),
+    ]
     if (
       globalThis.window?.confirm?.(
-        bound.length === 0 ? t.profileDeleteConfirm : `${t.profileDeleteInUse}${bound.join('、')}\n\n${t.profileDeleteConfirm}`,
+        dependents.length === 0
+          ? t.profileDeleteConfirm
+          : `${dependents.join('\n')}\n\n${t.profileDeleteConfirm}`,
       ) !== true
     ) {
       return
@@ -5774,6 +5793,8 @@ const EN = {
   profileDeleteConfirm: 'Delete this proxy preset?',
   profileDeleteInUse:
     'These providers are bound to this preset and will stop being proxied until they are rebound:\n',
+  profileDeleteSearchInUse:
+    'Web-search traffic is also split through this preset (searchProxyProfileId); search will be refused until another preset is bound.',
   profileUsedBy: 'Used by: ',
   profileBinding: 'Endpoint',
   profileBindingOwn: 'Custom (this card)',
@@ -5992,6 +6013,8 @@ const ZH = {
   profileNameTaken: '已存在同名预设。',
   profileDeleteConfirm: '确认删除该代理预设？',
   profileDeleteInUse: '以下 provider 绑定在该预设上，删除后将不再走代理，直到重新绑定：\n',
+  profileDeleteSearchInUse:
+    '搜索分流也绑定在该预设上（searchProxyProfileId），删除后搜索请求会被拒绝，直到重新绑定预设。',
   profileUsedBy: '被以下 provider 使用：',
   profileBinding: '端点来源',
   profileBindingOwn: '独立自定义配置',
