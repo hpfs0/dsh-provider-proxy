@@ -1,0 +1,30 @@
+# The gate every push and every pull request has to pass.
+#
+# `npm run verify` is exactly what a release is validated with locally
+# (`typecheck` → `build` → `test`), so CI cannot approve something a release
+# would reject. Nothing else is added on purpose: a second, stricter gate
+# (lint, coverage thresholds) would make a red build mean "style" instead of
+# "this breaks the plugin".
+name: verify
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # The floor of the published engines range (`^22.19.0`): the oldest
+          # runtime the plugin claims to support is the one that must stay green.
+          # `npm ci` runs `prepare`, so `lib/` is built before anything imports it.
+          node-version: '22.20.0'
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run verify
