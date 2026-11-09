@@ -54,9 +54,10 @@ export function parseHostList(raw: string): string[] {
  *
  * Used where a rule list is normalized before it is stored (`normalizeRoute`), so
  * the Host never compares against a rule that means something else than the one
- * the user typed. Dead entries are KEPT verbatim: dropping one would quietly
- * widen the list (`onlyHosts` with a single dead entry means "proxy nothing",
- * not "proxy everything").
+ * the user typed. Entries that can never match are KEPT verbatim: dropping one
+ * would quietly widen the list (`onlyHosts` with a single dead entry means "proxy
+ * nothing", not "proxy everything"). Only a token that normalizes to nothing at
+ * all (`*.`) disappears, which is exactly what the matcher already ignored.
  */
 export function normalizeHostRulesText(raw: string): string {
   return parseHostList(raw).join(', ')

@@ -6984,7 +6984,7 @@ test('P2-10: under emergency bypass every card says it is going direct', async (
     const [, render] = renderPage(mod, harness)
     await settle()
     const card = cardFor(render(), 'sensenova')
-    assert.equal(pillTextOf(card), '旁路直连', 'the pill must not claim the proxy is in use')
+    assert.equal(pillTextOf(card), '旁路直连中', 'the pill must not claim the proxy is in use')
     const alert = alertsOf(card).find(node => textsOf(node).some(text => text.includes('紧急旁路')))
     assert.ok(alert, 'the card head carries its own bypass warning')
     assert.ok(

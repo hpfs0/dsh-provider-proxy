@@ -125,26 +125,25 @@ export function isNetworkFailoverError(error: unknown): boolean {
  * when that body is empty.
  */
 export function canReplayRequest(input: unknown, init: unknown): boolean {
-  const body = (init as { body?: unknown } | null | undefined)?.body
-  if (init !== undefined && init !== null) {
-    if (body === undefined || body === null) return true
-    if (typeof body === 'string') return true
-    if (typeof URLSearchParams !== 'undefined' && body instanceof URLSearchParams) return true
-    if (typeof Blob !== 'undefined' && body instanceof Blob) return true
-    if (typeof FormData !== 'undefined' && body instanceof FormData) return true
-    if (
-      typeof ArrayBuffer !== 'undefined' &&
-      (body instanceof ArrayBuffer || ArrayBuffer.isView(body))
-    ) {
-      return true
+  if (init === undefined || init === null) {
+    // No init: a `Request` may still carry its own body, and only an empty one can
+    // be sent again. A string or URL input has no body at all.
+    const request = input as { body?: unknown } | null | undefined
+    if (request !== null && typeof request === 'object' && 'body' in request) {
+      return request.body === null || request.body === undefined
     }
-    return false
+    return true
   }
-  const request = input as { body?: unknown } | null | undefined
-  if (request !== null && typeof request === 'object' && 'body' in request) {
-    return request.body === null || request.body === undefined
+  const body = (init as { body?: unknown }).body
+  if (body === undefined || body === null) return true
+  if (typeof body === 'string') return true
+  if (typeof URLSearchParams !== 'undefined' && body instanceof URLSearchParams) return true
+  if (typeof Blob !== 'undefined' && body instanceof Blob) return true
+  if (typeof FormData !== 'undefined' && body instanceof FormData) return true
+  if (typeof ArrayBuffer !== 'undefined' && (body instanceof ArrayBuffer || ArrayBuffer.isView(body))) {
+    return true
   }
-  return true
+  return false
 }
 
 export interface RouterStore {
@@ -195,8 +194,8 @@ export interface RouterStore {
    * through a close), or when a wrapped stream ends, fails or is abandoned
    * without ever issuing one.
    *
-   * Both call sites are idempotent-safe: the release must tolerate being called
-   * twice and twice-only-scopes never take a claim at all.
+   * It is called from more than one of those points, so the callback must be
+   * idempotent — the Host's release is, and it is the only caller.
    */
   onLeaseRelease?: () => void
 }

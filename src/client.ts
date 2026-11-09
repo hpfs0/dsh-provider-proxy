@@ -4496,7 +4496,13 @@ function renderPage(ctx: any): unknown {
         const pill = rejected
           ? { className: styles.pillRejected, style: { ...S.pill, ...S.pillRejected }, text: t.rejected }
           : route.enabled && globalBypassAll
-            ? { className: styles.pillOff, style: { ...S.pill, ...S.pillBypass }, text: t.bypassPill }
+            ? {
+                className: styles.pillOff,
+                style: { ...S.pill, ...S.pillBypass },
+                // `bypassedDirect` already said exactly this in both languages and
+                // was never wired to anything; reusing it keeps one wording.
+                text: t.bypassedDirect,
+              }
             : route.enabled
               ? { className: styles.pillOn, style: { ...S.pill, ...S.pillOn }, text: t.on }
               : { className: styles.pillLive, style: { ...S.pill, ...S.pillLive }, text: t.off }
@@ -5792,7 +5798,6 @@ const EN = {
   bypassAllToggle: 'Emergency Bypass All',
   bypassAllBannerTitle: '[Emergency Bypass Active]',
   bypassAllBannerText: 'All traffic is routed directly upstream, individual settings preserved. Remember to disable when done.',
-  bypassPill: 'bypassed · direct',
   bypassCardBannerTitle: '[Emergency Bypass]',
   bypassCardBannerText: 'This provider\'s traffic is going DIRECT upstream right now; its proxy settings are kept.',
   bypassedDirect: 'Bypassed Direct',
@@ -6016,7 +6021,6 @@ const ZH = {
   bypassAllToggle: '全局紧急旁路 (Bypass All)',
   bypassAllBannerTitle: '[紧急旁路激活中]',
   bypassAllBannerText: '所有模型流量已全量绕过代理直连上游，单项配置仍完整保持。调试完毕后请及时关闭。',
-  bypassPill: '旁路直连',
   bypassCardBannerTitle: '[紧急旁路]',
   bypassCardBannerText: '该 provider 当前直连上游，代理配置仍完整保留；关闭旁路后立刻恢复。',
   bypassedDirect: '旁路直连中',

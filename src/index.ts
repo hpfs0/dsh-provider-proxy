@@ -243,6 +243,11 @@ export function apply(ctx: any, config?: ProxyConfig): void {
    * user had already started, so retirement waits for the last claim: the scope's
    * first request, or the stream ending without one (see
    * `RouterStore.onLeaseRelease`).
+   *
+   * A stream that is neither consumed nor closed keeps its claim — and with it an
+   * idle dispatcher — until the plugin is disposed. That is bounded by the number
+   * of abandoned streams, and the alternative (closing blind) is the defect this
+   * exists to fix.
    */
   const dispatcherClaims = new Map<DispatcherLike, { count: number; retired: boolean }>()
 
