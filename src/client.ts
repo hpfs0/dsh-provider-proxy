@@ -3753,7 +3753,10 @@ function renderPage(ctx: any): unknown {
       anchor.download = backupFileName()
       anchor.click()
       globalThis.setTimeout(() => globalThis.URL.revokeObjectURL(url), 0)
-      setSavedNote(`${t.backupExported}${includePasswords ? t.backupWithPasswords : t.backupWithoutPasswords}`)
+      // `backupWithPasswords` / `backupWithoutPasswords` are complete sentences;
+      // a separate "exported" prefix used to be referenced here without ever
+      // being defined, so the note rendered as "undefined已导出备份…".
+      setSavedNote(includePasswords ? t.backupWithPasswords : t.backupWithoutPasswords)
     } catch (error: any) {
       setSavedNote(undefined)
       setSaveError({ label: t.backupExport, message: String(error?.message ?? error) })

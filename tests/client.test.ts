@@ -2798,6 +2798,38 @@ test('the CSS class map is imported as a binding, not a side effect', () => {
   assert.match(clientSource, /import styles from ['"]\.\/client\.css['"]/)
 })
 
+test('every string the page reads exists in both language tables', () => {
+  // A key that is READ but never DEFINED renders the literal text "undefined" on
+  // the page, and no type check catches it: `t` is a plain string dictionary.
+  // The export note did exactly that after a successful backup. Both tables are
+  // flat object literals, so their keys are the two-space-indented `name:` lines.
+  const keysOf = (name: string): string[] => {
+    const start = clientSource.indexOf(`const ${name} = {`)
+    assert.ok(start >= 0, `the ${name} table must exist`)
+    // The working copy may be CRLF, so the closing brace is matched with \r?.
+    const end = clientSource.slice(start).search(/\r?\n\}\r?\n/)
+    assert.ok(end > 0, `the ${name} table must be a flat object literal`)
+    return [
+      ...clientSource.slice(start, start + end).matchAll(/^ {2}([A-Za-z0-9_]+):/gm),
+    ].map(match => match[1])
+  }
+  const en = keysOf('EN')
+  const zh = keysOf('ZH')
+  assert.deepEqual([...en].sort(), [...zh].sort(), 'the two tables must carry the same keys')
+
+  const used = new Set<string>()
+  for (const line of clientSource.split('\n')) {
+    const trimmed = line.trimStart()
+    if (trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*')) continue
+    for (const match of line.matchAll(/\bt\.([A-Za-z0-9_]+)/g)) used.add(match[1])
+  }
+  assert.deepEqual(
+    [...used].filter(key => !en.includes(key)),
+    [],
+    'a t.<key> with no entry renders "undefined" on the page',
+  )
+})
+
 test('the layout is carried by inline styles, not only by the stylesheet', async () => {
   // The stylesheet pipeline failed twice in ways invisible from the source: the
   // class map never bound, and a shared class prefix merged two rules. Both left
