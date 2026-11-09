@@ -2977,7 +2977,7 @@ test('the catalogue is re-polled while the page is open and stops when it goes s
 test('auto-prunes pristine default routes missing from the Host catalogue — and only those', async () => {
   // Deleting a provider plugin used to leave its saved default card on the page
   // forever ("I deleted this plugin, why is it still here?"). The page now drops
-  // ORPHANED PRISTINE entries after three consecutive successful catalogue reads —
+  // ORPHANED PRISTINE entries after two consecutive successful catalogue reads —
   // never a customized route, never an enabled one, never `web-search`, never on a
   // composition that cannot read the llm registry.
   const real = {
@@ -3017,10 +3017,22 @@ test('auto-prunes pristine default routes missing from the Host catalogue — an
     assert.equal(period, 10_000, 'the poll runs at the documented interval')
     await settle()
 
-    const pruneWrites = harness.writes.filter(write =>
-      JSON.stringify(write.ops?.[0]?.path) === JSON.stringify(['providers']),
+    const pruneWritesOf = () =>
+      harness.writes.filter(write =>
+        JSON.stringify(write.ops?.[0]?.path) === JSON.stringify(['providers']),
+      )
+    assert.equal(
+      pruneWritesOf().length,
+      0,
+      'ONE missed read must not delete saved data: a catalogue can be momentarily incomplete',
     )
-    assert.equal(pruneWrites.length, 1, 'a single missed read prunes immediately')
+    // The second consecutive authoritative read is what confirms the provider is gone.
+    clock += 10_000
+    tick()
+    await settle()
+
+    const pruneWrites = pruneWritesOf()
+    assert.equal(pruneWrites.length, 1, 'two consecutive missed reads prune immediately')
     assert.equal(pruneWrites[0].revision, 7, 'the prune write carries the current revision')
     assert.equal(pruneWrites[0].ops.length, 1, 'a single set carries the whole providers map')
     const payload = pruneWrites[0].ops[0].value

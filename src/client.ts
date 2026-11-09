@@ -346,8 +346,15 @@ function overlayDrafts<T extends object>(
   return merged
 }
 
-/** How many consecutive successful catalogue reads may miss an id before its entry is dropped. */
-const ORPHAN_PRUNE_STREAK = 1
+/**
+ * How many consecutive successful catalogue reads may miss an id before its entry is dropped.
+ *
+ * TWO, not one: a catalogue can be momentarily incomplete without being an
+ * error — a provider plugin still loading, a registry read that returns a
+ * partial list. One such read must never destroy a saved route, so the first
+ * miss only records the streak and the next authoritative read decides.
+ */
+const ORPHAN_PRUNE_STREAK = 2
 /** Per provider id: how many consecutive successful reads missed it. Only prunes at the threshold. */
 const orphanAbsentStreak = new Map<string, number>()
 
@@ -360,9 +367,9 @@ const orphanAbsentStreak = new Map<string, number>()
  *  - the Host must actually be able to read its llm registry (`llmAvailable`),
  *    so a composition without one never prunes;
  *  - the id must be missed by at least `ORPHAN_PRUNE_STREAK` successful reads
- *    (mount + every 10 s poll) — one read is enough in the common case: a single
- *    missed catalogue read is already authoritative for a pristine entry, while
- *    the shared risk (a transient reading) is traded away below;
+ *    (mount + every 10 s poll) — two, because a single incomplete catalogue is
+ *    an ordinary transient (a plugin mid-load, a partial registry read) and a
+ *    saved route must not disappear because of one;
  *  - the entry must be a pristine default (`{ useDefault, enabled: false? }` only,
  *    never enabled, no custom host/target/credential of any kind);
  *  - it is not touched mid-edit: an id with a pending draft is preserved;
