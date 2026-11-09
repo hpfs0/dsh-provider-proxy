@@ -3725,6 +3725,8 @@ test('pasting a full proxy URL fills the card fields in ONE write', async () => 
         ['sensenova', 'port', 1080],
         ['sensenova', 'username', 'alice'],
         ['sensenova', 'password', 'hunter2'],
+        // P3-k: a plain `socks5://` URL is an explicit "no TLS tunnel".
+        ['sensenova', 'proxyTls', false],
       ],
     )
   } finally {
@@ -3801,6 +3803,65 @@ test('a pasted socks:// alias lands on socks5', async () => {
   }
 })
 
+test('P3-k: pasting a plain socks5:// URL clears a leftover TLS tunnel', async () => {
+  // The card had the SOCKS5-over-TLS tunnel on; the pasted URL says nothing about
+  // TLS. Leaving `proxyTls: true` behind connected over TLS to a plain SOCKS5
+  // proxy, and the user got a handshake failure for an address that is correct.
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: {
+            enabled: true,
+            protocol: 'socks5',
+            host: '10.0.0.1',
+            port: 1080,
+            proxyTls: true,
+            proxyTlsRejectUnauthorized: false,
+          },
+        },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const card = cardFor(render(), 'sensenova')
+    const tlsSwitch = findCheckboxes(card).find(
+      box => box.props['aria-label'] === '启用 TLS 加密隧道 (SOCKS5 over TLS)',
+    )
+    assert.equal(tlsSwitch?.props.checked, true, 'the card starts with TLS on')
+
+    paste(findInputsByPlaceholder(card, '127.0.0.1')[0], 'socks5://proxy.test:1080')
+    await writeSettle()
+
+    const byField = Object.fromEntries(harness.writes[0].ops.map(op => [op.path[2], op.value]))
+    assert.equal(byField.protocol, 'socks5')
+    assert.equal(byField.proxyTls, false, 'the leftover TLS tunnel must be cleared by the write')
+    const updated = findCheckboxes(cardFor(render(), 'sensenova')).find(
+      box => box.props['aria-label'] === '启用 TLS 加密隧道 (SOCKS5 over TLS)',
+    )
+    assert.equal(updated?.props.checked, false, 'the switch follows the paste without a remount')
+  } finally {
+    restore()
+  }
+})
+
+test('P3-k: pasting a socks5s:// URL still turns the TLS tunnel on', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const card = cardFor(render(), 'sensenova')
+    paste(findInputsByPlaceholder(card, '127.0.0.1')[0], 'socks5s://proxy.test:1080')
+    await writeSettle()
+    const byField = Object.fromEntries(harness.writes[0].ops.map(op => [op.path[2], op.value]))
+    assert.equal(byField.proxyTls, true)
+  } finally {
+    restore()
+  }
+})
+
 test('a pasted value that is not a proxy URL is left alone', async () => {
   const { mod, restore } = loadBundle()
   try {
@@ -3834,6 +3895,7 @@ test('the shared default block accepts a pasted proxy URL too', async () => {
         ['defaultProxy', 'port', 3128],
         ['defaultProxy', 'username', 'bob'],
         ['defaultProxy', 'password', 'pw'],
+        ['defaultProxy', 'proxyTls', false],
       ],
     )
   } finally {

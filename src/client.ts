@@ -958,9 +958,12 @@ function splitProxyUrl(text: string): Partial<RouteValue> | undefined {
     port: Number.isNaN(parsedPort) ? 0 : parsedPort,
     username: decode(url.username),
     password: decode(url.password),
-  }
-  if (proxyTls) {
-    result.proxyTls = true
+    // ALWAYS explicit, including `false`. Omitting it left whatever `proxyTls` the
+    // card already held, so pasting a plain `socks5://` over a card that had the
+    // TLS tunnel on produced a SOCKS5-over-TLS connection the URL never asked for
+    // — which fails against a plain proxy, and the failure reads as "the address
+    // is wrong".
+    proxyTls,
   }
   return result
 }
