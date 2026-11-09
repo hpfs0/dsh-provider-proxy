@@ -549,6 +549,9 @@ test('a loopback or private target is sent direct', async () => {
   const local = [
     'localhost',
     'app.localhost',
+    // P3-j: a trailing dot is absolute-name syntax, not a different host.
+    'localhost.',
+    'app.localhost.',
     '127.0.0.1',
     '127.9.9.9',
     '::1',
@@ -558,6 +561,13 @@ test('a loopback or private target is sent direct', async () => {
     '172.31.255.255',
     '192.168.1.1',
     '169.254.1.1',
+    // P3-j: an IPv4-mapped IPv6 literal IS the IPv4 address, in both spellings —
+    // `::ffff:7f00:1` is what WHATWG hands back for `::ffff:127.0.0.1`.
+    '::ffff:127.0.0.1',
+    '[::ffff:127.0.0.1]',
+    '[::ffff:7f00:1]',
+    '::ffff:10.0.0.5',
+    '[::ffff:c0a8:101]',
   ]
   for (const host of local) {
     assert.equal(decide(host), 'direct', `${host} is local and must not be forced through a proxy`)
@@ -581,6 +591,9 @@ test('a public target is still proxied', async () => {
     '172.32.0.1',
     '192.169.0.1',
     '::2',
+    // An IPv4-mapped literal carrying a PUBLIC address is not local either.
+    '::ffff:203.0.113.9',
+    '[::ffff:cb00:7109]',
   ]
   for (const host of publicHosts) {
     assert.equal(decide(host), 'proxy', `${host} must stay on the proxy`)

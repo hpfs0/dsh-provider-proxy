@@ -184,6 +184,38 @@ function createDispatcher(
 }
 
 /**
+ * The dotted quad an IPv4-mapped IPv6 literal carries, or `undefined`.
+ *
+ * A dual-stack socket reports an IPv4 peer as `::ffff:127.0.0.1`, and WHATWG
+ * serializes that literal as `::ffff:7f00:1`, so BOTH spellings must decode to
+ * the IPv4 address — otherwise a loopback relay is forced through a forward proxy
+ * that cannot reach it, and the failure reads as "the proxy is broken".
+ */
+function mappedIpv4(bare: string): string | undefined {
+  const dotted = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(bare)
+  if (dotted !== null) return dotted[1]
+  const hex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(bare)
+  if (hex === null) return undefined
+  const high = Number.parseInt(hex[1], 16)
+  const low = Number.parseInt(hex[2], 16)
+  return [high >> 8, high & 0xff, low >> 8, low & 0xff].join('.')
+}
+
+/** Whether one dotted-quad is loopback or on a private network. */
+function isLocalIpv4(address: string): boolean {
+  const octets = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(address)
+  if (octets === null) return false
+  const [a, b, c, d] = octets.slice(1).map(Number)
+  if (a > 255 || b > 255 || c > 255 || d > 255) return false
+  if (a === 127) return true // 127.0.0.0/8 — loopback
+  if (a === 10) return true // 10.0.0.0/8 — private
+  if (a === 192 && b === 168) return true // 192.168.0.0/16 — private
+  if (a === 169 && b === 254) return true // 169.254.0.0/16 — link-local
+  if (a === 172 && b >= 16 && b <= 31) return true // 172.16.0.0/12 — private
+  return false
+}
+
+/**
  * Whether a target host is loopback or on a private network.
  *
  * Such a target is almost always a relay running on the same machine (LiteLLM,
@@ -197,19 +229,11 @@ function createDispatcher(
 function isLocalHost(host: string): boolean {
   // WHATWG URL keeps an IPv6 literal bracketed (`[::1]`), so strip first.
   const bare = host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host
-  if (bare === 'localhost' || bare.endsWith('.localhost')) return true
-  if (bare === '::1') return true
-
-  const octets = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(bare)
-  if (octets === null) return false
-  const [a, b, c, d] = octets.slice(1).map(Number)
-  if (a > 255 || b > 255 || c > 255 || d > 255) return false
-  if (a === 127) return true // 127.0.0.0/8 — loopback
-  if (a === 10) return true // 10.0.0.0/8 — private
-  if (a === 192 && b === 168) return true // 192.168.0.0/16 — private
-  if (a === 169 && b === 254) return true // 169.254.0.0/16 — link-local
-  if (a === 172 && b >= 16 && b <= 31) return true // 172.16.0.0/12 — private
-  return false
+  // A trailing dot only marks an absolute name, so `localhost.` is `localhost`.
+  const name = bare.replace(/\.+$/, '').toLowerCase()
+  if (name === 'localhost' || name.endsWith('.localhost')) return true
+  if (name === '::1') return true
+  return isLocalIpv4(mappedIpv4(name) ?? name)
 }
 
 /**
