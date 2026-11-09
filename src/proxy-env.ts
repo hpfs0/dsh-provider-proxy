@@ -14,6 +14,7 @@
  */
 
 import type { Protocol } from './config.js'
+import { proxyHostProblem } from './proxy-address.js'
 
 export interface DetectedProxy {
   /** Which environment variable the endpoint came from. */
@@ -64,9 +65,13 @@ export function parseProxyEnvValue(
   }
 
   const scheme = url.protocol.slice(0, -1).toLowerCase()
-  // `socks://` is a common alias this plugin does not accept on its own.
+  // `socks://` is a common alias this plugin does not accept on its own, and
+  // `socks5h://` is curl's "let the proxy resolve the name" spelling of the very
+  // same SOCKS5 hop. Both land on `socks5`; the plugin never resolves locally
+  // through SOCKS5 anyway, so the distinction cannot be honoured and must not
+  // make a perfectly usable variable disappear.
   const protocol: Protocol | undefined =
-    scheme === 'socks'
+    scheme === 'socks' || scheme === 'socks5h'
       ? 'socks5'
       : scheme === 'http' || scheme === 'https' || scheme === 'socks5'
         ? (scheme as Protocol)
@@ -78,6 +83,11 @@ export function parseProxyEnvValue(
       ? url.hostname.slice(1, -1)
       : url.hostname
   if (host.length === 0) return undefined
+  // The SAME predicate the settings field and the Host apply. WHATWG happily
+  // accepts `my_proxy` and `a..b` as hostnames, so a variable carrying one used to
+  // be published as a preset that no route could ever be built from; skipping it
+  // lets `detectProxyEnv` fall through to the next variable instead.
+  if (proxyHostProblem(host) !== undefined) return undefined
 
   // WHATWG URL drops a DEFAULT port for http/https, so `http://proxy:80` would
   // come back port-less. The original text is consulted so an explicitly written

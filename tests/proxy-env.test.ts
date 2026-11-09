@@ -31,6 +31,38 @@ test('N15: socks5 and the socks:// alias both land on socks5', () => {
   assert.equal(parseProxyEnvValue('socks://127.0.0.1:10808')?.protocol, 'socks5')
 })
 
+test('P3-b: socks5h:// is recognised as socks5', () => {
+  // curl's "resolve the name at the proxy" spelling. The plugin never resolves
+  // names locally through SOCKS5, so the hop is the same one `socks5://` names;
+  // refusing it made a working ALL_PROXY silently undetected.
+  assert.deepEqual(parseProxyEnvValue('socks5h://127.0.0.1:1080'), {
+    protocol: 'socks5',
+    host: '127.0.0.1',
+    port: 1080,
+    hadCredentials: false,
+  })
+})
+
+test('P3-b: a host that cannot be a proxy address is skipped, not published', () => {
+  // WHATWG URL accepts both of these as hostnames, so only the shared predicate
+  // catches them — and a published preset built from one can never be used.
+  for (const raw of [
+    'http://my_proxy:8080',
+    'http://a..b:8080',
+    'socks5://my_proxy:1080',
+    'http://proxy .test:8080',
+  ]) {
+    assert.equal(parseProxyEnvValue(raw), undefined, raw)
+  }
+  // And detection moves on to the next variable instead of stopping here.
+  const detected = detectProxyEnv({
+    HTTPS_PROXY: 'http://my_proxy:8080',
+    ALL_PROXY: 'http://127.0.0.1:7890',
+  })
+  assert.equal(detected?.source, 'ALL_PROXY')
+  assert.equal(detected?.host, '127.0.0.1')
+})
+
 test('N15: credentials are DROPPED and only their presence is reported', () => {
   const parsed = parseProxyEnvValue('http://alice:hunter2@proxy.test:8080')
   assert.deepEqual(parsed, {
