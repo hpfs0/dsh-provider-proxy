@@ -314,6 +314,38 @@ function isPristineDefaultRoute(value: unknown): boolean {
   return (value as { enabled?: unknown }).enabled !== true
 }
 
+/**
+ * Overlay per-entry drafts onto a stored dictionary, ONE FIELD AT A TIME.
+ *
+ * A draft entry holds only the fields the user touched in this page session
+ * (`edit()` writes exactly one key), while the stored entry holds all of them.
+ * A dictionary-level spread (`{ ...stored, ...draft }`) therefore replaces the
+ * whole entry with that fragment: every untouched field — host, port,
+ * credentials, target-host rules — silently disappears from anything built on
+ * the merge. That is how "export a backup after editing one field" used to
+ * write an endpoint-less route, and how adding one preset could wipe the
+ * credentials of another.
+ *
+ * Merging per entry keeps the stored fields and lets a draft win only for the
+ * keys it actually carries. A draft with no stored counterpart is a value added
+ * in this session (a preset the user just created), so it is kept as-is.
+ */
+function overlayDrafts<T extends object>(
+  stored: Readonly<Record<string, T | undefined>> | undefined,
+  drafts: Readonly<Record<string, Partial<T> | undefined>> | undefined,
+): Record<string, T> {
+  const merged: Record<string, T> = {}
+  for (const [id, value] of Object.entries(stored ?? {})) {
+    if (value === undefined) continue
+    merged[id] = { ...value, ...(drafts?.[id] ?? {}) }
+  }
+  for (const [id, value] of Object.entries(drafts ?? {})) {
+    if (value === undefined || merged[id] !== undefined) continue
+    merged[id] = { ...value } as T
+  }
+  return merged
+}
+
 /** How many consecutive successful catalogue reads may miss an id before its entry is dropped. */
 const ORPHAN_PRUNE_STREAK = 1
 /** Per provider id: how many consecutive successful reads missed it. Only prunes at the threshold. */
@@ -370,7 +402,9 @@ function maybePruneOrphans(opts: {
   if (prunable.length === 0) return
   for (const id of prunable) orphanAbsentStreak.delete(id)
   const pruned = new Set(prunable)
-  const next = { ...configured, ...draft }
+  // Field-level merge: a drafted route must keep every field the draft does not
+  // mention, or saving the prune would strip its endpoint and credentials.
+  const next = overlayDrafts(configured, draft)
   for (const id of pruned) delete next[id]
   void enqueueWrite(() =>
     writeConfig(ctx, [{ op: 'set', path: ['providers'], value: next }])
@@ -2879,10 +2913,7 @@ function renderPage(ctx: any): unknown {
       setSaveError({ label: t.profileNameLabel, message: t.profileNameTaken })
       return
     }
-    const next: Record<string, ProfileValue> = { ...storedProfiles, ...profileDraft } as Record<
-      string,
-      ProfileValue
-    >
+    const next = overlayDrafts(storedProfiles, profileDraft)
     next[name] = profileView({})
     setNewProfileName('')
     setProfileDraft((current: any) => ({ ...current, [name]: profileView({}) }))
@@ -2917,10 +2948,7 @@ function renderPage(ctx: any): unknown {
       return
     }
     const source = profileValueOf(from) ?? profileView({})
-    const next: Record<string, ProfileValue> = { ...storedProfiles, ...profileDraft } as Record<
-      string,
-      ProfileValue
-    >
+    const next = overlayDrafts(storedProfiles, profileDraft)
     delete next[from]
     next[to] = source
     const bound = routesBoundTo({ ...configured, ...draft }, from)
@@ -2959,10 +2987,7 @@ function renderPage(ctx: any): unknown {
     ) {
       return
     }
-    const next: Record<string, ProfileValue> = { ...storedProfiles, ...profileDraft } as Record<
-      string,
-      ProfileValue
-    >
+    const next = overlayDrafts(storedProfiles, profileDraft)
     delete next[name]
     setProfileDraft((current: any) => {
       const nextDraft = { ...current }
@@ -3687,8 +3712,13 @@ function renderPage(ctx: any): unknown {
       globalThis.window?.confirm?.(t.backupIncludePasswords) === true
     const document = buildBackup(
       {
-        providers: { ...configured, ...draft },
-        proxyProfiles: { ...storedProfiles, ...profileDraft },
+        // Per ENTRY, not per dictionary: a draft carries only the fields the
+        // user edited, so a name-level spread here wrote endpoint-less routes
+        // (and presets) into the file while the page still looked correct.
+        providers: overlayDrafts(configured, draft),
+        proxyProfiles: overlayDrafts(storedProfiles, profileDraft),
+        // One endpoint, so a field-level spread is exactly right: the draft's
+        // keys override, the stored keys the user did not touch survive.
         defaultProxy: { ...storedDefault, ...defaultDraft },
         localDirect: globalLocalDirect,
         testUrl: globalTestUrl,

@@ -3037,6 +3037,95 @@ test('auto-prunes pristine default routes missing from the Host catalogue — an
   }
 })
 
+test('the orphan prune keeps the stored fields of a route the page has drafted', async () => {
+  // The prune writes the WHOLE providers dictionary. Building it from
+  // `{ ...configured, ...draft }` replaced every edited route with the fragment
+  // its draft carried, so a background prune could strip a healthy route's
+  // endpoint, credentials and rules — silently turning it into a refused route
+  // that no longer goes through any proxy.
+  const real = {
+    setInterval: globalThis.setInterval,
+    clearInterval: globalThis.clearInterval,
+    now: Date.now,
+  }
+  let tick = () => {}
+  let clock = 2_000_000
+  globalThis.setInterval = fn => { tick = fn; return 1 }
+  globalThis.clearInterval = () => {}
+  Date.now = () => clock
+  const catalogBody = {
+    providers: [
+      { id: 'sensenova', name: 'SenseNova', live: true },
+      { id: 'openai', name: 'OpenAI', live: true },
+    ],
+    llmAvailable: true,
+  }
+  const { mod, restore } = loadBundle(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => catalogBody,
+  }))
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: {
+            enabled: true,
+            protocol: 'http',
+            host: '10.0.0.1',
+            port: 7890,
+            username: 'alice',
+            password: 'hunter2',
+            onlyHosts: 'api.example.com',
+          },
+          ghost: { useDefault: true, enabled: false },
+        },
+      },
+    })
+    const [tree, render] = renderPage(mod, harness)
+    // Draft one field of a HEALTHY route BEFORE the catalogue arrives, so the
+    // prune writes while the draft layer is populated.
+    findInputsByPlaceholder(cardFor(tree, 'sensenova'), '127.0.0.1')[0]
+      .props.onChange({ target: { value: '10.0.0.2' } })
+    render()
+    await settle()
+
+    const prunePath = JSON.stringify(['providers'])
+    const pruneWriteOf = () =>
+      harness.writes.find(write => JSON.stringify(write.ops?.[0]?.path) === prunePath)
+    // The prune fires on the first read today, and on the second once the
+    // threshold is raised; either way this test must see the same payload.
+    for (let i = 0; i < 2 && pruneWriteOf() === undefined; i++) {
+      clock += 10_000
+      tick()
+      await settle()
+    }
+
+    const pruneWrite = pruneWriteOf()
+    assert.ok(pruneWrite, 'the ghost route must be pruned')
+    const payload = pruneWrite.ops[0].value
+    assert.ok(!('ghost' in payload), 'the pristine orphan is dropped')
+    assert.deepEqual(
+      payload.sensenova,
+      {
+        enabled: true,
+        protocol: 'http',
+        host: '10.0.0.2',
+        port: 7890,
+        username: 'alice',
+        password: 'hunter2',
+        onlyHosts: 'api.example.com',
+      },
+      'the drafted route must keep every field the draft does not carry',
+    )
+  } finally {
+    globalThis.setInterval = real.setInterval
+    globalThis.clearInterval = real.clearInterval
+    Date.now = real.now
+    restore()
+  }
+})
+
 test('an llmAvailable:false catalogue never triggers the prune', async () => {
   const real = { setInterval: globalThis.setInterval, clearInterval: globalThis.clearInterval, now: Date.now }
   let tick = () => {}
@@ -5394,6 +5483,70 @@ test('N14: adding a preset writes the whole preset dictionary', async () => {
   }
 })
 
+test('adding a preset keeps the fields of a preset the page had edited', async () => {
+  // The same defect on the preset dictionary. The draft holds only the edited
+  // field, so writing `{ ...storedProfiles, ...profileDraft }` replaced the
+  // edited preset with that fragment: host, credentials and TLS flags gone. Every
+  // card bound to it was then refused by the Host — i.e. stopped using any proxy
+  // — while the page showed the preset name as if nothing had happened.
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: { enabled: true, profileId: 'HK', protocol: 'http', host: '', port: 0 },
+        },
+        proxyProfiles: {
+          HK: {
+            protocol: 'http',
+            host: '127.0.0.1',
+            port: 7891,
+            username: 'alice',
+            password: 'hunter2',
+          },
+        },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+
+    // Edit ONE field of HK. The write succeeds and the draft entry stays behind
+    // with just that field, which is exactly the state the bug needs.
+    findInputsByPlaceholder(profileManagerOf(render()), '127.0.0.1')[0]
+      .props.onChange({ target: { value: '10.0.0.9' } })
+    await writeSettle()
+
+    findInputsByPlaceholder(profileManagerOf(render()), '新预设名称，例如 HK-Proxy')[0]
+      .props.onChange({ target: { value: 'SG' } })
+    findButtons(profileManagerOf(render()))
+      .find(button => textsOf(button).includes('添加预设'))
+      .props.onClick()
+    await writeSettle()
+
+    const dictionaryWrite = harness.writes
+      .filter(write => JSON.stringify(write.ops?.[0]?.path) === JSON.stringify(['proxyProfiles']))
+      .pop()
+    assert.ok(dictionaryWrite, 'adding a preset writes the whole dictionary')
+    const written = dictionaryWrite.ops[0].value
+    assert.deepEqual(
+      written.HK,
+      {
+        protocol: 'http',
+        host: '10.0.0.9',
+        port: 7891,
+        username: 'alice',
+        password: 'hunter2',
+        proxyTls: false,
+        proxyTlsRejectUnauthorized: true,
+      },
+      'the edited preset must keep the fields the edit did not touch',
+    )
+    assert.equal(written.SG.host, '', 'the preset added in this session is still written')
+  } finally {
+    restore()
+  }
+})
+
 test('N14: a duplicate preset name is refused without a write', async () => {
   const { mod, restore } = loadBundle()
   try {
@@ -6145,6 +6298,70 @@ test('N17: accepting the prompt keeps the passwords in the export', async () => 
       .find(button => textsOf(button).includes('备份配置'))
       .props.onClick()
     assert.equal(download.savedFile().providers.sensenova.password, 'hunter2')
+  } finally {
+    download.restore()
+    restore()
+  }
+})
+
+test('a backup exported after an edit keeps every field the edit did not touch', async () => {
+  // The export used to spread the DRAFT over the provider dictionary at the id
+  // level. A draft carries only the fields edited in this page session, so the
+  // exported route was that fragment: host, port, credentials and target-host
+  // rules all became schema defaults. The page looked correct throughout,
+  // because rendering merges the draft field by field — only the file was wrong,
+  // and restoring it disabled the route (i.e. silently went direct).
+  const { mod, restore } = loadBundle()
+  const download = stubDownloadEnvironment(true)
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: {
+            enabled: true,
+            protocol: 'http',
+            host: '10.0.0.1',
+            port: 7890,
+            username: 'alice',
+            password: 'hunter2',
+            onlyHosts: 'api.example.com',
+            testTarget: 'https://api.example.com/health',
+          },
+        },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+
+    // ONE edit is enough to put a fragment into the draft layer.
+    findInputsByPlaceholder(cardFor(render(), 'sensenova'), '127.0.0.1')[0]
+      .props.onChange({ target: { value: '10.0.0.2' } })
+    await writeSettle()
+
+    findButtons(backupBlockOf(render()))
+      .find(button => textsOf(button).includes('备份配置'))
+      .props.onClick()
+
+    const file = download.savedFile()
+    assert.deepEqual(
+      file.providers.sensenova,
+      {
+        enabled: true,
+        profileId: '',
+        useDefault: false,
+        protocol: 'http',
+        host: '10.0.0.2',
+        port: 7890,
+        username: 'alice',
+        password: 'hunter2',
+        proxyTls: false,
+        proxyTlsRejectUnauthorized: true,
+        onlyHosts: 'api.example.com',
+        bypassHosts: '',
+        testTarget: 'https://api.example.com/health',
+      },
+      'the export must carry the stored fields plus the one that was edited',
+    )
   } finally {
     download.restore()
     restore()
