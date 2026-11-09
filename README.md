@@ -386,6 +386,7 @@ catalog 的 `live` 只影响未配置 provider 是否出现在列表里，不参
 - **连接自检的目标可能不可达。** 默认先尝试该 provider 适配器发布的上游地址，取不到才退回顶层 `testUrl`（默认是回显服务，部分网络下不可达，请换自建服务）。自检只接受 `POST`，同一 provider 的在飞请求会合并；**配置未变时**，完成后的 3 秒内重复点击直接返回上次结果（标记 `cached`），一旦改动配置（端口 / 地址 / 凭据 / 自检目标 / 域名规则 / `localDirect` / `testUrl`）即重新外呼。未启用的检查用完即释放临时 dispatcher——不会被当成外呼放大器。
 - **代理密码以明文随设置写入 `cordis.patch.yml`。** HTTP/HTTPS 的密码会拼进交给 `undici` 的代理 URL（`ProxyAgent` 由此生成 `Proxy-Authorization`），SOCKS5 的密码只作为选项传给 `Socks5ProxyAgent`；两者都不会出现在日志或诊断里的代理 URL——那里只显示不含凭据的 origin。
 - **设置页的两个端点没有自己的鉴权。** `/dsh-provider-proxy/providers`（provider 列表、计数、被拒原因）与 `/dsh-provider-proxy/test` 的访问边界完全由 DSH 的 webServer 决定。webServer 只绑定本机回环时没有顾虑；若它绑定到非 loopback 地址，同网络的其它主机可以读到这些信息并触发自检外呼（自检有在飞合并、8 KiB 请求体上限与 3 秒冷却，但仍是可触发的外呼）。
+- **CLI 版 `dsh web`（0.1.1-rc.2）下设置页只读。** 那个组合的客户端设置插件提供的是 `settingsScope`（按命名空间 `bind` 的 binder），而本插件的写入路径需要 `configForms.get(ns)` 的 `mutate`；两者接口不同，页面因此只能显示、无法保存，并在「连接诊断」里如实写明。**这不是 1.2.0 引入的**——v1.1.1 的 `formOf` 与当前实现逐字节相同，属既有组合差异。要配置（或改动）代理请用 **DSH 桌面版**；`dsh web` 下 `/dsh-provider-proxy/*` 两个端点仍然可用，适合核对路由结论与跑自检。
 
 ## 如何验证代理确实生效
 
