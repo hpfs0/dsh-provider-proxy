@@ -378,7 +378,7 @@ catalog 的 `live` 只影响未配置 provider 是否出现在列表里，不参
 
 ```sh
 npm run build      # 构建 lib/index.js 与 lib/client.js
-npm test           # 410 个用例，跑的是构建产物
+npm test           # 482 个用例，跑的是构建产物
 npm run typecheck  # 类型检查（仅覆盖 src/）
 npm run verify     # 上面三件事，按顺序
 ```
