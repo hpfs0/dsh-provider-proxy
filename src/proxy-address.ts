@@ -37,11 +37,17 @@ const IPV6_CHARS = /^[0-9a-f:.]+$/i
  * Accept exactly one of: IPv4, IPv6, or a DNS host name. The field carries the
  * proxy address only; a port, scheme, path, credential, or other URL text belongs
  * in its own field and is rejected here.
+ *
+ * A trailing dot is legal DNS syntax ("this name is absolute"), so it is stripped
+ * before the DNS checks — WHATWG parses `http://proxy.test.:8080` and the Host's
+ * own URL construction agrees. It is NEVER stripped from an IPv6 literal: `::1.`
+ * passes the character test but is not an address, and the Host builds
+ * `http://[::1.]:port` from it, which throws `Invalid URL`. Accepting it here was
+ * a page-says-valid / Host-says-fatal disagreement.
  */
 export function proxyHostProblem(rawHost?: string): string | undefined {
-  const host = (rawHost ?? '').trim().replace(/\.$/, '')
+  const host = (rawHost ?? '').trim()
   if (host.length === 0) return '未填写代理地址'
-  if (IPV4.test(host)) return undefined
 
   // A colon or bracket means the value is claiming to be IPv6. Validate it as
   // an IPv6 literal; never fall back to accepting the text as a host name.
@@ -56,7 +62,9 @@ export function proxyHostProblem(rawHost?: string): string | undefined {
     }
   }
 
-  return DOMAIN.test(host) ? undefined : PROXY_HOST_INVALID
+  const absolute = host.replace(/\.+$/, '')
+  if (IPV4.test(absolute)) return undefined
+  return DOMAIN.test(absolute) ? undefined : PROXY_HOST_INVALID
 }
 
 /**

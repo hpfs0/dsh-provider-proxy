@@ -685,6 +685,12 @@ test('the shared host rule accepts only IPv4, IPv6, or a domain name', () => {
     '_dmarc.proxy.test',
     '例え.テスト',
     '1.2.3.4.5',
+    // P3-a: a trailing dot is not part of an IPv6 literal. Accepting it made the
+    // page say "valid" and the Host throw `Invalid URL` while building the agent.
+    '::1.',
+    '[::1.]',
+    '::ffff:127.0.0.1.',
+    '2001:db8::1.',
   ]
   for (const host of rejected) {
     assert.match(proxyHostProblem(host) ?? '', /只能填 IPv4、IPv6 或域名/, host)
@@ -705,6 +711,24 @@ test('the shared host rule accepts only IPv4, IPv6, or a domain name', () => {
   ]
   for (const host of accepted) {
     assert.equal(proxyHostProblem(host), undefined, host)
+  }
+})
+
+test('P3-a: every host the predicate accepts can actually be turned into a proxy URL', () => {
+  // The predicate's whole job is to predict what the Host can build. A branch
+  // that disagrees with `proxyUrl` + `new URL` is the defect, whichever side is
+  // wrong — so the two are asserted together here.
+  for (const host of ['127.0.0.1', 'LOCALHOST.', 'proxy.test.', '::1', '[::1]', '2001:db8::1', '::ffff:127.0.0.1']) {
+    assert.equal(proxyHostProblem(host), undefined, host)
+    const url = proxyUrl({
+      enabled: true,
+      protocol: 'http',
+      host,
+      port: 8080,
+      username: '',
+      password: '',
+    })
+    assert.doesNotThrow(() => new URL(url), `${host} produced an unusable proxy URL: ${url}`)
   }
 })
 
