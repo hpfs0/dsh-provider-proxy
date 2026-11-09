@@ -3797,6 +3797,13 @@ function renderPage(ctx: any): unknown {
       setDefaultDraft({})
       setProfileDraft({})
       setGlobalDraft({})
+      // A self-check result belongs to the configuration it was measured on
+      // (the README promises it disappears with that configuration). A restore
+      // replaces the configuration wholesale, so every result — live, pending,
+      // or in flight — must go with it: leaving them would show the PREVIOUS
+      // endpoint's latency, status and exit IP as evidence for the restored one.
+      invalidateTests(rows.map(row => row.id))
+      setTests({})
     } catch (error: any) {
       setSavedNote(undefined)
       setSaveError({ label: t.backupImport, message: String(error?.message ?? error) })

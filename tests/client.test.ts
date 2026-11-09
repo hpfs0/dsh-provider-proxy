@@ -6492,6 +6492,62 @@ test('N17: an exported file round-trips into a single restore write', async () =
   }
 })
 
+test('restoring a backup drops self-check results measured against the old endpoints', async () => {
+  // A result belongs to the configuration it was measured on. The import path
+  // replaced that configuration wholesale but only cleared the draft layers, so
+  // the cards kept showing the previous endpoint's latency, HTTP status and exit
+  // IP — evidence for an endpoint that was no longer configured anywhere.
+  const { mod, restore } = loadBundle(async url => {
+    if (String(url).includes('/test')) {
+      return { ok: true, status: 200, json: async () => ({ ok: true, ms: 111, status: 200 }) }
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ providers: [{ id: 'sensenova', name: 'SenseNova', live: true }] }),
+    }
+  })
+  globalThis.window.confirm = () => true
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    findTestButton(cardFor(render(), 'sensenova')).props.onClick()
+    await settle()
+    assert.ok(
+      JSON.stringify(cardFor(render(), 'sensenova')).includes('111 ms'),
+      'the check result must be on the card before the restore',
+    )
+
+    const backup = JSON.stringify({
+      version: 2,
+      providers: { sensenova: { enabled: true, protocol: 'http', host: '10.7.7.7', port: 9999 } },
+      proxyProfiles: {},
+      defaultProxy: {},
+      localDirect: true,
+      testUrl: 'https://api.ipify.org?format=json',
+      heartbeatEnabled: false,
+      heartbeatInterval: 300,
+      heartbeatConsecutiveFails: 2,
+      searchProxyStrategy: 'inherit',
+      searchProxyProfileId: '',
+    })
+    const input = findFirstNodeOfType(backupBlockOf(render()), 'input')
+    await input.props.onChange({
+      target: { files: [{ text: async () => backup, value: 'x' }], value: 'x' },
+    })
+    await settle()
+
+    assert.equal(
+      JSON.stringify(cardFor(render(), 'sensenova')).includes('111 ms'),
+      false,
+      'a result measured on the previous endpoint must not survive the restore',
+    )
+  } finally {
+    restore()
+  }
+})
+
 test('N17: a broken file is reported and nothing is written', async () => {
   const { mod, restore } = loadBundle()
   try {
