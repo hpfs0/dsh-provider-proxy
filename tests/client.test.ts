@@ -4051,6 +4051,86 @@ test('a card promotes its own endpoint to the shared default', async () => {
   }
 })
 
+test('P2-7: a half-filled credential can never be promoted to the shared default', async () => {
+  // The promote button is gated on `complete`, which used to be computed from
+  // "host and port look fine" while `why` (the refusal text) came from the shared
+  // predicate. A card carrying `alice` and no password therefore offered
+  // "set as the default proxy", and clicking it copied that unusable credential
+  // into the default block — refusing every card that inherits it.
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        defaultProxy: { protocol: 'http', host: '127.0.0.1', port: 7890, username: '', password: '' },
+        providers: {
+          sensenova: {
+            enabled: true,
+            protocol: 'http',
+            host: '10.0.0.1',
+            port: 7890,
+            username: 'alice',
+            password: '',
+          },
+          openai: {
+            enabled: false,
+            protocol: 'http',
+            host: '10.0.0.2',
+            port: 7891,
+            username: '',
+            password: 'hunter2',
+          },
+        },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    for (const id of ['sensenova', 'openai']) {
+      const card = cardFor(render(), id)
+      assert.ok(card, `${id} card renders`)
+      const promote = findButtons(card).find(button => textsOf(button).includes('设为默认代理'))
+      assert.equal(promote, undefined, `${id} must not offer to promote a half-filled endpoint`)
+    }
+    // The refusal reason itself is still the shared predicate's answer.
+    assert.ok(
+      textsOf(cardFor(render(), 'sensenova')).some(
+        text => text.includes('用户名') && text.includes('密码'),
+      ),
+      'the card keeps naming the real problem',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('P2-7: a complete own endpoint still offers the promote button', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        defaultProxy: { protocol: 'http', host: '127.0.0.1', port: 7890, username: '', password: '' },
+        providers: {
+          sensenova: {
+            enabled: true,
+            protocol: 'http',
+            host: '10.0.0.1',
+            port: 7890,
+            username: 'alice',
+            password: 'hunter2',
+          },
+        },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const promote = findButtons(cardFor(render(), 'sensenova')).find(button =>
+      textsOf(button).includes('设为默认代理'),
+    )
+    assert.ok(promote, 'a fully configured endpoint is exactly what the button is for')
+  } finally {
+    restore()
+  }
+})
+
 test('N8: the bulk label counts every provider, not just the filtered rows', async () => {
   const { mod, restore } = loadBundle()
   try {

@@ -2855,12 +2855,14 @@ function renderPage(ctx: any): unknown {
     if (binding.kind === 'default') {
       return { binding, endpoint: defaultView, why: defaultWhy, complete: defaultComplete }
     }
-    const complete =
-      route.host.trim().length > 0 &&
-      Number.isInteger(route.port) &&
-      route.port >= 1 &&
-      route.port <= 65535
-    return { binding, why: defaultProxyProblem(route), complete }
+    // The card's OWN fields are judged by the very predicate the Host applies, so
+    // `complete` and `why` cannot disagree: a half-filled credential used to read
+    // as complete (host and port were fine), which offered "set as the default
+    // proxy" on an endpoint that refuses every route — and clicking it copied the
+    // half-typed credential into the shared default, taking every inheriting card
+    // down with it.
+    const why = defaultProxyProblem(route)
+    return { binding, why, complete: why === undefined }
   }
 
   /**
