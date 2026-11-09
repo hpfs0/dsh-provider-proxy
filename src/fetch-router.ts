@@ -61,6 +61,25 @@ export interface TrafficContext {
 
 export const kNativeFetch = Symbol.for('dsh-provider-proxy.native-fetch')
 
+/**
+ * Whether a failed request may be re-sent directly.
+ *
+ * ONLY a failure that provably happened BEFORE the request could reach the
+ * upstream qualifies — a refused connection, an unreachable host/network, or a
+ * connect timeout. Those mean the proxy was never spoken to, so re-sending the
+ * request cannot duplicate anything upstream.
+ *
+ * Two codes were deliberately REMOVED from the old list:
+ *
+ * - `ECONNRESET` means the peer closed a connection that already existed, so the
+ *   request (a POST body included) may have been executed upstream and re-sending
+ *   it is exactly how a non-idempotent call runs twice;
+ * - `TimeoutError` is the CALLER's `AbortSignal.timeout` firing. It says nothing
+ *   about whether the request left the machine, so it cannot authorise a retry.
+ *
+ * `ETIMEDOUT` stays: it is what the OS reports when a connection attempt itself
+ * times out (undici's own connect timeout surfaces as `ConnectTimeoutError`).
+ */
 export function isNetworkFailoverError(error: unknown): boolean {
   if (error === null || typeof error !== 'object') return false
   const chain: unknown[] = []
@@ -86,11 +105,46 @@ export function isNetworkFailoverError(error: unknown): boolean {
     .map(n => (n as { message?: unknown }).message)
     .filter((m): m is string => typeof m === 'string')
 
-  const failoverCodes = ['ECONNREFUSED', 'ETIMEDOUT', 'EHOSTUNREACH', 'ENETUNREACH', 'ECONNRESET']
+  const failoverCodes = ['ECONNREFUSED', 'ETIMEDOUT', 'EHOSTUNREACH', 'ENETUNREACH']
   if (codes.some(c => failoverCodes.includes(c))) return true
-  if (names.some(n => n === 'ConnectTimeoutError' || n === 'TimeoutError')) return true
+  // `ConnectTimeoutError` is undici's connect-phase timeout. `TimeoutError` and
+  // `AbortError` are NOT listed: both come from the caller's own abort signal.
+  if (names.some(n => n === 'ConnectTimeoutError')) return true
   if (messages.some(m => m.includes('ECONNREFUSED') || m.includes('ETIMEDOUT') || m.includes('ConnectTimeoutError'))) return true
   return false
+}
+
+/**
+ * Whether a request can be sent a SECOND time.
+ *
+ * A body undici can serialize again and again (string, buffer, typed array,
+ * `URLSearchParams`, `FormData`, `Blob`) is replayable. A stream — a Node
+ * Readable, a web ReadableStream, an async iterable — is consumed by the first
+ * attempt, so a fallback would throw `TypeError: body used already` and swallow
+ * the real proxy error. A `Request` carries its own body, so it is only replayable
+ * when that body is empty.
+ */
+export function canReplayRequest(input: unknown, init: unknown): boolean {
+  const body = (init as { body?: unknown } | null | undefined)?.body
+  if (init !== undefined && init !== null) {
+    if (body === undefined || body === null) return true
+    if (typeof body === 'string') return true
+    if (typeof URLSearchParams !== 'undefined' && body instanceof URLSearchParams) return true
+    if (typeof Blob !== 'undefined' && body instanceof Blob) return true
+    if (typeof FormData !== 'undefined' && body instanceof FormData) return true
+    if (
+      typeof ArrayBuffer !== 'undefined' &&
+      (body instanceof ArrayBuffer || ArrayBuffer.isView(body))
+    ) {
+      return true
+    }
+    return false
+  }
+  const request = input as { body?: unknown } | null | undefined
+  if (request !== null && typeof request === 'object' && 'body' in request) {
+    return request.body === null || request.body === undefined
+  }
+  return true
 }
 
 export interface RouterStore {
@@ -226,7 +280,11 @@ function installSharedRouter(): RouterState {
 
     let isFallback = false
     const promise = inFlight.catch(async (error: unknown) => {
-      if (active.enableFallbackDirect && isNetworkFailoverError(error)) {
+      if (
+        active.enableFallbackDirect &&
+        isNetworkFailoverError(error) &&
+        canReplayRequest(input, init)
+      ) {
         isFallback = true
         active.onFallback?.()
         return nativeFetch.call(globalThis, input, init)

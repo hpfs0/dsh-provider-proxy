@@ -1792,7 +1792,12 @@ export function apply(ctx: any, config?: ProxyConfig): void {
   })
 }
 
-export { acquireFetchRouter, kNativeFetch, isNetworkFailoverError } from './fetch-router.js'
+export {
+  acquireFetchRouter,
+  canReplayRequest,
+  kNativeFetch,
+  isNetworkFailoverError,
+} from './fetch-router.js'
 export type { TrafficContext, TrafficType } from './fetch-router.js'
 export {
   SEARCH_PROXY_STRATEGIES,
@@ -1833,6 +1838,7 @@ export {
   deadRuleEntries,
   hostMatches,
   hostRuleProblem,
+  normalizeHostRulesText,
   parseHostList,
   providerHostTemplate,
   splitHostRules,
