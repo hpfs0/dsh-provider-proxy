@@ -1928,6 +1928,7 @@ export {
   normalizeHostRulesText,
   parseHostList,
   providerHostTemplate,
+  reinterpretedRuleEntries,
   splitHostRules,
 } from './host-rules.js'
 export {

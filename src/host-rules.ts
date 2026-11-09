@@ -112,6 +112,30 @@ export function deadRuleEntries(raw: string): string[] {
 }
 
 /**
+ * How one rule was read BEFORE 1.2.0: only ONE leading `.`/`*.` was dropped and
+ * nothing else was normalized. Kept solely to show the user which entries now mean
+ * something different — it never decides anything.
+ */
+function legacyHostRule(raw: string): string {
+  return raw.trim().replace(/^\*?\./, '').toLowerCase()
+}
+
+/**
+ * Raw entries whose MEANING changed in 1.2.0, in the order they were typed.
+ *
+ * A rewritten rule is a silent change of behaviour unless the page says so: a
+ * trailing dot, a doubled dot and a repeated `*.` prefix used to match nothing and
+ * are now resolved (see {@link normalizeHostRule}). The settings page lists exactly
+ * these under the field, so "what I typed" and "what the Host does" stay one story.
+ *
+ * `*.example.com`, `.example.com` and a bare `*` are NOT reported: their meaning is
+ * unchanged, and reporting every wildcard would bury the entries that matter.
+ */
+export function reinterpretedRuleEntries(raw: string): string[] {
+  return splitHostRules(raw).filter(entry => legacyHostRule(entry) !== normalizeHostRule(entry))
+}
+
+/**
  * The official upstream hosts of well-known providers.
  *
  * The point is not completeness — an adapter may point anywhere — but that the

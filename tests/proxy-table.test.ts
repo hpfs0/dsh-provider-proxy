@@ -20,6 +20,7 @@ import {
   providerHostTemplate,
   proxyHostProblem,
   proxyUrl,
+  reinterpretedRuleEntries,
   routeBindingOf,
   routesBoundTo,
 } from '../lib/index.js'
@@ -402,6 +403,19 @@ test('P1-3: the routing decision follows the same matrix (onlyHosts / bypassHost
   assert.equal(bypass.entries.get('p').decide('api.example.com'), 'direct')
   assert.deepEqual(deadRuleEntries('.*'), [], '`.*` is a live "everything" rule, not a dead entry')
   await closeTable(bypass.entries)
+})
+
+test('P1-3: entries whose meaning changed are listed, the documented spellings are not', () => {
+  // The page names every entry it reads differently than 1.1.x did, so a resolved
+  // rule can never change where traffic goes without the user being told.
+  assert.deepEqual(
+    reinterpretedRuleEntries('example.com.，a..b.com, ..foo, *.*.bar.example'),
+    ['example.com.', 'a..b.com', '..foo', '*.*.bar.example'],
+  )
+  // These spellings always meant what they mean now.
+  for (const raw of ['example.com', '*.ok.example', '.internal.test', '*', '.*', '*.*', '[::1]']) {
+    assert.deepEqual(reinterpretedRuleEntries(raw), [], raw)
+  }
 })
 
 test('P1-3: the Host stores rule lists in the spelling it matches', () => {

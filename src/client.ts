@@ -29,7 +29,12 @@ import {
 // at materialization. The binding is what the component reads; importing it for
 // side effects only would leave `styles` undefined at render time.
 import styles from './client.css'
-import { appendHostRules, deadRuleEntries, providerHostTemplate } from './host-rules.js'
+import {
+  appendHostRules,
+  deadRuleEntries,
+  providerHostTemplate,
+  reinterpretedRuleEntries,
+} from './host-rules.js'
 import { defaultProxyProblem, proxyHostProblem } from './proxy-address.js'
 import {
   DEFAULT_PROFILE_LABEL,
@@ -4382,6 +4387,28 @@ function renderPage(ctx: any): unknown {
         // the traffic DIRECT while the user believes it is proxied.
         const onlyDead = deadRuleEntries(route.onlyHosts)
         const bypassDead = deadRuleEntries(route.bypassHosts)
+        // Entries 1.2.0 reads differently than 1.1.x did (a trailing or doubled
+        // dot, a repeated `*.`). They DO match now, so they are not dead — but a
+        // silent change of meaning is the very thing this release exists to stop,
+        // so the field says how each one was read.
+        const ruleHintOf = (hint: string, dead: string[], raw: string): [string, boolean] => {
+          if (dead.length > 0) return [`${t.ruleDeadHint}${dead.join('、')}`, true]
+          const reinterpreted = reinterpretedRuleEntries(raw)
+          if (reinterpreted.length > 0) {
+            return [`${t.ruleReinterpretedHint}${reinterpreted.join('、')}`, false]
+          }
+          return [hint, false]
+        }
+        const [onlyHostsHint, onlyHostsHintError] = ruleHintOf(
+          t.onlyHostsHint,
+          onlyDead,
+          route.onlyHosts,
+        )
+        const [bypassHostsHint, bypassHostsHintError] = ruleHintOf(
+          t.bypassHostsHint,
+          bypassDead,
+          route.bypassHosts,
+        )
         const hostTemplate = providerHostTemplate(row.id)
         const useDefault = route.useDefault === true
         const boundProfile = route.profileId.trim()
@@ -4853,8 +4880,8 @@ function renderPage(ctx: any): unknown {
                 value: route.onlyHosts,
                 onChange: (event: any) => bind(row.id, 'onlyHosts')(event.target.value),
               }),
-              onlyDead.length === 0 ? t.onlyHostsHint : `${t.ruleDeadHint}${onlyDead.join('、')}`,
-              onlyDead.length > 0,
+              onlyHostsHint,
+              onlyHostsHintError,
             ),
             // The official-upstream pill. Offered only for a provider whose id
             // maps to a known template: a button that guessed a hostname for an
@@ -4888,8 +4915,8 @@ function renderPage(ctx: any): unknown {
                 value: route.bypassHosts,
                 onChange: (event: any) => bind(row.id, 'bypassHosts')(event.target.value),
               }),
-              bypassDead.length === 0 ? t.bypassHostsHint : `${t.ruleDeadHint}${bypassDead.join('、')}`,
-              bypassDead.length > 0,
+              bypassHostsHint,
+              bypassHostsHintError,
             ),
             // The self-check target: empty uses the top-level testUrl, set makes
             // this card's Test request this URL — a real upstream proves the whole
@@ -5811,6 +5838,8 @@ const EN = {
   bypassHosts: 'Bypass',
   bypassHostsHint: 'Comma/space separated; requests to these hosts go direct, taking priority.',
   ruleDeadHint: 'These entries never match — use bare host names (no port, scheme or path); a wildcard must be `*` or start with `*.`: ',
+  ruleReinterpretedHint:
+    'Since 1.2.0 these entries are read differently (trailing/doubled dots are removed, repeated `*.` is collapsed) and do match: ',
   testTarget: 'Self-check target',
   testTargetHint: 'Empty uses the top-level testUrl; when set, this card\'s Test requests this URL instead — point it at a real upstream to verify the end-to-end path.',
   socks5Hint: 'SOCKS5 tunnels the connection; the proxy resolves the target host name.',
@@ -6034,6 +6063,8 @@ const ZH = {
   bypassHosts: '直连',
   bypassHostsHint: '逗号或空格分隔；匹配这些主机的请求直连，优先于上一项。',
   ruleDeadHint: '以下条目永远匹配不上——规则只认主机名（不要带端口、协议前缀或路径），通配符只能是单独的 * 或以 *. 开头：',
+  ruleReinterpretedHint:
+    '以下条目在 1.2.0 起按不同方式解释（尾点 / 连续点被去掉，重复的 *. 被合并），并且确实会匹配：',
   testTarget: '自检目标',
   testTargetHint: '留空用顶层 testUrl；填写后该卡片的「测试」改为请求这个地址，可拿真实上游验证端到端路径。',
   socks5Hint: 'SOCKS5 会建立隧道，目标域名由代理端解析。',

@@ -2066,6 +2066,63 @@ test('the N4 host-rule matrix flags the new dead forms but keeps valid rules', a
   }
 })
 
+test('P1-3: an entry 1.2.0 reads differently is named, not changed silently', async () => {
+  // Resolving `example.com.` / `a..b.com` into live rules changes where traffic
+  // goes, so the field has to say so — a silent re-interpretation would be the same
+  // class of defect as a dead entry the page claimed was fine.
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: {
+            enabled: true,
+            protocol: 'http',
+            host: '10.0.0.1',
+            port: 7890,
+            onlyHosts: 'example.com.，a..b.com',
+          },
+        },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const hint = textsOf(render()).find(text => text.includes('按不同方式解释'))
+    assert.ok(hint, 'the field explains that these entries are read differently now')
+    assert.ok(hint.includes('example.com.'), 'the trailing-dot entry is named')
+    assert.ok(hint.includes('a..b.com'), 'the doubled-dot entry is named')
+  } finally {
+    restore()
+  }
+})
+
+test('P1-3: the documented *. spelling is not reported as a changed meaning', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: {
+            enabled: true,
+            protocol: 'http',
+            host: '10.0.0.1',
+            port: 7890,
+            onlyHosts: '*.ok.example, .internal.test, *',
+          },
+        },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    assert.ok(
+      !textsOf(render()).some(text => text.includes('按不同方式解释')),
+      'a wildcard spelling whose meaning never changed must not be flagged',
+    )
+  } finally {
+    restore()
+  }
+})
+
 test('a dead rule is flagged but the edit still saves', async () => {
   const { mod, restore } = loadBundle()
   try {
