@@ -340,6 +340,18 @@ function pillTextOf(card) {
   return textsOf(header?.children?.[1]).join('')
 }
 
+/** Every element that announces itself as an alert, in tree order. */
+function alertsOf(node, out = []) {
+  if (node === null || typeof node !== 'object') return out
+  if (Array.isArray(node)) {
+    node.forEach(n => alertsOf(n, out))
+    return out
+  }
+  if (node.props?.role === 'alert') out.push(node)
+  if (node.children) alertsOf(node.children, out)
+  return out
+}
+
 test('the bundle registers a settings section', () => {
   const { mod, restore } = loadBundle()
   try {
@@ -6886,6 +6898,45 @@ test('N20/N21: Emergency bypass switch renders with role switch and accessible a
 
     const texts = textsOf(tree)
     assert.ok(texts.some(t => t.includes('紧急旁路激活中')), 'alert banner is displayed when bypassAll is on')
+  } finally {
+    restore()
+  }
+})
+
+test('P2-10: under emergency bypass every card says it is going direct', async () => {
+  // README promise: "卡片头上统一显示警示条". The dashboard banner explains the
+  // mode; a card head must answer the question asked while looking at ONE
+  // provider. Without it the card kept reading 「走代理」 while its traffic went
+  // straight upstream — the same verdict the Host had already reversed.
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        bypassAll: true,
+        providers: {
+          sensenova: { enabled: true, protocol: 'http', host: '10.0.0.1', port: 7890 },
+          openai: { enabled: false, protocol: 'http', host: '10.0.0.2', port: 7891 },
+        },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const card = cardFor(render(), 'sensenova')
+    assert.equal(pillTextOf(card), '旁路直连', 'the pill must not claim the proxy is in use')
+    const alert = alertsOf(card).find(node => textsOf(node).some(text => text.includes('紧急旁路')))
+    assert.ok(alert, 'the card head carries its own bypass warning')
+    assert.ok(
+      textsOf(alert).join('').includes('直连上游'),
+      'the warning says what is actually happening to this card',
+    )
+    // A route that is switched OFF is not carrying traffic at all, so it must not
+    // add a "right now" banner to a card that is doing nothing.
+    assert.equal(pillTextOf(cardFor(render(), 'openai')), '直连')
+    assert.equal(
+      alertsOf(cardFor(render(), 'openai')).length,
+      0,
+      'a disabled card has nothing to warn about',
+    )
   } finally {
     restore()
   }

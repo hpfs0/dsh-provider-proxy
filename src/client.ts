@@ -1347,6 +1347,14 @@ const S = {
     color: 'var(--dsw-alias-label-secondary)',
   },
   pillOff: { color: 'var(--dsw-alias-state-idle-primary)' },
+  /** The route is configured but bypassed, so its pill must not read "proxied". */
+  pillBypass: {
+    borderWidth: '1px',
+    borderStyle: 'solid',
+    borderColor: 'var(--dsw-alias-state-warning-border, rgba(210, 153, 34, 0.4))',
+    background: 'var(--dsw-alias-state-warning-subtle, rgba(210, 153, 34, 0.15))',
+    color: 'var(--dsw-alias-state-warning-primary, #d29922)',
+  },
   pillRejected: {
     border: '1px solid var(--dsw-alias-state-error-primary, #f85149)',
     color: 'var(--dsw-alias-state-error-primary, #f85149)',
@@ -1774,6 +1782,12 @@ const S = {
     color: 'var(--dsw-alias-state-warning-primary, #d29922)',
     fontSize: '12px',
     lineHeight: '1.5',
+  },
+  /** The per-card bypass banner: the same alert, sized for a card head. */
+  cardBypassBanner: {
+    padding: '8px 12px',
+    fontSize: '11px',
+    lineHeight: '1.4',
   },
   /** N24: the split block inside the advanced settings panel. */
   searchSplitBox: {
@@ -4471,11 +4485,18 @@ function renderPage(ctx: any): unknown {
         // The pill describes the ROUTE, never provider availability: a saved
         // route can outlive the Host directory, and whether that directory lists
         // it must not make the proxy switch read as "offline" or "proxied".
+        //
+        // Under the emergency bypass the route is still CONFIGURED but nothing
+        // crosses the proxy, so "proxied" would be a lie the user acts on: the
+        // pill says bypassed instead, which is also what the self-check reports
+        // (`viaProxy: false`) now that the Host builds the table with `bypassAll`.
         const pill = rejected
           ? { className: styles.pillRejected, style: { ...S.pill, ...S.pillRejected }, text: t.rejected }
-          : route.enabled
-            ? { className: styles.pillOn, style: { ...S.pill, ...S.pillOn }, text: t.on }
-            : { className: styles.pillLive, style: { ...S.pill, ...S.pillLive }, text: t.off }
+          : route.enabled && globalBypassAll
+            ? { className: styles.pillOff, style: { ...S.pill, ...S.pillBypass }, text: t.bypassPill }
+            : route.enabled
+              ? { className: styles.pillOn, style: { ...S.pill, ...S.pillOn }, text: t.on }
+              : { className: styles.pillLive, style: { ...S.pill, ...S.pillLive }, text: t.off }
         const cardSection = h(
           'section',
           {
@@ -4547,6 +4568,22 @@ function renderPage(ctx: any): unknown {
             ),
             h('span', { className: pill.className, style: pill.style }, pill.text),
           ),
+          // README promise: while the emergency bypass is on, EVERY card head says
+          // so. The dashboard banner explains the mode; this one answers the
+          // question a user actually asks while looking at one provider — "is
+          // THIS card going through its proxy right now?"
+          globalBypassAll && route.enabled
+            ? h(
+                'div',
+                {
+                  className: styles.bypassAlertBanner,
+                  style: { ...S.bypassAlertBanner, ...S.cardBypassBanner },
+                  role: 'alert',
+                  key: `${row.id}:bypass`,
+                },
+                `${t.bypassCardBannerTitle} ${t.bypassCardBannerText}`,
+              )
+            : null,
           // The two route-level controls, on ONE row and in ONE shape: each is
           // a label over its control. They were a bare `label` (checkbox) next to
           // a two-column `field` (picker), so the card's own row looked like two
@@ -5752,6 +5789,9 @@ const EN = {
   bypassAllToggle: 'Emergency Bypass All',
   bypassAllBannerTitle: '[Emergency Bypass Active]',
   bypassAllBannerText: 'All traffic is routed directly upstream, individual settings preserved. Remember to disable when done.',
+  bypassPill: 'bypassed · direct',
+  bypassCardBannerTitle: '[Emergency Bypass]',
+  bypassCardBannerText: 'This provider\'s traffic is going DIRECT upstream right now; its proxy settings are kept.',
   bypassedDirect: 'Bypassed Direct',
   expandCard: 'Expand card details',
   collapseCard: 'Collapse card details',
@@ -5973,6 +6013,9 @@ const ZH = {
   bypassAllToggle: '全局紧急旁路 (Bypass All)',
   bypassAllBannerTitle: '[紧急旁路激活中]',
   bypassAllBannerText: '所有模型流量已全量绕过代理直连上游，单项配置仍完整保持。调试完毕后请及时关闭。',
+  bypassPill: '旁路直连',
+  bypassCardBannerTitle: '[紧急旁路]',
+  bypassCardBannerText: '该 provider 当前直连上游，代理配置仍完整保留；关闭旁路后立刻恢复。',
   bypassedDirect: '旁路直连中',
   expandCard: '展开卡片详情',
   collapseCard: '折叠卡片详情',

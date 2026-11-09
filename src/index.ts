@@ -897,6 +897,9 @@ export function apply(ctx: any, config?: ProxyConfig): void {
       raw.onlyHosts ?? '',
       raw.bypassHosts ?? '',
       plainLocalDirect(config),
+      // The emergency bypass changes whether the probe crosses the proxy at all,
+      // so a verdict measured before the toggle must not answer for after it.
+      plainBypassAll(config),
       selfCheckTargetsOf(provider, raw.testTarget).targets,
     ])
   }
@@ -1211,7 +1214,13 @@ export function apply(ctx: any, config?: ProxyConfig): void {
     const defaultProxy = plainDefaultProxy(config)
     const profiles = plainProfiles(config)
     const localDirect = plainLocalDirect(config)
-    const next = createProxyTable(providers, { defaultProxy, profiles, localDirect })
+    // `bypassAll` is part of the table, not only of the fetch shim: a route's own
+    // `decide` is what the self-check, the heartbeat probe and the search plan ask
+    // "would this go through the proxy?". Leaving it out left the probe sending
+    // traffic through the very proxy the emergency switch had just bypassed, and
+    // the card still reported "proxied" while real traffic went direct.
+    const bypassAll = plainBypassAll(config)
+    const next = createProxyTable(providers, { defaultProxy, profiles, localDirect, bypassAll })
     const previous = current
     current = next.entries
     problems = next.problems
@@ -1277,6 +1286,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
           profiles,
           requireEnabled: true,
           localDirect,
+          bypassAll,
         },
       )
       if (built.ok) {
