@@ -16,7 +16,7 @@ export interface HeartbeatState {
 
 import { fetch as undiciFetch } from 'undici'
 
-import { acquireFetchRouter } from './fetch-router.js'
+import { acquireFetchRouter, type DispatcherLike } from './fetch-router.js'
 import {
   buildRouteEntry,
   closeTable,
@@ -234,6 +234,65 @@ export function apply(ctx: any, config?: ProxyConfig): void {
   let liveCheckIdentities = new Map<string, string>()
   let problems = new Map<string, string>()
   let closed = false
+  /**
+   * Dispatchers a stream may still issue its request on, with a retirement flag.
+   *
+   * A settings write rebuilds the table and retires the previous generation, but a
+   * stream created BEFORE the write is consumed AFTER it — an adapter only runs on
+   * its first `next()`. Closing that generation immediately failed a request the
+   * user had already started, so retirement waits for the last claim: the scope's
+   * first request, or the stream ending without one (see
+   * `RouterStore.onLeaseRelease`).
+   */
+  const dispatcherClaims = new Map<DispatcherLike, { count: number; retired: boolean }>()
+
+  /**
+   * Take a claim on one dispatcher; the returned release is idempotent.
+   *
+   * `onLeaseRelease` fires at most twice in practice (once when the request
+   * starts, once when the stream ends), and a duplicate release must not decrement
+   * twice — that would close a dispatcher another stream still needs.
+   */
+  const claimDispatcher = (dispatcher: DispatcherLike): (() => void) => {
+    let record = dispatcherClaims.get(dispatcher)
+    if (record === undefined) {
+      record = { count: 0, retired: false }
+      dispatcherClaims.set(dispatcher, record)
+    }
+    const owned = record
+    owned.count += 1
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      owned.count -= 1
+      if (owned.count > 0) return
+      dispatcherClaims.delete(dispatcher)
+      if (owned.retired) void dispatcher.close().catch(() => undefined)
+    }
+  }
+
+  /** Close one dispatcher now, or as soon as the last claim on it is released. */
+  const retireDispatcher = (dispatcher: DispatcherLike): void => {
+    const record = dispatcherClaims.get(dispatcher)
+    if (record === undefined) {
+      void dispatcher.close().catch(() => undefined)
+      return
+    }
+    record.retired = true
+  }
+
+  /**
+   * Retire a whole generation of routes.
+   *
+   * Same rule as the single dispatcher: a route a live stream may still start a
+   * request on keeps its dispatcher until that stream lets go.
+   */
+  const retireTable = (entries: Map<string, RouteEntry>): void => {
+    for (const entry of entries.values()) retireDispatcher(entry.dispatcher)
+    entries.clear()
+  }
+
   const heartbeatStates = new Map<string, HeartbeatState>()
   /** Whether a `web` service exists, i.e. whether the reserved route has anything to carry. */
   let webAvailable = false
@@ -1295,13 +1354,15 @@ export function apply(ctx: any, config?: ProxyConfig): void {
       } else searchDedicatedProblem = bareMessage(built.problem)
     }
     if (previousSearch !== undefined) {
-      void previousSearch.dispatcher.close().catch(() => undefined)
+      // Retired like a table entry: a search stream that has not issued its
+      // request yet keeps the previous preset's dispatcher alive.
+      retireDispatcher(previousSearch.dispatcher)
     }
 
     pruneCheckCache()
     // Retire the previous table only after the new one is live, so an in-flight
     // stream keeps a dispatcher that still works.
-    void closeTable(previous)
+    retireTable(previous)
     return Promise.resolve()
   }
 
@@ -1709,6 +1770,9 @@ export function apply(ctx: any, config?: ProxyConfig): void {
         if (token === undefined) return next()
         // The stream is consumed lazily; wrap it so the scope survives. The hit
         // counter rides inside the scope, so an abandoned stream still counts.
+        // The claim keeps this dispatcher alive across a settings rebuild until
+        // the scope either starts its request or ends without one.
+        const release = claimDispatcher(route.dispatcher)
         return router.wrap(
           {
             dispatcher: route.dispatcher,
@@ -1721,6 +1785,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
             decide: route.decide,
             enableFallbackDirect: plainEnableFallbackDirect(config),
             bypassAll: plainBypassAll(config),
+            onLeaseRelease: release,
           },
           next as () => AsyncIterable<unknown>,
         )
@@ -1757,6 +1822,13 @@ export function apply(ctx: any, config?: ProxyConfig): void {
         searchDedicated = undefined
         await dedicated.dispatcher.close().catch(() => undefined)
       }
+      // A generation retired by an earlier rebuild may still be waiting on a
+      // stream that will now never finish: dispose is the end of the line, so
+      // every claim is dropped and the dispatchers are closed for real.
+      for (const dispatcher of [...dispatcherClaims.keys()]) {
+        void dispatcher.close().catch(() => undefined)
+      }
+      dispatcherClaims.clear()
       router.release()
     }
   }, 'dsh-provider-proxy: provider-scoped proxy routing')

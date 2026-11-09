@@ -183,6 +183,22 @@ export interface RouterStore {
   enableFallbackDirect?: boolean
   onFallback?: () => void
   bypassAll?: boolean
+  /**
+   * Release the claim the caller took on this scope's dispatcher.
+   *
+   * A settings write rebuilds the whole proxy table and retires the previous one,
+   * while a stream created BEFORE the write is only consumed AFTER it (an adapter
+   * runs on the first `next()`). Closing that generation's dispatcher blindly
+   * failed a request the user had already started, so the caller keeps a claim and
+   * the rebuild waits for it. This hook says when waiting is over: at the moment
+   * the scope initiates a request (from then on undici itself keeps it alive
+   * through a close), or when a wrapped stream ends, fails or is abandoned
+   * without ever issuing one.
+   *
+   * Both call sites are idempotent-safe: the release must tolerate being called
+   * twice and twice-only-scopes never take a claim at all.
+   */
+  onLeaseRelease?: () => void
 }
 
 /** Shared across every plugin instance in one process, keyed so copies cooperate. */
@@ -278,6 +294,11 @@ function installSharedRouter(): RouterState {
       dispatcher: active.dispatcher as never,
     } as never) as unknown as Promise<{ status: number }>
 
+    // The request is on the wire. Whatever kept its dispatcher open for "a request
+    // that has not started yet" has done its job: undici tracks this one itself,
+    // so a retirement may now close the dispatcher whenever this settles.
+    active.onLeaseRelease?.()
+
     let isFallback = false
     const promise = inFlight.catch(async (error: unknown) => {
       if (
@@ -350,15 +371,38 @@ function contextualIterable(
       const invoke = (method: 'next' | 'return' | 'throw', value?: unknown): Promise<IteratorResult<unknown>> =>
         storage.run(store, () => {
           // A stream abandoned before its first next() must not touch the adapter.
-          if (method === 'return' && iterator === undefined) return Promise.resolve({ done: true, value })
-          if (method === 'throw' && iterator === undefined) return Promise.reject(value)
+          if (method === 'return' && iterator === undefined) {
+            store.onLeaseRelease?.()
+            return Promise.resolve({ done: true, value })
+          }
+          if (method === 'throw' && iterator === undefined) {
+            store.onLeaseRelease?.()
+            return Promise.reject(value)
+          }
           const target = ensureIterator()
           const operation = target[method]
           if (typeof operation !== 'function') {
+            store.onLeaseRelease?.()
             if (method === 'return') return Promise.resolve({ done: true, value })
             return Promise.reject(value)
           }
-          return Promise.resolve(Reflect.apply(operation, target, method === 'next' ? [] : [value]))
+          const result = Promise.resolve(
+            Reflect.apply(operation, target, method === 'next' ? [] : [value]),
+          )
+          // A stream that ends without ever issuing a request must release its
+          // claim too, or a retired dispatcher would never be closed at all.
+          return result.then(
+            outcome => {
+              if ((outcome as { done?: unknown } | undefined)?.done === true) {
+                store.onLeaseRelease?.()
+              }
+              return outcome
+            },
+            error => {
+              store.onLeaseRelease?.()
+              throw error
+            },
+          )
         })
 
       return {

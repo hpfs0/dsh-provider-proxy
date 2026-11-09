@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 
-import { acquireFetchRouter } from '../lib/index.js'
+import { acquireFetchRouter, apply } from '../lib/index.js'
 import { ProxyAgent } from 'undici'
 
 /**
@@ -325,5 +325,150 @@ test('decide is told which traffic type the scope carries (N24)', async () => {
   } finally {
     await agent.close()
     router.release()
+  }
+})
+
+// ---- P2-11: a stream outliving a settings rebuild keeps its dispatcher ----
+
+/**
+ * The release hook is what lets a settings write retire an old dispatcher safely.
+ *
+ * It must fire at the FIRST request (undici keeps that request alive by itself)
+ * and, for a stream that never issues one, when the stream ends — otherwise a
+ * retired dispatcher would either be closed too early or never be closed at all.
+ * The callback below mirrors the idempotence the Host relies on.
+ */
+test('P2-11: the release hook fires when the request starts, and once only', async () => {
+  const proxy = await startRecordingProxy()
+  const router = acquireFetchRouter()
+  const agent = new ProxyAgent({ uri: `http://127.0.0.1:${proxy.port}` })
+  let released = false
+  let releases = 0
+  const release = () => {
+    if (released) return
+    released = true
+    releases += 1
+  }
+
+  try {
+    const stream = router.wrap(
+      { dispatcher: agent, onLeaseRelease: release },
+      () => (async function* () {
+        await new Promise(resolve => setImmediate(resolve))
+        await fetch('http://leased.invalid/x')
+        yield 1
+      })(),
+    )
+    assert.equal(releases, 0, 'nothing has been sent yet, so the claim still holds')
+
+    const iterator = stream[Symbol.asyncIterator]()
+    const first = await iterator.next()
+    assert.equal(first.done, false)
+    assert.equal(releases, 1, 'the claim is released as soon as the request starts')
+
+    await iterator.next()
+    assert.equal(releases, 1, 'a duplicate release at the end is absorbed')
+  } finally {
+    await agent.close()
+    router.release()
+    await proxy.close()
+  }
+})
+
+test('P2-11: a stream that never issues a request releases its claim when it ends', async () => {
+  const router = acquireFetchRouter()
+  let releases = 0
+
+  try {
+    const stream = router.wrap(
+      { dispatcher: { close: async () => {} }, onLeaseRelease: () => { releases += 1 } },
+      () => (async function* () {
+        yield 1
+      })(),
+    )
+    for await (const _ of stream) {
+      // completes without a fetch
+    }
+    assert.equal(releases, 1, 'the claim is released at the end of the stream')
+
+    // Abandoning a stream before its first next() must release it too: the
+    // adapter never runs, so nothing else could ever release it.
+    const abandoned = router.wrap(
+      { dispatcher: { close: async () => {} }, onLeaseRelease: () => { releases += 1 } },
+      () => (async function* () {
+        yield 1
+      })(),
+    )
+    const result = await abandoned[Symbol.asyncIterator]().return('done')
+    assert.equal(result.done, true)
+    assert.equal(releases, 2, 'an abandoned stream releases when it is closed')
+  } finally {
+    router.release()
+  }
+})
+
+/**
+ * The end-to-end case from the defect report: a stream is created, a settings
+ * write rebuilds the table (which RETIRES the previous generation), and only then
+ * is the stream consumed. Its request must still succeed on the dispatcher it was
+ * created with — the rebuild must not have closed it underneath.
+ */
+test('P2-11: a stream created before a settings rebuild still completes', async () => {
+  const proxyA = await startRecordingProxy()
+  const proxyB = await startRecordingProxy()
+
+  const listeners: { event: string; fn: Function }[] = []
+  const mockCtx: any = {
+    on(event: string, fn: Function) {
+      listeners.push({ event, fn })
+      return () => {}
+    },
+    emit() {},
+    effect(fn: Function) {
+      return fn()
+    },
+    logger: { info() {}, error() {}, warn() {} },
+    llm: { listProviders: () => [{ id: 'p', name: 'P' }] },
+  }
+
+  let providers = {
+    p: { enabled: true, protocol: 'http', host: '127.0.0.1', port: proxyA.port },
+  }
+  const config = { providers: { get: () => providers } }
+
+  try {
+    apply(mockCtx, config)
+    const streamListener = listeners.find(listener => listener.event === 'llm/stream')
+    assert.ok(streamListener, 'llm/stream listener registered')
+
+    const stream = streamListener.fn(
+      { provider: 'p' },
+      () =>
+        (async function* () {
+          // The adapter issues its HTTP call here, long after the rebuild below.
+          await new Promise(resolve => setImmediate(resolve))
+          const res = await fetch('http://kept.invalid/v1/messages')
+          yield await res.json()
+        })(),
+    )
+
+    // A settings write lands and the Host rebuilds its whole table.
+    providers = {
+      p: { enabled: true, protocol: 'http', host: '127.0.0.1', port: proxyB.port },
+    }
+    const volatileListener = listeners.find(listener => listener.event === 'loader/volatile-update')
+    assert.ok(volatileListener, 'the rebuild hook is registered')
+    volatileListener.fn()
+    await new Promise(resolve => setImmediate(resolve))
+
+    const chunks = []
+    for await (const chunk of stream) chunks.push(chunk)
+
+    assert.deepEqual(chunks, [{ via: 'proxy' }], 'the stream completes instead of failing')
+    assert.equal(proxyA.seen.length, 1, 'the request crossed the proxy the stream was created on')
+    assert.equal(proxyB.seen.length, 0, 'and not the one the rebuild installed')
+  } finally {
+    await proxyA.close()
+    await proxyB.close()
   }
 })
