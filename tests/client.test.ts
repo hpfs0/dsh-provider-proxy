@@ -1859,6 +1859,59 @@ test('editing and testing immediately flushes the write before the self-check', 
   }
 })
 
+test('testing a preset-bound card flushes the preset write first', async () => {
+  // A card bound to a preset takes its endpoint FROM the preset. The flush list
+  // knew the card's own keys, the shared default and the global fields, but not
+  // the preset's — so a preset edit made a moment ago stayed in the debounce
+  // queue and the Host checked the OLD endpoint, then the result was rendered as
+  // the answer for the endpoint the user had just typed.
+  const order = []
+  const { mod, restore } = loadBundle(async url => {
+    if (String(url).includes('/test')) {
+      order.push('test')
+      return { ok: true, status: 200, json: async () => ({ ok: true, ms: 120, status: 200 }) }
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ providers: [{ id: 'sensenova', name: 'SenseNova', live: true }] }),
+    }
+  })
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: { enabled: true, profileId: 'HK', protocol: 'http', host: '', port: 0 },
+        },
+        proxyProfiles: { HK: { protocol: 'http', host: '127.0.0.1', port: 7891 } },
+      },
+    })
+    const mutate = harness.form.mutate
+    harness.form.mutate = async (ops, revision) => {
+      order.push('write')
+      return mutate(ops, revision)
+    }
+    const [, render] = renderPage(mod, harness)
+    await settle()
+
+    findInputsByPlaceholder(profileManagerOf(render()), '127.0.0.1')[0]
+      .props.onChange({ target: { value: '10.0.0.9' } })
+    findTestButton(cardFor(render(), 'sensenova')).props.onClick()
+    await settle()
+
+    assert.deepEqual(
+      order,
+      ['write', 'test'],
+      'the Host must see the preset edit before it is asked to test the card',
+    )
+    assert.deepEqual(harness.writes[0].ops, [
+      { op: 'set', path: ['proxyProfiles', 'HK', 'host'], value: '10.0.0.9' },
+    ])
+  } finally {
+    restore()
+  }
+})
+
 test('a self-check that started before an edit is discarded when it settles', async () => {
   let releaseTest
   const { mod, restore } = loadBundle(async url => {

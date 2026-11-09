@@ -2319,9 +2319,12 @@ function renderPage(ctx: any): unknown {
    * The check is not routed traffic, so it never changes the hit count; the count
    * on the card is read at mount and stays put until the page reloads.
    *
-   * Pending writes for this provider (and the shared default it may inherit) are
-   * flushed before the request: the Host reads the saved settings, not the draft,
-   * so testing inside the 300 ms debounce would otherwise test the old endpoint.
+   * Pending writes for this provider, the shared default it may inherit, and any
+   * preset it may be bound to are flushed before the request: the Host reads the
+   * saved settings, not the draft, so testing inside the 300 ms debounce would
+   * otherwise test the OLD endpoint — for a preset-bound card the preset IS the
+   * endpoint, and leaving its write behind the debounce made the result describe
+   * a configuration the user had already replaced.
    */
   const runTest = (id: string): Promise<void> => {
     const generation = (testGeneration.get(id) ?? 0) + 1
@@ -2333,7 +2336,8 @@ function renderPage(ctx: any): unknown {
           if (
             key.startsWith(`${id}\u0000`) ||
             key.startsWith('\u0000default\u0000') ||
-            key.startsWith('\u0000global\u0000')
+            key.startsWith('\u0000global\u0000') ||
+            key.startsWith('\u0000profile\u0000')
           ) {
             void entry.flush()
           }
