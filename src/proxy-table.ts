@@ -22,7 +22,7 @@ import {
   type DefaultProxyValue,
   type ProviderProxyRouteValue,
 } from './config.js'
-import { hostMatches, normalizeHostRule, parseHostList } from './host-rules.js'
+import { hostMatches, parseHostList } from './host-rules.js'
 import { defaultProxyProblem } from './proxy-address.js'
 import { resolveEndpoint, withEndpoint, type ProfileMap } from './presets.js'
 import type { DispatcherLike } from './fetch-router.js'
@@ -60,10 +60,10 @@ export interface RouteFingerprintInput {
 
 /** Stable, non-secret representation of the rule set in one route. */
 function normalizedRuleSet(raw: string | undefined): string[] {
-  const rules = (raw ?? '')
-    .split(/[,\s]+/)
-    .map(normalizeHostRule)
-    .filter(entry => entry.length > 0)
+  // The SHARED parser, not a second splitter: a private copy here read
+  // `a.com，b.com` (full-width comma) as one rule while the matcher read it as
+  // two, so the fingerprint disagreed with what the route actually did.
+  const rules = parseHostList(raw ?? '')
   return [...new Set(rules)].sort()
 }
 

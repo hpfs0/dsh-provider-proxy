@@ -20,6 +20,7 @@
 import { createRequire } from 'node:module'
 
 import { proxyHostProblem } from './proxy-address.js'
+import { normalizeHostRulesText } from './host-rules.js'
 import {
   SEARCH_PROXY_STRATEGIES,
   normalizeSearchSplitConfig,
@@ -347,11 +348,14 @@ export function normalizeRoute(
 ): ProviderProxyRouteValue {
   const value = plain<ProviderProxyRouteValue>(ProviderProxyRoute(raw ?? {}))
 
-  // Host rules are stored normalized (trimmed, lower-cased) so the matcher built
-  // from them never re-parses on the hot path. WHATWG URL already lower-cases a
-  // hostname, so both sides of the comparison agree.
-  const onlyHosts = value.onlyHosts.trim().toLowerCase()
-  const bypassHosts = value.bypassHosts.trim().toLowerCase()
+  // Host rules are stored normalized: trimmed, lower-cased, split on ASCII AND
+  // full-width commas, and with a dead spelling (`..foo`, `example.com.`, `*.*`)
+  // rewritten to the rule the matcher will actually compare. Storing the raw text
+  // is what let one entry mean two different things on the two sides — the page
+  // reported "never matches" while the matcher normalized it into `*` and sent
+  // every request straight, bypassing the proxy the user asked for.
+  const onlyHosts = normalizeHostRulesText(value.onlyHosts)
+  const bypassHosts = normalizeHostRulesText(value.bypassHosts)
   const testTarget = value.testTarget.trim()
   // A preset name is a dictionary key, so only surrounding whitespace is
   // removed; case is preserved because the key is shown to the user.

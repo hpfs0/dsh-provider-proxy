@@ -9,7 +9,11 @@
 /** Split a host-rule string into raw, non-empty tokens. */
 export function splitHostRules(raw: string): string[] {
   return raw
-    .split(/[,\s]+/)
+    // The full-width comma (U+FF0C) is what an IME produces when a user types a
+    // list in a Chinese keyboard, and it used to glue two rules into one dead
+    // token: `example.com，api.example.com` matched NEITHER host while the page
+    // showed no warning at all. Any Unicode whitespace splits too.
+    .split(/[,\uFF0C\s]+/)
     .map(entry => entry.trim())
     .filter(entry => entry.length > 0)
 }
@@ -18,11 +22,24 @@ export function splitHostRules(raw: string): string[] {
  * Normalize one raw rule for suffix matching.
  *
  * A leading `.` or `*.` is dropped: both spellings mean "this host and its
- * subdomains". Lower-casing belongs here as well, because the Host compares
- * against a WHATWG hostname that is already lower-cased.
+ * subdomains". REPEATED prefixes are dropped as well (`..foo`, `*.*.foo`), a
+ * trailing dot — which only spells an absolute DNS name — is removed, and
+ * doubled interior dots are collapsed. None of those spellings can change which
+ * host a rule means, and none of them can be matched literally, so resolving them
+ * here is what makes the page's verdict and the Host's behaviour the same answer.
+ * Lower-casing belongs here as well, because the Host compares against a WHATWG
+ * hostname that is already lower-cased.
+ *
+ * A bare `*` is deliberately left alone: it is the "match everything" rule, not
+ * an empty prefix. `.*` and `*.*` normalize to `*` for the same reason.
  */
 export function normalizeHostRule(raw: string): string {
-  return raw.trim().replace(/^\*?\./, '').toLowerCase()
+  return raw
+    .trim()
+    .replace(/^(?:\*\.|\.)+/, '')
+    .replace(/\.+$/, '')
+    .replace(/\.{2,}/g, '.')
+    .toLowerCase()
 }
 
 /** Split and normalize a host-rule string into matchable entries. */
@@ -30,6 +47,19 @@ export function parseHostList(raw: string): string[] {
   return splitHostRules(raw)
     .map(normalizeHostRule)
     .filter(entry => entry.length > 0)
+}
+
+/**
+ * The canonical text of one rule list, in the spelling the matcher will read.
+ *
+ * Used where a rule list is normalized before it is stored (`normalizeRoute`), so
+ * the Host never compares against a rule that means something else than the one
+ * the user typed. Dead entries are KEPT verbatim: dropping one would quietly
+ * widen the list (`onlyHosts` with a single dead entry means "proxy nothing",
+ * not "proxy everything").
+ */
+export function normalizeHostRulesText(raw: string): string {
+  return parseHostList(raw).join(', ')
 }
 
 /**
@@ -55,17 +85,23 @@ function isBracketedIpv6(token: string): boolean {
 export function hostRuleProblem(raw: string): string | undefined {
   const token = raw.trim()
   if (token.length === 0) return undefined
+  // Judge the NORMALIZED spelling, i.e. exactly what the matcher will compare.
+  // Reading the raw token instead is what reported `.*` and `*.*` as dead while
+  // they matched EVERY host — the page promised "this entry never matches" and
+  // the Host executed "bypass everything", which is the opposite of the truth.
+  const rule = normalizeHostRule(token)
   // A bare `*.` normalizes to an empty string and disappears from the match
   // list entirely; report it rather than silently accepting a no-op.
-  if (token === '*.' || normalizeHostRule(token).length === 0) return '空通配符'
-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(token)) return '带协议前缀'
-  if (token.includes('/')) return '带路径'
+  if (rule.length === 0) return '空通配符'
+  // `*`, `.*` and `*.*` all mean "everything": a live rule, not a stray wildcard.
+  if (rule === '*') return undefined
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(rule)) return '带协议前缀'
+  if (rule.includes('/')) return '带路径'
   // Host compares hostnames, never `host:port`; a bracketed IPv6 literal is the
   // one legitimate colon in a hostname.
-  if (token.includes(':') && !isBracketedIpv6(token)) return '带端口或非法冒号'
-  // Host strips only a leading `.`/`*.`; any other `*` cannot be a hostname.
-  const withoutLeadingWildcard = token.replace(/^\*\./, '')
-  if (withoutLeadingWildcard.includes('*') && token !== '*') return '杂散通配符'
+  if (rule.includes(':') && !isBracketedIpv6(rule)) return '带端口或非法冒号'
+  // The leading `*.` is already gone, so any remaining `*` cannot be a hostname.
+  if (rule.includes('*')) return '杂散通配符'
   return undefined
 }
 

@@ -322,6 +322,117 @@ test('the shared host-rule matrix matches the Host matcher', () => {
   assert.equal(hostMatches('anything.invalid', rules), true)
 })
 
+// ---- P1-3: one parsing matrix for the four spellings that used to disagree ----
+
+/**
+ * The four inputs that made the page and the matcher contradict each other:
+ * a full-width comma (an IME comma glued two rules into one dead token), a
+ * trailing dot (a legal absolute name the matcher could never equal), a doubled
+ * dot (never a hostname), and `.*`/`*.*` (matched EVERYTHING while the page
+ * reported a dead entry). All three readers must give the same answer here.
+ */
+test('P1-3: parse, dead-rule reporting and matching agree on every rule spelling', () => {
+  const matrix: Array<{
+    raw: string
+    parsed: string[]
+    dead: string[]
+    /** A host the rule list is expected to match, when it can match one. */
+    matches?: string
+  }> = [
+    // Full-width comma: two rules, not one dead token.
+    { raw: 'example.com，api.example.com', parsed: ['example.com', 'api.example.com'], dead: [], matches: 'api.example.com' },
+    // Trailing dots are absolute-name syntax, not part of the rule.
+    { raw: 'example.com.，.internal.test.', parsed: ['example.com', 'internal.test'], dead: [], matches: 'internal.test' },
+    // Repeated prefixes mean the same thing as one.
+    { raw: '..foo.example, *.*.bar.example', parsed: ['foo.example', 'bar.example'], dead: [], matches: 'x.bar.example' },
+    // `.*` / `*.*` mean "everything" — never a dead entry.
+    { raw: '.*', parsed: ['*'], dead: [], matches: 'anything.invalid' },
+    { raw: '*.*', parsed: ['*'], dead: [], matches: 'anything.invalid' },
+    // A doubled interior dot is collapsed: it is a typo for the single-dot rule,
+    // and it could never be matched literally, so the Host resolves it the same
+    // way the page reads it instead of silently doing nothing.
+    { raw: 'a..b.com', parsed: ['a.b.com'], dead: [], matches: 'x.a.b.com' },
+    { raw: 'a..b.com.', parsed: ['a.b.com'], dead: [], matches: 'a.b.com' },
+    { raw: '*.', parsed: [], dead: ['*.'] },
+  ]
+
+  for (const entry of matrix) {
+    assert.deepEqual(parseHostList(entry.raw), entry.parsed, `parse: ${entry.raw}`)
+    assert.deepEqual(deadRuleEntries(entry.raw), entry.dead, `dead: ${entry.raw}`)
+    const rules = parseHostList(entry.raw)
+    if (entry.matches !== undefined) {
+      assert.equal(hostMatches(entry.matches, rules), true, `match ${entry.matches}: ${entry.raw}`)
+    }
+    // Every entry the page calls dead must be unmatched by the matcher too.
+    for (const dead of entry.dead) {
+      assert.equal(hostMatches(dead, rules), false, `${dead} is reported dead but still matched`)
+    }
+  }
+})
+
+test('P1-3: the routing decision follows the same matrix (onlyHosts / bypassHosts)', async () => {
+  const only = await createProxyTable({
+    p: {
+      enabled: true,
+      protocol: 'http',
+      host: 'proxy.test',
+      port: 8080,
+      // A trailing dot and a full-width comma: both used to make every target go
+      // DIRECT while the card claimed the proxy was in use.
+      onlyHosts: 'api.example.com.，example.org',
+    },
+  })
+  const onlyDecide = only.entries.get('p').decide
+  assert.equal(onlyDecide('api.example.com'), 'proxy', 'a trailing dot is the same rule')
+  assert.equal(onlyDecide('example.org'), 'proxy', 'a full-width comma separates rules')
+  assert.equal(onlyDecide('other.test'), 'direct')
+  await closeTable(only.entries)
+
+  const bypass = await createProxyTable({
+    p: {
+      enabled: true,
+      protocol: 'http',
+      host: 'proxy.test',
+      port: 8080,
+      // The dangerous one: this used to send ALL traffic direct while the page
+      // reported "this entry can never match".
+      bypassHosts: '.*',
+    },
+  })
+  assert.equal(bypass.entries.get('p').decide('api.example.com'), 'direct')
+  assert.deepEqual(deadRuleEntries('.*'), [], '`.*` is a live "everything" rule, not a dead entry')
+  await closeTable(bypass.entries)
+})
+
+test('P1-3: the Host stores rule lists in the spelling it matches', () => {
+  const route = normalizeRoute('p', {
+    enabled: true,
+    protocol: 'http',
+    host: 'proxy.test',
+    port: 8080,
+    onlyHosts: ' Api.Example.COM. ，.internal.test ',
+    bypassHosts: 'skip.test.，*.',
+  })
+  assert.equal(route.onlyHosts, 'api.example.com, internal.test')
+  assert.equal(route.bypassHosts, 'skip.test')
+  assert.deepEqual(parseHostList(route.onlyHosts), ['api.example.com', 'internal.test'])
+  assert.deepEqual(parseHostList(route.bypassHosts), ['skip.test'])
+})
+
+test('P1-3: a dead rule survives normalization so the refusal it causes stays visible', () => {
+  // Dropping the dead token would turn "proxy nothing" into "proxy everything":
+  // a dead `onlyHosts` entry is what makes an unmatched target go direct.
+  const route = normalizeRoute('p', {
+    enabled: true,
+    protocol: 'http',
+    host: 'proxy.test',
+    port: 8080,
+    onlyHosts: 'example.com:443，*foo',
+  })
+  assert.equal(route.onlyHosts, 'example.com:443, *foo')
+  assert.deepEqual(deadRuleEntries(route.onlyHosts), ['example.com:443', '*foo'])
+})
+
 // ---- route fingerprints and route-state decisions ----
 
 test('the route fingerprint treats host-rule lists as ordered sets', () => {
