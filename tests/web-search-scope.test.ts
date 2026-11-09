@@ -124,6 +124,38 @@ test('web_search stays direct when the web-search route is absent', async () => 
   }
 })
 
+test('a search right after a binding change never uses the previous preset', async () => {
+  // `presetReady` used to mean "some dedicated dispatcher exists", not "it is the
+  // preset the settings name". Switching the binding from A to B before the
+  // rebuild therefore carried the search through A — the exit the user had just
+  // replaced — while the diagnostics reported `profileId: B` next to A's origin.
+  const proxyA = await startRecordingProxy()
+  try {
+    const profiles = { A: { protocol: 'http', host: '127.0.0.1', port: proxyA.port } }
+    const config = {
+      providers: { get: () => ({}) },
+      proxyProfiles: { get: () => profiles },
+      searchProxyStrategy: 'dedicated',
+      searchProxyProfileId: 'A',
+    }
+    const { web } = mount(config as any)
+    await settle()
+    await web.search({ query: 'x' })
+    assert.equal(proxyA.seen.length, 1, 'the bound preset carries the search')
+
+    profiles.B = { protocol: 'http', host: '127.0.0.1', port: proxyA.port }
+    config.searchProxyProfileId = 'B'
+    await assert.rejects(
+      () => web.search({ query: 'y' }),
+      /正在生效/,
+      'the call is refused briefly rather than carried by the previous preset',
+    )
+    assert.equal(proxyA.seen.length, 1, 'nothing more crossed the preset the user replaced')
+  } finally {
+    await proxyA.close()
+  }
+})
+
 test('disposing restores the original web.search', async () => {
   const proxy = await startRecordingProxy()
   try {

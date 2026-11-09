@@ -238,6 +238,28 @@ export function buildDecide(
   }
 }
 
+/**
+ * The identity of the settings one built route answers for.
+ *
+ * Every field that can change what a self-check PROVES is folded in: the
+ * transport (via {@link routeFingerprint}, which covers protocol, host, port,
+ * credentials, TLS flags), the target-host rules, `localDirect`, and the
+ * route's own self-check target. Comparing the proxy ORIGIN alone could not
+ * tell a changed password, a changed rule list or a changed target apart, and
+ * the table is rebuilt asynchronously after a settings write — so those edits
+ * used to be checked against the previous dispatcher and reported as the new
+ * configuration's verdict.
+ *
+ * `testTarget` is trimmed on both sides: `normalizeRoute` trims it before the
+ * entry is built, so the comparison has to normalize the raw value the same way.
+ */
+export function routeCheckIdentity(
+  route: RouteFingerprintInput & { testTarget?: string },
+  localDirect: boolean,
+): string {
+  return `${routeFingerprint({ ...route, localDirect })}\u0000${(route.testTarget ?? '').trim()}`
+}
+
 /** One built route, or the reason it could not be built. */
 export type RouteBuildResult =
   | { ok: true; entry: RouteEntry }

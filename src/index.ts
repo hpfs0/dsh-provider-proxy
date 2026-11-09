@@ -21,6 +21,7 @@ import {
   buildRouteEntry,
   closeTable,
   createProxyTable,
+  routeCheckIdentity,
   routeFingerprint,
   routeStateDecision,
   type RouteEntry,
@@ -221,6 +222,16 @@ function plainSearchSplit(config: ProxyConfig | undefined): SearchSplitConfig {
 export function apply(ctx: any, config?: ProxyConfig): void {
   const router = acquireFetchRouter()
   let current = new Map<string, RouteEntry>()
+  /**
+   * The settings identity each live route was built from, keyed by provider.
+   *
+   * Deliberately NOT a field on `RouteEntry`: the identity folds in the
+   * credential (a password edit must change it), and a route entry is
+   * serialized into diagnostics — the standing invariant there is that no entry
+   * ever carries a secret. Kept next to `current` because it must be replaced in
+   * the same rebuild that replaces the routes.
+   */
+  let liveCheckIdentities = new Map<string, string>()
   let problems = new Map<string, string>()
   let closed = false
   const heartbeatStates = new Map<string, HeartbeatState>()
@@ -235,6 +246,14 @@ export function apply(ctx: any, config?: ProxyConfig): void {
   let searchDedicated: RouteEntry | undefined
   /** Why the bound search preset could not be built, when it could not. */
   let searchDedicatedProblem: string | undefined
+  /**
+   * The preset id `searchDedicated` was built from (`''` when there is none).
+   *
+   * The plan needs to know WHICH preset the live dispatcher carries: comparing
+   * `profileId` against this is what stops a search made right after a binding
+   * change from leaving through the preset the user just replaced.
+   */
+  let searchDedicatedProfileId = ''
   /**
    * Search traffic counters, kept apart from `hits` because the dashboard
    * classifies calls as `[推理]` / `[搜索]`. `hits` still counts proxied search
@@ -333,27 +352,50 @@ export function apply(ctx: any, config?: ProxyConfig): void {
     const profiles = plainProfiles(config)
     const profileId = split.searchProxyProfileId
     const presetExists = profileId.length > 0 && profiles[profileId] !== undefined
+    /**
+     * Whether the built dispatcher belongs to the preset the settings NOW name.
+     *
+     * `searchDedicated !== undefined` only said "some dedicated dispatcher
+     * exists", not WHICH preset it was built from: after switching the binding
+     * from A to B, the last rebuild's dispatcher still carried A, so a search in
+     * that window left through the exit the user had just replaced — and the
+     * diagnostic payload named B as the profileId next to A's endpoint.
+     */
+    const presetReady = searchDedicated !== undefined && searchDedicatedProfileId === profileId
     const plan = resolveSearchPlan({
       strategy: split.searchProxyStrategy,
       profileId,
       cardAvailable: current.has(WEB_SEARCH_KEY),
       presetExists,
-      presetReady: searchDedicated !== undefined,
+      presetReady,
       bypassAll: plainBypassAll(config),
     })
+    /**
+     * A blocked plan has two very different causes, and the page must not name
+     * the wrong one:
+     *  - the bound preset is missing or does not BUILD (a configuration error);
+     *  - the dispatcher is simply still the PREVIOUS preset's, i.e. the settings
+     *    write landed before the rebuild that would replace it. That is a
+     *    transient state, and the call is REFUSED rather than carried by the
+     *    preset the user just replaced.
+     */
+    const pendingBinding =
+      plan.kind === 'blocked' && searchDedicatedProblem === undefined && presetExists
     const problem =
       plan.kind === 'blocked'
-        ? // The operator-facing wording first: it names the preset and says the
-          // call is REFUSED rather than leaked direct. The builder's own text
-          // (`provider "search-split" …`) is the fallback, not the message.
-          (searchSplitProblem({
-            strategy: split.searchProxyStrategy,
-            profileId,
-            presetExists,
-            presetReady: searchDedicated !== undefined,
-          }) ??
-          searchDedicatedProblem ??
-          '搜索分流配置不可用')
+        ? pendingBinding
+          ? '搜索分流配置正在生效，请稍后重试'
+          : // The operator-facing wording first: it names the preset and says the
+            // call is REFUSED rather than leaked direct. The builder's own text
+            // (`provider "search-split" …`) is the fallback, not the message.
+            (searchSplitProblem({
+              strategy: split.searchProxyStrategy,
+              profileId,
+              presetExists,
+              presetReady,
+            }) ??
+            searchDedicatedProblem ??
+            '搜索分流配置不可用')
         : undefined
     return {
       split,
@@ -890,16 +932,28 @@ export function apply(ctx: any, config?: ProxyConfig): void {
      * saved endpoint is a dead port. A check must never answer a question about
      * a configuration it is not using, so the live route is reused only while
      * it still matches what the settings say right now.
+     *
+     * The comparison is the entry's FULL check identity, not the proxy origin:
+     * a credential edit, a target-host rule edit and a self-check target edit
+     * all keep the same origin, and each of them changes what the check proves.
+     * Comparing the origin alone made those three edits answer with the old
+     * dispatcher — a fixed password still reported as a 407, a new target still
+     * probed at the old one — even though the origin check was the fix for the
+     * same race on the endpoint itself.
      */
     if (route !== undefined) {
-      // Comparing the resolved ORIGIN is enough to tell two configurations
-      // apart for this purpose, and it never touches a credential. A provider
-      // deleted from the settings is stale for the same reason.
-      const expected =
-        saved === undefined || saved.enabled !== true
+      const expectedIdentity =
+        saved === undefined
           ? undefined
-          : buildRouteEntry(provider, saved, buildOptions)
-      if (expected === undefined || !expected.ok || expected.entry.proxyOrigin !== route.proxyOrigin) {
+          : routeCheckIdentity(
+              effectiveRoute(
+                saved,
+                plainDefaultProxy(config),
+                plainProfiles(config),
+              ),
+              buildOptions.localDirect,
+            )
+      if (expectedIdentity === undefined || liveCheckIdentities.get(provider) !== expectedIdentity) {
         route = undefined
       }
     }
@@ -1175,6 +1229,11 @@ export function apply(ctx: any, config?: ProxyConfig): void {
       forgetChecks(provider)
     }
 
+    // One identity per configured route, replaced together with `current`: the
+    // self-check compares it with the settings it is asked about, so a route
+    // built before a credential / rule / target edit can never answer for the
+    // edited configuration.
+    const identities = new Map<string, string>()
     for (const [provider, raw] of Object.entries(providers)) {
       // Fingerprints describe the EFFECTIVE endpoint, so editing a preset a
       // route is bound to invalidates that route's token and self-check cache
@@ -1184,6 +1243,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
         ...effective,
         localDirect,
       })
+      identities.set(provider, routeCheckIdentity(effective, localDirect))
       const decision = routeStateDecision(routeStates.get(provider), {
         fingerprint,
         enabled: raw?.enabled === true,
@@ -1195,6 +1255,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
       }
       routeStates.set(provider, { fingerprint, enabled: raw?.enabled === true, token })
     }
+    liveCheckIdentities = identities
 
     // The dedicated search endpoint (N24) is a route like any other, but it is
     // NOT in the provider dictionary: it is derived from one preset. It is built
@@ -1205,6 +1266,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
     const split = plainSearchSplit(config)
     const previousSearch = searchDedicated
     searchDedicated = undefined
+    searchDedicatedProfileId = ''
     searchDedicatedProblem = undefined
     if (split.searchProxyStrategy === 'dedicated' && split.searchProxyProfileId.length > 0) {
       const built = buildRouteEntry(
@@ -1217,8 +1279,10 @@ export function apply(ctx: any, config?: ProxyConfig): void {
           localDirect,
         },
       )
-      if (built.ok) searchDedicated = built.entry
-      else searchDedicatedProblem = bareMessage(built.problem)
+      if (built.ok) {
+        searchDedicated = built.entry
+        searchDedicatedProfileId = split.searchProxyProfileId
+      } else searchDedicatedProblem = bareMessage(built.problem)
     }
     if (previousSearch !== undefined) {
       void previousSearch.dispatcher.close().catch(() => undefined)

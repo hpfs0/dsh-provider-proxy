@@ -29,6 +29,30 @@ async function startEchoProxy(delayMs = 0, status = 200) {
 }
 
 /**
+ * A fake forward proxy that requires Proxy-Authorization.
+ *
+ * `expected` is the exact header value it accepts, so a check that still runs
+ * through the dispatcher built with the OLD credential is visible as a 407 —
+ * which is exactly how a fixed password used to be reported.
+ */
+async function startAuthProxy(expected: string) {
+  const seen: { url?: string; auth?: string }[] = []
+  const server = createServer((req, res) => {
+    seen.push({ url: req.url, auth: req.headers['proxy-authorization'] as string | undefined })
+    if (req.headers['proxy-authorization'] !== expected) {
+      res.writeHead(407, { 'proxy-authenticate': 'Basic realm="proxy"', 'content-type': 'application/json' })
+      res.end('{"error":"proxy authentication required"}')
+      return
+    }
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ ip: '203.0.113.9' }))
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  const { port } = server.address() as { port: number }
+  return { seen, port, close: () => new Promise(resolve => server.close(resolve)) }
+}
+
+/**
  * Mount the Host half with a webServer mock, as the shipped composition does.
  *
  * `extras.settings` / `extras.configurable` stand in for the settings service and
@@ -991,6 +1015,94 @@ test('a preset edit is picked up by the very next check, without waiting for a r
   }
 })
 
+test('a credential-only edit is what the very next check uses', async () => {
+  // Closing the endpoint-change hole with an origin comparison left this one
+  // open: a fixed password keeps the SAME origin, so the check kept running
+  // through the dispatcher built with the old credential and reported
+  // "代理要求认证" for a password that was already correct.
+  const expected = `Basic ${Buffer.from('u:right').toString('base64')}`
+  const proxy = await startAuthProxy(expected)
+  try {
+    const providers: Record<string, any> = {
+      p: {
+        enabled: true,
+        protocol: 'http',
+        host: '127.0.0.1',
+        port: proxy.port,
+        username: 'u',
+        password: 'wrong',
+        testTarget: 'http://echo.invalid/ip',
+      },
+    }
+    const { routes } = mountHost({ providers: { get: () => providers } })
+
+    const before = await selfCheck(routes, { provider: 'p' })
+    assert.equal(before.body.kind, 'proxy-auth', 'the wrong credential is rejected by the proxy')
+
+    providers.p.password = 'right'
+    const after = await selfCheck(routes, { provider: 'p' })
+    assert.equal(after.body.ok, true, 'the fixed credential must be the one the check uses')
+    assert.equal(proxy.seen.at(-1)?.auth, expected)
+  } finally {
+    await proxy.close()
+  }
+})
+
+test('a self-check target edit is what the very next check uses', async () => {
+  const proxy = await startEchoProxy()
+  try {
+    const providers: Record<string, any> = {
+      p: {
+        enabled: true,
+        protocol: 'http',
+        host: '127.0.0.1',
+        port: proxy.port,
+        testTarget: 'http://echo.invalid/old',
+      },
+    }
+    const { routes } = mountHost({ providers: { get: () => providers } })
+    await selfCheck(routes, { provider: 'p' })
+
+    providers.p.testTarget = 'http://echo.invalid/new'
+    const after = await selfCheck(routes, { provider: 'p' })
+    assert.deepEqual(
+      proxy.seen.map(entry => entry.url),
+      ['http://echo.invalid/old', 'http://echo.invalid/new'],
+      'the new target must be probed, not the previous one',
+    )
+    assert.equal(after.body.target, 'http://echo.invalid/new')
+  } finally {
+    await proxy.close()
+  }
+})
+
+test('a target-rule edit is what the very next check uses', async () => {
+  const proxy = await startEchoProxy()
+  try {
+    const providers: Record<string, any> = {
+      p: {
+        enabled: true,
+        protocol: 'http',
+        host: '127.0.0.1',
+        port: proxy.port,
+        testTarget: 'http://echo.invalid/ip',
+        onlyHosts: 'echo.invalid',
+      },
+    }
+    const { routes } = mountHost({ providers: { get: () => providers } })
+    const before = await selfCheck(routes, { provider: 'p' })
+    assert.equal(before.body.viaProxy, true, 'the target is inside onlyHosts, so it is proxied')
+
+    // The target is now OUTSIDE the list: fail-closed sends it direct, and the
+    // check must say so instead of reusing the previous "proxied" verdict.
+    providers.p.onlyHosts = 'other.invalid'
+    const after = await selfCheck(routes, { provider: 'p' })
+    assert.equal(after.body.viaProxy, false, 'the edited rule decides, not the previous one')
+  } finally {
+    await proxy.close()
+  }
+})
+
 test('the cooldown key covers the routing rules, not just the proxy address', async () => {
   // `bypassHosts`/`onlyHosts`/`localDirect` decide whether the probe is proxied or
   // direct, which is exactly what `viaProxy` — and therefore the whole diagnosis —
@@ -999,8 +1111,9 @@ test('the cooldown key covers the routing rules, not just the proxy address', as
   //
   // The route is DISABLED on purpose: a disabled one is rebuilt from the config on
   // every check (that is the pre-enable flow this feature exists for), so flipping
-  // a field is the only variable here. An enabled route would sit in the built
-  // table until a settings event rebuilt it, which is a different path.
+  // a field is the only variable here. An enabled route stays in the built table
+  // until a settings event rebuilds it — a different path, covered by the
+  // identity tests above.
   const proxy = await startScriptedProxy(() => ({ status: 200, body: JSON.stringify({ ip: '203.0.113.9' }) }))
   try {
     const providers = {
