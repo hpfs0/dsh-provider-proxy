@@ -57,7 +57,22 @@ function loadBundle(fetchImpl) {
     document: globalThis.document,
     fetch: globalThis.fetch,
     localStorage: globalThis.localStorage,
+    navigator: Object.getOwnPropertyDescriptor(globalThis, 'navigator'),
   }
+  // The page falls back to the browser language when the shell provides no
+  // locale service. Pin that language so the assertions do not depend on the
+  // host's ICU default (a zh-CN workstation and an en-US CI runner must agree).
+  const testNavigator = Object.create(globalThis.navigator ?? null)
+  Object.defineProperty(testNavigator, 'language', {
+    configurable: true,
+    enumerable: true,
+    value: 'zh-CN',
+  })
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    enumerable: true,
+    value: testNavigator,
+  })
   globalThis.window = { __ModuleLoader__: { load: o => { globalThis.__reg = o } } }
   globalThis.document = {
     createElement: () => ({ setAttribute() {}, set textContent(v) { styles.push(v) } }),
@@ -111,6 +126,8 @@ function loadBundle(fetchImpl) {
       globalThis.document = previous.document
       globalThis.fetch = previous.fetch
       globalThis.localStorage = previous.localStorage
+      if (previous.navigator === undefined) delete (globalThis as any).navigator
+      else Object.defineProperty(globalThis, 'navigator', previous.navigator)
       delete globalThis.__reg
     },
   }

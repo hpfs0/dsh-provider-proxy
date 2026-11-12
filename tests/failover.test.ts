@@ -343,7 +343,13 @@ test('N18: apply() e2e records fallback alarm in lastUse and preserves response'
 
 test('N18: when fallback direct fetch also fails, throws the real direct error', async () => {
   const deadPort = await getUnusedPort()
-  const deadOriginPort = await getUnusedPort()
+  // Hold the port while the test runs and destroy every connection: a port
+  // picked from the ephemeral range can be claimed by a concurrently running
+  // test file before the fallback fetch reaches it, which made this assertion
+  // flaky on CI.
+  const deadOrigin = createTcpServer(socket => socket.destroy())
+  await new Promise(resolve => deadOrigin.listen(0, '127.0.0.1', resolve))
+  const deadOriginPort = (deadOrigin.address() as { port: number }).port
   const router = acquireFetchRouter()
   const agent = new ProxyAgent({ uri: `http://127.0.0.1:${deadPort}` })
 
@@ -383,6 +389,7 @@ test('N18: when fallback direct fetch also fails, throws the real direct error',
     assert.equal(settledFallback, true, 'settled marked fallback: true')
   } finally {
     await agent.close()
+    await new Promise(resolve => deadOrigin.close(resolve))
     router.release()
   }
 })
