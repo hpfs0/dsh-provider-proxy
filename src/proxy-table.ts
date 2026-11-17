@@ -55,7 +55,6 @@ export interface RouteFingerprintInput {
   onlyHosts?: string
   bypassHosts?: string
   localDirect?: boolean
-  bypassAll?: boolean
 }
 
 /** Stable, non-secret representation of the rule set in one route. */
