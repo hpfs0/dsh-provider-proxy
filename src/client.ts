@@ -3742,6 +3742,7 @@ function renderPage(ctx: any): unknown {
     presetExists: searchPresetExists,
     presetReady: searchPresetReady,
   })
+  const searchPlanWarning = globalBypassAll ? undefined : searchPlanProblem
   const searchPlanText = ((): string => {
     if (globalBypassAll) return t.searchPlanBypass
     if (searchPlanPreview.kind === 'dedicated') {
@@ -3751,7 +3752,7 @@ function renderPage(ctx: any): unknown {
     }
     if (searchPlanPreview.kind === 'card') return t.searchPlanCard
     if (searchPlanPreview.kind === 'blocked') {
-      return `${t.searchPlanBlocked}${searchPlanProblem ?? ''}`
+      return `${t.searchPlanBlocked}${searchPlanWarning ?? ''}`
     }
     return t.searchPlanDirect
   })()
@@ -3943,7 +3944,7 @@ function renderPage(ctx: any): unknown {
               className: styles.hint,
               style: {
                 ...S.hint,
-                color: 'var(--dsw-alias-state-error-primary, #f85149)',
+                ...(globalTestUrl === '' ? {} : { color: 'var(--dsw-alias-state-error-primary, #f85149)' }),
               },
             },
             globalTestUrlHint,
@@ -4185,13 +4186,13 @@ function renderPage(ctx: any): unknown {
           style: {
             ...S.hint,
             margin: '2px 0 0',
-            ...(searchPlanProblem === undefined
+            ...(searchPlanWarning === undefined
               ? {}
               : { color: 'var(--dsw-alias-state-error-primary, #f85149)' }),
           },
           // Announced when it changes: the resolved chain is the answer to "what
           // did I just pick", and a broken binding is an alert, not a footnote.
-          role: searchPlanProblem === undefined ? 'status' : 'alert',
+          role: searchPlanWarning === undefined ? 'status' : 'alert',
           id: 'dsh-proxy-split-plan',
         },
         `${t.searchPlanPrefix}${searchPlanText}`,
@@ -5296,7 +5297,7 @@ function renderPage(ctx: any): unknown {
     // N24: a `dedicated` binding the Host cannot honour refuses every search
     // call. That is a deliberate, user-visible failure state, and the page has
     // to say so — a silent zero in the search column would read as "unused".
-    searchTraffic.plan === 'blocked'
+    searchTraffic.plan === 'blocked' && globalBypassAll !== true
       ? h(
           'div',
           { className: styles.searchAlertBanner, role: 'alert', style: S.searchAlertBanner, key: 'search-alert' },
