@@ -860,6 +860,9 @@ function touchCatalogPolling(): void {
     }
     void fetchCatalog()
       .then(catalog => catalogueSetter?.(catalog))
+      // A failed poll is NOT evidence that the page closed. Keeping the timer
+      // alive lets a transient Host outage heal on the next tick instead of
+      // freezing the page on its last successful catalogue forever.
       .catch(() => undefined)
   }, CATALOG_REFRESH_MS)
 }

@@ -3233,7 +3233,7 @@ test('the orphan prune keeps the stored fields of a route the page has drafted',
   }
   let tick = () => {}
   let clock = 2_000_000
-  globalThis.setInterval = fn => { tick = fn; return 1 }
+  globalThis.setInterval = (fn, ms) => { if (ms === 10_000) tick = fn; return 1 }
   globalThis.clearInterval = () => {}
   Date.now = () => clock
   const catalogBody = {
