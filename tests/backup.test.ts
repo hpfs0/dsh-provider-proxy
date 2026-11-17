@@ -66,15 +66,17 @@ const SOURCE = {
   heartbeatConsecutiveFails: 3,
   searchProxyStrategy: 'dedicated',
   searchProxyProfileId: 'TLS-Pool',
+  enableFallbackDirect: true,
 }
 
 test('N17: an export carries every field the restore needs', () => {
   const document = buildBackup(SOURCE, { includePasswords: true, now: new Date('2026-10-27T08:00:00Z') })
   assert.equal(document.version, BACKUP_VERSION)
-  assert.equal(document.version, 2)
+  assert.equal(document.version, 3)
   assert.equal(document.exportedAt, '2026-10-27T08:00:00.000Z')
   assert.equal(document.localDirect, false)
   assert.equal(document.testUrl, 'https://echo.example/ip')
+  assert.equal(document.enableFallbackDirect, true)
   assert.deepEqual(Object.keys(document.providers).sort(), ['old-style', 'openai', 'sensenova'])
   assert.deepEqual(document.proxyProfiles['HK-Proxy'], SOURCE.proxyProfiles['HK-Proxy'])
   assert.deepEqual(document.proxyProfiles['TLS-Pool'], SOURCE.proxyProfiles['TLS-Pool'])
@@ -136,6 +138,20 @@ test('N17: an export round-trips through parseBackup unchanged', () => {
   assert.deepEqual(parsed.document, document)
 })
 
+test('P3-c: schema v3 carries enableFallbackDirect and defaults it to false', () => {
+  const document = buildBackup({ providers: {} }, { includePasswords: true })
+  assert.equal(BACKUP_VERSION, 3)
+  assert.equal(document.version, 3)
+  assert.equal(document.enableFallbackDirect, false)
+  assert.equal(JSON.stringify(document).includes('enableFallbackDirect'), true)
+
+  const parsed = parseBackup(JSON.stringify(document))
+  assert.equal(parsed.ok, true)
+  if (!parsed.ok) return
+  assert.equal(parsed.document.enableFallbackDirect, false)
+  assert.deepEqual(parsed.document, document)
+})
+
 test('N17: a 0.8.0 backup without proxyProfiles still imports', () => {
   const legacy = {
     providers: { sensenova: { enabled: true, useDefault: true } },
@@ -185,6 +201,7 @@ test('N25: every pre-1.1.0 backup version still imports and gains the 1.1.0 defa
     assert.equal(document.heartbeatConsecutiveFails, 2, label)
     assert.equal(document.searchProxyStrategy, 'inherit', label)
     assert.equal(document.searchProxyProfileId, '', label)
+    assert.equal(document.enableFallbackDirect, false, label)
     // Everything the file DID carry is preserved.
     assert.equal(document.providers.a.enabled, true, label)
     assert.equal(document.defaultProxy.host, '127.0.0.1', label)
@@ -200,6 +217,46 @@ test('N25: every pre-1.1.0 backup version still imports and gains the 1.1.0 defa
   }
 })
 
+test('P3-c: every legacy backup version gains the safe schema v3 default', () => {
+  // The field matters to restore semantics: a missing value must mean "last
+  // resort direct dialling is OFF", never "inherit whichever machine we came
+  // from". Every accepted shape below is a real historical export shape.
+  const files = {
+    '0.8.0': {
+      providers: { a: { enabled: true, useDefault: true } },
+      defaultProxy: { host: '127.0.0.1', port: 7890 },
+    },
+    '1.0.0': {
+      version: 1,
+      providers: { a: { enabled: true } },
+      proxyProfiles: {},
+      defaultProxy: {},
+    },
+    '1.1.0': {
+      version: 2,
+      providers: { a: { enabled: true } },
+      proxyProfiles: {},
+      defaultProxy: {},
+      heartbeatEnabled: true,
+      searchProxyStrategy: 'direct',
+    },
+  }
+  for (const [label, file] of Object.entries(files)) {
+    const parsed = parseBackup(JSON.stringify(file))
+    assert.equal(parsed.ok, true, label)
+    if (!parsed.ok) continue
+    assert.equal(parsed.document.version, BACKUP_VERSION, label)
+    assert.equal(parsed.document.enableFallbackDirect, false, label)
+  }
+
+  const v3 = JSON.parse(JSON.stringify(files['1.1.0']))
+  v3.version = 3
+  v3.enableFallbackDirect = true
+  const parsed = parseBackup(JSON.stringify(v3))
+  assert.equal(parsed.ok, true)
+  if (parsed.ok) assert.equal(parsed.document.enableFallbackDirect, true)
+})
+
 test('N25: a file from a NEWER version is refused instead of half applied', () => {
   const future = parseBackup(
     JSON.stringify({ version: BACKUP_VERSION + 1, providers: {}, defaultProxy: {} }),
@@ -212,6 +269,25 @@ test('N25: a file from a NEWER version is refused instead of half applied', () =
   const bogus = parseBackup(JSON.stringify({ version: '1', providers: {} }))
   assert.equal(bogus.ok, false)
   if (!bogus.ok) assert.match(bogus.error, /version/)
+})
+
+test('P3-c: a hand-edited v3 backup with a wrong enableFallbackDirect type is refused', () => {
+  const parsed = parseBackup(
+    JSON.stringify({ version: 3, providers: {}, enableFallbackDirect: 'true' }),
+  )
+  assert.equal(parsed.ok, false)
+  if (!parsed.ok) assert.match(parsed.error, /enableFallbackDirect/)
+})
+
+test('P3-c: redacted backups carry the safety flag without carrying credentials', () => {
+  const document = buildBackup(SOURCE, { includePasswords: false })
+  assert.equal(document.enableFallbackDirect, true)
+  for (const secret of ['hunter2', 's3cret', 'tls-secret', 'defaultpass']) {
+    assert.equal(JSON.stringify(document).includes(secret), false, `${secret} must not be exported`)
+  }
+  assert.equal(document.providers.sensenova.password, '')
+  assert.equal(document.proxyProfiles['TLS-Pool'].password, '')
+  assert.equal(document.defaultProxy.password, '')
 })
 
 test('N17: missing optional fields are filled with schema defaults', () => {
@@ -276,6 +352,7 @@ test('N17: wrong types are refused rather than silently coerced', () => {
     { providers: {}, heartbeatConsecutiveFails: '2' },
     { providers: {}, searchProxyStrategy: 'inherit ' },
     { providers: {}, searchProxyProfileId: 5 },
+    { providers: {}, enableFallbackDirect: 'true' },
   ]
   for (const value of cases) {
     const parsed = parseBackup(JSON.stringify(value))
@@ -315,6 +392,7 @@ test('N17: a restore writes every top-level section in one operation list', () =
       ['heartbeatConsecutiveFails'],
       ['searchProxyStrategy'],
       ['searchProxyProfileId'],
+      ['enableFallbackDirect'],
     ],
   )
   // Dictionaries are written WHOLE: a per-key write could only add entries, so a
@@ -322,7 +400,7 @@ test('N17: a restore writes every top-level section in one operation list', () =
   assert.deepEqual(Object.keys(ops[1].value), ['HK-Proxy', 'TLS-Pool'])
   assert.deepEqual(
     ops.slice(5).map(op => op.value),
-    [true, 900, 3, 'dedicated', 'TLS-Pool'],
+    [true, 900, 3, 'dedicated', 'TLS-Pool', true],
     'and the 1.1.0 values are the ones the file carried',
   )
 })

@@ -183,7 +183,7 @@ dsh plugin --profile web add dsh-provider-proxy
 它是**追加**而不是覆盖：你自己加的中转主机不会被丢掉；已经存在的同名规则（含 `*.` 写法差异）不会重复写入。
 模板里的每一项都保证能通过死规则检查；未知 provider 不显示这个按钮，避免猜错主机名把流量限死。
 
-### 配置备份与恢复（0.9.0 / 1.1.0）
+### 配置备份与恢复（0.9.0 / 1.1.0 / 1.3.0）
 
 **备份与恢复** 现在是设置页的一个独立页签：
 
@@ -191,13 +191,16 @@ dsh plugin --profile web add dsh-provider-proxy
   `dsh-proxy-backup-<日期>.json`，内容包含 `providers`、`proxyProfiles`、`defaultProxy`、
   `localDirect`、`testUrl`，以及 1.1.0 的三个心跳字段
   （`heartbeatEnabled` / `heartbeatInterval` / `heartbeatConsecutiveFails`）与两个分流字段
-  （`searchProxyStrategy` / `searchProxyProfileId`）。
+  （`searchProxyStrategy` / `searchProxyProfileId`）；1.3.0 起备份版本为 `version: 3`，并携带
+  `enableFallbackDirect`（默认 `false`，不在备份里携带任何密码以外的凭据语义）。
 - **导入**先解析并校验类型，不合法会直接报错且**不改动现有配置**；合法则弹确认框显示将覆盖多少个
   provider / 预设，确认后**一次**写入覆盖全部十段。缺字段按 schema 默认补齐。
 - **向后兼容**：0.8.0（没有 `proxyProfiles`、没有 `version`）、1.0.0（`version: 1`，带
-  `proxyTls`）、1.1.0（`version: 2`）三种文件都能直接导入。旧文件缺少的 1.1.0 段按**当前默认值**
-  补齐——心跳保持关闭、搜索保持继承；因为恢复是「整体替换」，让未提及的开关沿用还原前的状态会让结果
-  取决于上一个状态，而不是文件。
+  `proxyTls`）、1.1.0 / 1.2.0（`version: 2`）文件都能直接导入。旧文件缺少的 1.1.0 段按**当前默认值**
+  补齐——心跳保持关闭、搜索保持继承；1.3.0 的 `enableFallbackDirect` 缺失时按**安全默认值 `false`**
+  补齐。因为恢复是「整体替换」，让未提及的开关沿用还原前的状态会让结果取决于上一个状态，而不是文件。
+- **降级提示**：`version: 3` 的备份会被 1.2.x 及更早版本明确拒绝。**降级前请先导出一份 `version: 2`
+  兼容文件并妥善保存**，再用旧版本导入；不要依赖旧版直接读取新版文件。
 - **来自更新版本的文件会被拒绝**（`version` 大于本版本支持的上限）：那种文件的键可能已被改写，
   与其半途覆盖，不如给出一条明确的错误。
 - 脱敏导出把每个密码字段写成空字符串（而不是删掉），所以文件里能一眼看出「这里被脱敏了」；

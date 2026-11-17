@@ -6857,6 +6857,7 @@ test('N17: an exported file round-trips into a single restore write', async () =
         'heartbeatConsecutiveFails',
         'searchProxyStrategy',
         'searchProxyProfileId',
+        'enableFallbackDirect',
       ],
     )
     assert.equal(writes[0].ops[3].value, false, 'localDirect is restored, not defaulted')
@@ -8095,7 +8096,8 @@ test('N25: the export carries the heartbeat and split settings', async () => {
 
     const file = download.savedFile()
     assert.ok(file, 'a file is written')
-    assert.equal(file.version, 2, 'the export declares the 1.1.0 schema')
+    assert.equal(file.version, 3, 'the export declares the 1.3.0 schema')
+    assert.equal(file.enableFallbackDirect, false)
     assert.equal(file.heartbeatEnabled, true)
     assert.equal(file.heartbeatInterval, 900)
     assert.equal(file.heartbeatConsecutiveFails, 3)

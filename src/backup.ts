@@ -14,6 +14,8 @@
  * - 1.1.0 files are `version: 2` and add the `heartbeatEnabled` /
  *   `heartbeatInterval` / `heartbeatConsecutiveFails` and
  *   `searchProxyStrategy` / `searchProxyProfileId` top-level fields.
+ * - 1.3.0 files are `version: 3` and add the `enableFallbackDirect` top-level
+ *   safety switch. Older files are upgraded in memory to the current default.
  *
  * A missing section is filled with the CURRENT schema default, because a restore
  * REPLACES the whole configuration: leaving a hidden 1.1.0 setting at whatever
@@ -54,7 +56,7 @@ const PROTOCOLS: readonly Protocol[] = ['http', 'https', 'socks5']
  * what "current" means — the classic way a round-trip test passes while a real
  * export/import pair silently loses a field.
  */
-export const BACKUP_VERSION = 2
+export const BACKUP_VERSION = 3
 
 /** The newest version this build can WRITE; anything above it is refused. */
 const MAX_SUPPORTED_VERSION = BACKUP_VERSION
@@ -97,6 +99,8 @@ export interface BackupDocument {
   /** 1.1.0 — search / reasoning traffic split (N24). */
   searchProxyStrategy: SearchProxyStrategy
   searchProxyProfileId: string
+  /** 1.3.0 — last-resort direct dialling on proxy failure (safe default: off). */
+  enableFallbackDirect: boolean
 }
 
 /** What the page holds, as far as export is concerned. */
@@ -112,6 +116,8 @@ export interface BackupSource {
   heartbeatConsecutiveFails?: number
   searchProxyStrategy?: unknown
   searchProxyProfileId?: unknown
+  /** 1.3.0 field; omitted means "the schema default" (false). */
+  enableFallbackDirect?: boolean
 }
 
 /** Mirrors the schema default, so an empty export is still self-explanatory. */
@@ -232,6 +238,7 @@ export function buildBackup(
     ...normalizeHeartbeat(source),
     searchProxyStrategy: split.searchProxyStrategy,
     searchProxyProfileId: split.searchProxyProfileId,
+    enableFallbackDirect: source.enableFallbackDirect === true,
   }
 }
 
@@ -339,6 +346,13 @@ export function parseBackup(text: string): BackupParseResult {
   if (root.searchProxyProfileId !== undefined && typeof root.searchProxyProfileId !== 'string') {
     return { ok: false, error: 'searchProxyProfileId 必须是字符串' }
   }
+  // 1.3.0 section. A wrong TYPE is an error (it would otherwise be silently
+  // coerced to `false`); an ABSENT field is an older file taking the safe
+  // default. Restoring is a confirmed overwrite, so a hand-edited string
+  // "true" must never silently arm automatic direct dialling.
+  if (root.enableFallbackDirect !== undefined && typeof root.enableFallbackDirect !== 'boolean') {
+    return { ok: false, error: 'enableFallbackDirect 必须是布尔值' }
+  }
 
   /** Field-type check shared by every endpoint-shaped object. */
   const endpoint = (value: Record<string, unknown>, label: string): string | undefined => {
@@ -426,6 +440,7 @@ export function parseBackup(text: string): BackupParseResult {
     ...heartbeat,
     searchProxyStrategy: split.searchProxyStrategy,
     searchProxyProfileId: split.searchProxyProfileId,
+    enableFallbackDirect: root.enableFallbackDirect === true,
   }
   return { ok: true, document }
 }
@@ -454,6 +469,7 @@ export function backupOps(document: BackupDocument): unknown[] {
     { op: 'set', path: ['heartbeatConsecutiveFails'], value: document.heartbeatConsecutiveFails },
     { op: 'set', path: ['searchProxyStrategy'], value: document.searchProxyStrategy },
     { op: 'set', path: ['searchProxyProfileId'], value: document.searchProxyProfileId },
+    { op: 'set', path: ['enableFallbackDirect'], value: document.enableFallbackDirect },
   ]
 }
 

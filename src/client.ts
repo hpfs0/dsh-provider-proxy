@@ -2444,7 +2444,7 @@ function renderPage(ctx: any): unknown {
       writeConfig(ctx, [{ op: 'set', path, value }])
         .then(() => {
           setSaveError(undefined)
-          setSavedNote(secret === undefined ? `已保存 ${label}` : `已保存 ${safeLabel}`)
+          setSavedNote(`${t.savedPrefix}${secret === undefined ? label : safeLabel}`)
         })
         .catch((error: any) => {
           const message = redactSensitiveText(String(error?.message ?? error), [
@@ -2533,7 +2533,7 @@ function renderPage(ctx: any): unknown {
       writeConfig(ctx, ops)
         .then(() => {
           setSaveError(undefined)
-          setSavedNote(`已保存 ${safeLabel}`)
+          setSavedNote(`${t.savedPrefix}${safeLabel}`)
         })
         .catch((error: any) => {
           const message = redactSensitiveText(String(error?.message ?? error), secrets)
