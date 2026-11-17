@@ -1946,8 +1946,7 @@ export {
 
 export {
   calculateCoverage,
-  calculateSuccessRate,
-  calculateAverageLatency,
+  calculateObservabilityMetrics,
   calculateTotalHits,
   calculateTrafficSplit,
   formatNumber,

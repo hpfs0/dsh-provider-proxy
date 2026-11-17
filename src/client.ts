@@ -1,7 +1,6 @@
 import {
   calculateCoverage,
-  calculateSuccessRate,
-  calculateAverageLatency,
+  calculateObservabilityMetrics,
   calculateTotalHits,
   calculateTrafficSplit,
   countUnreachableProviders,
@@ -462,6 +461,7 @@ function testResultFrom(body: any, strings: Record<string, string>): Record<stri
   return {
     pending: false,
     ok,
+    at: Date.now(),
     ms: typeof body?.ms === 'number' && Number.isFinite(body.ms) ? body.ms : undefined,
     ip: typeof body?.exitIp === 'string' && body.exitIp.length > 0 ? body.exitIp : undefined,
     status:
@@ -5168,8 +5168,9 @@ function renderPage(ctx: any): unknown {
     ? countUnreachableProviders(rows, effectiveConfigured, heartbeat)
     : { count: 0, unreachableIds: [] as string[] }
   const hasUnreachable = unreachable.count > 0
-  const successRate = calculateSuccessRate(lastUse, isZh)
-  const avgLatency = calculateAverageLatency(tests)
+  const metrics = calculateObservabilityMetrics({ isZh, lastUse, tests, heartbeat })
+  const successRate = metrics
+  const avgLatency = metrics
   const totalHits = calculateTotalHits(hits)
   // N24: the same forwarded-request total, classified. The two halves add up to
   // `totalHits`, so the split explains the number instead of contradicting it.

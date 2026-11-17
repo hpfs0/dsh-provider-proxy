@@ -4,14 +4,16 @@ import { EventEmitter } from 'node:events'
 
 import {
   calculateCoverage,
-  calculateSuccessRate,
-  calculateAverageLatency,
+  calculateObservabilityMetrics,
   calculateTotalHits,
   calculateTrafficSplit,
   formatNumber,
   countUnreachableProviders,
   apply,
 } from '../lib/index.js'
+
+const NOW = new Date('2026-11-17T12:00:00.000Z').getTime()
+const HOUR = 60 * 60 * 1000
 
 test('formatNumber formats numbers with thousands commas', () => {
   assert.equal(formatNumber(0), '0')
@@ -56,92 +58,205 @@ test('calculateCoverage computes proxy coverage across empty, partial and full s
   assert.equal(cov2.formatted, '1 / 2 活跃')
 })
 
-test('calculateSuccessRate computes percentage correctly across edge cases', () => {
+test('P3-f: proxy success rate uses only completed probes inside the 24h window', () => {
   // Empty lastUse
-  const empty = calculateSuccessRate({})
+  const empty = calculateObservabilityMetrics({ now: NOW })
   assert.equal(empty.rate, 100)
   assert.equal(empty.formatted, '100% 成功')
 
-  // In-flight only (no ok)
-  const inFlightOnly = calculateSuccessRate({ p1: { startedAt: 123 } })
+  // In-flight only (no completion) is not a completed probe.
+  const inFlightOnly = calculateObservabilityMetrics({
+    now: NOW,
+    lastUse: { p1: { startedAt: NOW - HOUR } },
+  })
   assert.equal(inFlightOnly.rate, 100)
   assert.equal(inFlightOnly.formatted, '100% 成功')
 
   // All success
-  const allOk = calculateSuccessRate({
-    p1: { ok: true, at: 100 },
-    p2: { ok: true, at: 200 },
+  const allOk = calculateObservabilityMetrics({
+    now: NOW,
+    lastUse: {
+      p1: { ok: true, at: NOW - HOUR },
+      p2: { ok: true, at: NOW - 2 * HOUR },
+    },
   })
   assert.equal(allOk.rate, 100)
   assert.equal(allOk.formatted, '100% 成功')
 
   // All failed
-  const allFailed = calculateSuccessRate({
-    p1: { ok: false, code: 'ECONNREFUSED' },
-    p2: { ok: false, code: 'TIMEOUT' },
+  const allFailed = calculateObservabilityMetrics({
+    now: NOW,
+    lastUse: {
+      p1: { ok: false, at: NOW - HOUR, code: 'ECONNREFUSED' },
+      p2: { ok: false, at: NOW - 2 * HOUR, code: 'TIMEOUT' },
+    },
   })
   assert.equal(allFailed.rate, 0)
   assert.equal(allFailed.formatted, '0% 成功')
 
   // Partial success (3 ok, 1 fail = 75%)
-  const partial = calculateSuccessRate({
-    p1: { ok: true },
-    p2: { ok: true },
-    p3: { ok: true },
-    p4: { ok: false },
+  const partial = calculateObservabilityMetrics({
+    now: NOW,
+    lastUse: {
+      p1: { ok: true, at: NOW - 60_000 },
+      p2: { ok: true, at: NOW - 2 * HOUR },
+      p3: { ok: true, at: NOW - 3 * HOUR },
+      p4: { ok: false, at: NOW - 4 * HOUR },
+    },
   })
   assert.equal(partial.rate, 75)
   assert.equal(partial.formatted, '75% 成功')
 
   // Decimal rate (e.g. 2 ok, 1 fail = 66.7%)
-  const decimal = calculateSuccessRate({
-    p1: { ok: true },
-    p2: { ok: true },
-    p3: { ok: false },
+  const decimal = calculateObservabilityMetrics({
+    now: NOW,
+    lastUse: {
+      p1: { ok: true, at: NOW - 60_000 },
+      p2: { ok: true, at: NOW - 2 * HOUR },
+      p3: { ok: false, at: NOW - 3 * HOUR },
+    },
   })
   assert.equal(decimal.rate, 66.7)
   assert.equal(decimal.formatted, '66.7% 成功')
 
   // English
-  const decimalEn = calculateSuccessRate({
-    p1: { ok: true },
-    p2: { ok: false },
-  }, false)
+  const decimalEn = calculateObservabilityMetrics({
+    now: NOW,
+    lastUse: {
+      p1: { ok: true, at: NOW - 60_000 },
+      p2: { ok: false, at: NOW - 2 * HOUR },
+    },
+    isZh: false,
+  })
   assert.equal(decimalEn.formatted, '50% Success')
 })
 
-test('calculateAverageLatency averages valid tests and handles empty cases', () => {
+test('P3-f: success rate excludes stale and undated records', () => {
+  const metrics = calculateObservabilityMetrics({
+    now: NOW,
+    lastUse: {
+      freshOk: { ok: true, at: NOW - 23 * HOUR },
+      boundaryFail: { ok: false, at: NOW - 24 * HOUR },
+      staleOk: { ok: true, at: NOW - 24 * HOUR - 1 },
+      undatedOk: { ok: true },
+      unfinished: { startedAt: NOW - HOUR },
+    },
+  })
+  assert.equal(metrics.successes, 1)
+  assert.equal(metrics.total, 2)
+  assert.equal(metrics.rate, 50)
+  assert.equal(metrics.formatted, '50% 成功')
+})
+
+test('P3-f: self-check results count as success probes inside the same window', () => {
+  const metrics = calculateObservabilityMetrics({
+    now: NOW,
+    tests: {
+      good: { ok: true, at: NOW - HOUR },
+      bad: { ok: false, at: NOW - 2 * HOUR },
+      stale: { ok: true, at: NOW - 25 * HOUR },
+      undated: { ok: true },
+      pending: { pending: true, at: NOW - HOUR },
+    },
+  })
+  assert.equal(metrics.successes, 1)
+  assert.equal(metrics.total, 2)
+  assert.equal(metrics.rate, 50)
+})
+
+test('P3-f: heartbeat probes count as success probes inside the same window', () => {
+  const metrics = calculateObservabilityMetrics({
+    now: NOW,
+    heartbeat: {
+      healthy: {
+        status: 'healthy',
+        lastCheckAt: NOW - 30 * 60_000,
+        lastSuccessAt: NOW - 30 * 60_000,
+      },
+      failed: {
+        status: 'unreachable',
+        lastCheckAt: NOW - 2 * HOUR,
+      },
+      staleHealthy: {
+        status: 'healthy',
+        lastCheckAt: NOW - 25 * HOUR,
+        lastSuccessAt: NOW - 25 * HOUR,
+      },
+    },
+  })
+  assert.equal(metrics.successes, 1)
+  assert.equal(metrics.total, 2)
+  assert.equal(metrics.rate, 50)
+})
+
+test('P3-f: average latency combines proxy results, self-checks and heartbeat probes', () => {
   // Empty
-  const empty = calculateAverageLatency({})
+  const empty = calculateObservabilityMetrics({ now: NOW })
   assert.equal(empty.averageMs, null)
-  assert.equal(empty.formatted, '- ms')
+  assert.equal(empty.latencyFormatted, '- ms')
 
   // Invalid or <= 0
-  const invalid = calculateAverageLatency({
-    p1: { ms: 0 },
-    p2: { ms: -10 },
-    p3: {},
+  const invalid = calculateObservabilityMetrics({
+    now: NOW,
+    lastUse: {
+      p1: { ok: true, at: NOW - HOUR, ms: 0 },
+      p2: { ok: true, at: NOW - HOUR, ms: -10 },
+    },
   })
   assert.equal(invalid.averageMs, null)
-  assert.equal(invalid.formatted, '- ms')
+  assert.equal(invalid.latencyFormatted, '- ms')
 
   // Valid values
-  const valid = calculateAverageLatency({
-    p1: { ms: 120 },
-    p2: { ms: 240 },
-    p3: { ms: 360 },
+  const valid = calculateObservabilityMetrics({
+    now: NOW,
+    lastUse: {
+      p1: { ok: true, at: NOW - HOUR, ms: 120 },
+      p2: { ok: true, at: NOW - HOUR, ms: 240 },
+      p3: { ok: true, at: NOW - HOUR, ms: 360 },
+    },
   })
   assert.equal(valid.averageMs, 240)
-  assert.equal(valid.formatted, '240 ms')
+  assert.equal(valid.latencyFormatted, '240 ms')
 
   // Mixed valid and invalid
-  const mixed = calculateAverageLatency({
-    p1: { ms: 150 },
-    p2: { ms: 0 },
-    p3: { ms: 250 },
+  const mixed = calculateObservabilityMetrics({
+    now: NOW,
+    lastUse: {
+      p1: { ok: true, at: NOW - HOUR, ms: 150 },
+      p2: { ok: true, at: NOW - HOUR, ms: 0 },
+      p3: { ok: true, at: NOW - HOUR, ms: 250 },
+    },
   })
   assert.equal(mixed.averageMs, 200)
-  assert.equal(mixed.formatted, '200 ms')
+  assert.equal(mixed.latencyFormatted, '200 ms')
+
+  // All three sources contribute to the same average; stale samples do not.
+  const combined = calculateObservabilityMetrics({
+    now: NOW,
+    lastUse: {
+      proxy: { ok: true, at: NOW - HOUR, ms: 100 },
+    },
+    tests: {
+      selfCheck: { ok: true, at: NOW - 2 * HOUR, ms: 200 },
+      staleSelfCheck: { ok: true, at: NOW - 25 * HOUR, ms: 10_000 },
+    },
+    heartbeat: {
+      probe: {
+        status: 'healthy',
+        lastCheckAt: NOW - 30 * 60_000,
+        lastSuccessAt: NOW - 30 * 60_000,
+        latencyMs: 300,
+      },
+      staleProbe: {
+        status: 'healthy',
+        lastCheckAt: NOW - 25 * HOUR,
+        lastSuccessAt: NOW - 25 * HOUR,
+        latencyMs: 10_000,
+      },
+    },
+  })
+  assert.equal(combined.averageMs, 200)
+  assert.equal(combined.latencyFormatted, '200 ms')
 })
 
 test('calculateTotalHits sums all valid positive hits', () => {

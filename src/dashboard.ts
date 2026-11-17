@@ -5,12 +5,15 @@
 export interface LastUseLike {
   startedAt?: number
   at?: number
+  ms?: number
   ok?: boolean
   code?: string
   fallback?: boolean
 }
 
 export interface TestResultLike {
+  at?: number
+  pending?: boolean
   ms?: number
   ok?: boolean
 }
@@ -31,6 +34,105 @@ export interface HeartbeatStateLike {
 }
 export interface ConfiguredRouteLike {
   enabled?: boolean
+}
+
+const OBSERVABILITY_WINDOW_MS = 24 * 60 * 60 * 1000
+
+function inObservabilityWindow(at: number | undefined, now: number): boolean {
+  return (
+    typeof at === 'number' &&
+    Number.isFinite(at) &&
+    at >= now - OBSERVABILITY_WINDOW_MS &&
+    at <= now
+  )
+}
+
+function isPositiveLatency(ms: unknown): ms is number {
+  return typeof ms === 'number' && Number.isFinite(ms) && ms > 0
+}
+
+function formatRate(rate: number, isZh: boolean): string {
+  const rateStr = Number.isInteger(rate) ? String(rate) : rate.toFixed(1)
+  return isZh ? `${rateStr}% 成功` : `${rateStr}% Success`
+}
+
+function formatLatency(averageMs: number | null): string {
+  return averageMs === null ? '- ms' : `${averageMs} ms`
+}
+
+export interface ObservabilityMetricsInput {
+  now?: number
+  isZh?: boolean
+  lastUse?: Record<string, LastUseLike | undefined>
+  tests?: Record<string, TestResultLike | undefined>
+  heartbeat?: Record<string, HeartbeatStateLike | undefined>
+}
+
+export interface ObservabilityMetrics {
+  rate: number
+  formatted: string
+  successes: number
+  total: number
+  averageMs: number | null
+  latencyFormatted: string
+}
+
+/**
+ * Calculate the dashboard success rate and average latency from every
+ * completed probe inside the same rolling 24-hour window.
+ */
+export function calculateObservabilityMetrics(
+  input: ObservabilityMetricsInput,
+): ObservabilityMetrics {
+  const now = input.now ?? Date.now()
+  let total = 0
+  let successes = 0
+  let latencyCount = 0
+  let latencyTotal = 0
+
+  const addLatency = (ms: unknown): void => {
+    if (!isPositiveLatency(ms)) return
+    latencyCount += 1
+    latencyTotal += ms
+  }
+
+  for (const entry of Object.values(input.lastUse ?? {})) {
+    if (!entry || !inObservabilityWindow(entry.at, now)) continue
+    if (typeof entry.ok === 'boolean') {
+      total += 1
+      if (entry.ok) successes += 1
+    }
+    addLatency(entry.ms)
+  }
+
+  for (const entry of Object.values(input.tests ?? {})) {
+    if (!entry || entry.pending === true || !inObservabilityWindow(entry.at, now)) continue
+    if (typeof entry.ok === 'boolean') {
+      total += 1
+      if (entry.ok) successes += 1
+    }
+    addLatency(entry.ms)
+  }
+
+  for (const entry of Object.values(input.heartbeat ?? {})) {
+    if (!entry || !inObservabilityWindow(entry.lastCheckAt, now)) continue
+    if (entry.status === 'healthy' || entry.status === 'unreachable') {
+      total += 1
+      if (entry.status === 'healthy') successes += 1
+    }
+    addLatency(entry.latencyMs)
+  }
+
+  const rate = total === 0 ? 100 : Math.round((successes / total) * 1000) / 10
+  const averageMs = latencyCount === 0 ? null : Math.round(latencyTotal / latencyCount)
+  return {
+    rate,
+    formatted: formatRate(rate, input.isZh !== false),
+    successes,
+    total,
+    averageMs,
+    latencyFormatted: formatLatency(averageMs),
+  }
 }
 
 /** Format an integer with thousands commas, e.g. 100,000. */
@@ -99,10 +201,9 @@ export function calculateSuccessRate(
   }
 
   const rate = Math.round((successes / total) * 1000) / 10
-  const rateStr = Number.isInteger(rate) ? String(rate) : rate.toFixed(1)
   return {
     rate,
-    formatted: isZh ? `${rateStr}% 成功` : `${rateStr}% Success`,
+    formatted: formatRate(rate, isZh),
   }
 }
 
@@ -125,14 +226,14 @@ export function calculateAverageLatency(
   if (count === 0) {
     return {
       averageMs: null,
-      formatted: '- ms',
+      formatted: formatLatency(null),
     }
   }
 
   const averageMs = Math.round(totalMs / count)
   return {
     averageMs,
-    formatted: `${averageMs} ms`,
+    formatted: formatLatency(averageMs),
   }
 }
 
