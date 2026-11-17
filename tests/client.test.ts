@@ -7935,6 +7935,276 @@ test('tabs: arriving on a tab opens its single panel instead of showing a collap
     restore()
   }
 })
+
+function byText(node, text) {
+  if (node === null || typeof node !== 'object') return undefined
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = byText(child, text)
+      if (found) return found
+    }
+    return undefined
+  }
+  const inChildren = byText(node.children, text)
+  if (inChildren) return inChildren
+  return textsOf(node).includes(text) ? node : undefined
+}
+
+test('P3-e: the English locale uses English tab labels and saved notes', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    harness.services.set('locale', { getSnapshot: () => ({ locale: 'en' }) })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+
+    const labels = tabBarOf(render()).children.map(tab => textsOf(tab).join(''))
+    assert.deepEqual(
+      labels,
+      ['Providers', 'Proxy presets', 'Global settings', 'Backup & restore'],
+      'the English tabs must not leak Chinese section names',
+    )
+    const registration = harness.registrations[0].decl.label()
+    assert.ok(
+      !/[\u3400-\u9fff]/.test(registration),
+      `the English navigation label must not contain Chinese: ${registration}`,
+    )
+
+    const hostInput = findInputsByPlaceholder(render(), '127.0.0.1')[0]
+    assert.ok(hostInput, 'the English host placeholder is rendered')
+    hostInput.props.onChange({ target: { value: '127.0.0.1' } })
+    await writeSettle()
+    assert.ok(
+      textsOf(render()).some(text => /Saved\s/.test(text)),
+      'the save confirmation comes from the active locale dictionary',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('P3-i: tabs use roving tabindex and support arrows, Home and End', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    const tab = label => tabBarOf(render()).children.find(item => textsOf(item).join('') === label)
+    const tabIndexes = () => tabBarOf(render()).children.map(item => item.props.tabIndex)
+
+    assert.deepEqual(tabIndexes(), [0, -1, -1, -1], 'only the selected tab is in the tab order')
+    tab('Provider 列表').props.onKeyDown({ key: 'ArrowRight', preventDefault() {} })
+    assert.equal(tabPanelOf(render(), 'presets').props.hidden, false, 'ArrowRight selects the next tab')
+    assert.deepEqual(tabIndexes(), [-1, 0, -1, -1])
+
+    tab('代理预设').props.onKeyDown({ key: 'ArrowLeft', preventDefault() {} })
+    assert.equal(tabPanelOf(render(), 'providers').props.hidden, false, 'ArrowLeft selects the previous tab')
+    tab('Provider 列表').props.onKeyDown({ key: 'End', preventDefault() {} })
+    assert.equal(tabPanelOf(render(), 'backup').props.hidden, false, 'End selects the last tab')
+    tab('备份与恢复').props.onKeyDown({ key: 'Home', preventDefault() {} })
+    assert.equal(tabPanelOf(render(), 'providers').props.hidden, false, 'Home selects the first tab')
+  } finally {
+    restore()
+  }
+})
+
+test('P3-g: the batch-test count and execution use the same enabled set', async () => {
+  const tested = []
+  const { mod, restore } = loadBundle(async url => {
+    if (String(url).includes('/test')) {
+      tested.push(url)
+      return { ok: true, status: 200, json: async () => ({ ok: true, status: 200, ms: 88 }) }
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        providers: [
+          { id: 'sensenova', name: 'SenseNova', live: true },
+          { id: 'openai', name: 'OpenAI', live: true },
+        ],
+      }),
+    }
+  })
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: { enabled: true, protocol: 'http', host: '10.0.0.1', port: 7890 },
+          openai: { enabled: true, protocol: 'http', host: '10.0.0.2', port: 0 },
+        },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+
+    const batchBtn = findButtons(render()).find(button =>
+      textsOf(button).some(text => text.includes('测试已启用 (1)')),
+    )
+    assert.ok(batchBtn, 'the button counts only routes that would actually run')
+    batchBtn.props.onClick()
+    await settle()
+    assert.equal(tested.length, 1, 'the batch runs exactly the counted route')
+  } finally {
+    restore()
+  }
+})
+
+test('P3-h: under bypass a missing search preset does not raise a search alert', async () => {
+  const { mod, restore } = loadBundle(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      providers: [{ id: 'sensenova', name: 'SenseNova', live: true }],
+      search: { plan: 'direct', reason: 'bypass-all', hits: 0, direct: 0, failed: 0 },
+    }),
+  }))
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        bypassAll: true,
+        searchProxyStrategy: 'dedicated',
+        searchProxyProfileId: 'gone',
+        providers: { sensenova: { enabled: true, host: '10.0.0.1', port: 7890 } },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const tree = render()
+    assert.ok(
+      !alertsOf(tree).some(alert => textsOf(alert).some(text => text.includes('搜索分流正在拒绝请求'))),
+      'bypass-all makes the broken binding irrelevant, so it must not announce an alert',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('P3-l: an empty testUrl is a legal value and is not rendered as an error', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod)
+    harness.ctx.locale.getSnapshot = () => ({ locale: 'zh-CN' })
+    harness.snapshot.value.testUrl = ''
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const tree = render()
+    const hintAnchors = []
+    const walk = node => {
+      if (node === null || typeof node !== 'object') return
+      if (Array.isArray(node)) return node.forEach(walk)
+      if (textsOf(node).some(text => text.includes('Comma/space separated') || text.includes('逗号或空格分隔'))) {
+        hintAnchors.push(node)
+      }
+      if (node.children) walk(node.children)
+    }
+    walk(tree)
+    const hint = hintAnchors.find(node => node.type === 'span' && typeof node.props?.style?.color === 'string')
+      ?? hintAnchors[hintAnchors.length - 1]
+    assert.ok(hint, 'the global testUrl hint is rendered')
+    for (const node of [hint]) {
+      assert.notEqual(
+        node.props?.style?.color,
+        'var(--dsw-alias-state-error-primary, #f85149)',
+        'an empty testUrl is not an error',
+      )
+    }
+  } finally {
+    restore()
+  }
+})
+
+test('P3-o: saved providers missing from the catalogue get a read-only card', async () => {
+  const { mod, restore } = loadBundle(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      providers: [{ id: 'sensenova', name: 'SenseNova', live: true }],
+    }),
+  }))
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: { enabled: true, host: '10.0.0.1', port: 7890 },
+          anthropic: { enabled: true, host: '10.0.0.2', port: 7890 },
+        },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const tree = render()
+    const sections = []
+    const collectSections = node => {
+      if (node === null || typeof node !== 'object') return
+      if (Array.isArray(node)) { node.forEach(collectSections); return }
+      if (node.type === 'section') sections.push(node)
+      if (node.children) collectSections(node.children)
+    }
+    collectSections(tree)
+    const missing = sections.find(section => section.props?.['data-missing-provider'] === 'anthropic')
+    assert.ok(missing, 'the missing saved provider is visible as its own card')
+    assert.ok(textsOf(missing).some(text => text.includes('目录中缺失')), 'the card explains that the provider is missing')
+    const closeButton = findButtons(missing).find(button => textsOf(button).some(text => text.includes('关闭')))
+    assert.ok(closeButton, 'the read-only card can be dismissed')
+    const deleteButton = findButtons(missing).find(button => textsOf(button).some(text => text.includes('删除')))
+    assert.ok(deleteButton, 'the read-only card offers deletion')
+    assert.equal(
+      findCheckboxes(missing).length,
+      0,
+      'the missing provider must not look like it can be enabled',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('P3-m: catalogue polling self-heals after repeated fetch failures', async () => {
+  const real = {
+    setInterval: globalThis.setInterval,
+    clearInterval: globalThis.clearInterval,
+    now: Date.now,
+  }
+  let tick = () => {}
+  let calls = 0
+  let cleared = false
+  globalThis.setInterval = (fn, ms) => { if (ms === 10_000) tick = fn; return 1 }
+  globalThis.clearInterval = () => { cleared = true }
+  Date.now = () => 1_000_000
+  const { mod, requested, restore } = loadBundle(async () => {
+    calls++
+    if (calls <= 4) throw new Error('temporary outage')
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        providers: [{ id: 'recovered', name: 'Recovered', live: true }],
+      }),
+    }
+  })
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await tick()
+      await settle()
+    }
+    assert.equal(calls, 4, 'each failed tick still fetches the catalogue')
+    assert.equal(cleared, false, 'three consecutive failures must not permanently stop the poll')
+    const beforeRecovery = requested.length
+    await tick()
+    await settle()
+    assert.equal(calls, 5, 'a later tick still fetches the catalogue')
+    assert.ok(textsOf(render()).some(text => text.includes('recovered')), 'the recovered catalogue reaches the page')
+    assert.equal(cleared, false, 'a successful recovery keeps the poll alive')
+  } finally {
+    globalThis.setInterval = real.setInterval
+    globalThis.clearInterval = real.clearInterval
+    Date.now = real.now
+    restore()
+  }
+})
 // ---- N25: accessibility invariants over the WHOLE rendered page ----
 
 /**

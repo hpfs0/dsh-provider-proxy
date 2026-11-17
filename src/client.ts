@@ -151,7 +151,7 @@ export function apply(ctx: any): void {
         name: 'settings.section',
         id: NAMESPACE,
         order: 20,
-        label: () => 'Provider 代理',
+        label: () => stringsFor(ctx).sectionLabel,
       },
       () => renderPage(ctx),
     ),
@@ -5853,7 +5853,12 @@ const EN = {
   diagPending: '(collecting…)',
   catalogueMismatch: 'Saved but not listed by the Host catalogue: ',
   catalogueMismatchSuffix: '. Their proxy settings are kept.',
+  missingProviderTitle: 'Missing from catalogue',
+  missingProviderHint: 'This saved provider has no matching entry in the Host catalogue. It is not enabled; delete it or re-enable the corresponding plugin.',
+  missingDelete: 'Delete',
   saveFailedPrefix: 'Save failed: ',
+  sectionLabel: 'Provider Proxy',
+  savedPrefix: 'Saved ',
   close: 'Close',
   copy: 'Copy',
   copied: 'Copied',
@@ -6078,7 +6083,12 @@ const ZH = {
   diagPending: '（正在收集…）',
   catalogueMismatch: '已保存但未出现在 Host 目录中的 provider：',
   catalogueMismatchSuffix: '。代理配置仍会保留。',
+  missingProviderTitle: '目录中缺失',
+  missingProviderHint: '该已保存 provider 不在 Host 目录中：当前未启用，请删除该配置或重新启用对应插件。',
+  missingDelete: '删除',
   saveFailedPrefix: '保存失败：',
+  sectionLabel: 'Provider 代理',
+  savedPrefix: '已保存 ',
   close: '关闭',
   copy: '复制',
   copied: '已复制',
@@ -6147,7 +6157,7 @@ const ZH = {
  */
 function stringsFor(ctx: any): Record<string, string> {
   const language = localeOf(ctx)
-  const bundled = language === 'zh' ? ZH : EN
+  const bundled = language === 'en' ? EN : ZH
   const translated = ((): Record<string, string> | undefined => {
     try {
       const service = optionalService(ctx, 'locale')
