@@ -2385,9 +2385,7 @@ function renderPage(ctx: any): unknown {
   }
 
   const runBatchTest = (): void => {
-    const activeIds = rows
-      .filter(row => view({ ...configured[row.id], ...draft[row.id] }).enabled)
-      .map(row => row.id)
+    const activeIds = batchIds
     if (activeIds.length === 0 || batchProgress !== null) return
     setBatchProgress({ done: 0, total: activeIds.length })
 
@@ -4225,6 +4223,7 @@ function renderPage(ctx: any): unknown {
   const countActive = matchedKeywordRows.filter(r => routeStateOf(r) === 'proxied').length
   const countDirect = matchedKeywordRows.filter(r => routeStateOf(r) === 'direct').length
   const countRejected = matchedKeywordRows.filter(r => routeStateOf(r) === 'rejected').length
+  const batchIds = matchedKeywordRows.filter(r => routeStateOf(r) === 'proxied').map(r => r.id)
 
   const shown = matchedKeywordRows.filter(row => {
     if (statusFilter === 'all') return true
@@ -4295,12 +4294,12 @@ function renderPage(ctx: any): unknown {
                 style: { ...S.testButton, flex: 'none', whiteSpace: 'nowrap' },
                 type: 'button',
                 'aria-label': t.batchTest,
-                disabled: countActive === 0 || batchProgress !== null,
+                disabled: batchIds.length === 0 || batchProgress !== null,
                 onClick: runBatchTest,
               },
               batchProgress !== null
                 ? `${t.batchTesting} (${batchProgress.done}/${batchProgress.total})`
-                : `${t.batchTest} (${countActive})`,
+                : `${t.batchTest} (${batchIds.length})`,
             ),
             h(
               'button',
