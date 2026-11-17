@@ -5570,6 +5570,22 @@ function renderPage(ctx: any): unknown {
     { id: 'global', label: t.tabGlobal },
     { id: 'backup', label: t.tabBackup },
   ] as const
+  const tabIds = ['providers', 'presets', 'global', 'backup'] as const
+  const selectTab = (id: (typeof tabIds)[number]): void => {
+    setActiveTab(id)
+    writeViewPrefs({ tab: id })
+  }
+  const moveTab = (current: (typeof tabIds)[number], key: string): void => {
+    const index = tabIds.indexOf(current)
+    let next = index
+    if (key === 'ArrowRight') next = (index + 1) % tabIds.length
+    else if (key === 'ArrowLeft') next = (index - 1 + tabIds.length) % tabIds.length
+    else if (key === 'Home') next = 0
+    else if (key === 'End') next = tabIds.length - 1
+    else return
+    if (next === index) return
+    selectTab(tabIds[next])
+  }
   const tabBar = h(
     'div',
     {
@@ -5589,12 +5605,13 @@ function renderPage(ctx: any): unknown {
           id: `dsh-proxy-tab-${tab.id}`,
           'aria-selected': activeTab === tab.id,
           'aria-controls': `dsh-proxy-panel-${tab.id}`,
+          tabIndex: activeTab === tab.id ? 0 : -1,
           className: activeTab === tab.id ? styles.tabActive : styles.tab,
           style: activeTab === tab.id ? { ...S.tab, ...S.tabActive } : S.tab,
           onClick: () => {
-            setActiveTab(tab.id)
-            writeViewPrefs({ tab: tab.id })
+            selectTab(tab.id)
           },
+          onKeyDown: (event: any) => moveTab(tab.id, event?.key),
         },
         tab.label,
       ),
