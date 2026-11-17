@@ -2270,6 +2270,18 @@ function renderPage(ctx: any): unknown {
     string | undefined,
     (v: any) => void,
   ]
+  const [dismissedMissing, setDismissedMissing] = (React.useState ?? ((v: any) => [v, () => {}]))({}) as [
+    Record<string, boolean>,
+    (v: any) => void,
+  ]
+  const visibleMissing = missingFromCatalog.filter(id => dismissedMissing[id] !== true)
+  const deleteMissingProvider = (id: string): void => {
+    const next = { ...configured }
+    delete next[id]
+    void enqueueWrite(() => writeConfig(ctx, [{ op: 'set', path: ['providers'], value: next }]))
+      .then(() => setDismissedMissing((current: Record<string, boolean>) => ({ ...current, [id]: true })))
+      .catch((error: any) => setSaveError({ label: `${t.missingDelete} ${id}`, message: String(error?.message ?? error) }))
+  }
 
   const copyToClipboard = (key: string, text: string): void => {
     try {
@@ -4344,6 +4356,53 @@ function renderPage(ctx: any): unknown {
         )
       : null
 
+  const missingCards = visibleMissing.map(id =>
+    h(
+      'section',
+      {
+        key: `missing:${id}`,
+        'data-missing-provider': id,
+        'data-provider': id,
+        className: styles.missingProviderCard,
+        style: {
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '6px',
+          padding: '10px',
+          border: '1px dashed var(--dsw-alias-separator-secondary, rgba(128, 128, 128, 0.35))',
+          borderRadius: '8px',
+          color: 'var(--dsw-alias-label-secondary)',
+        },
+      },
+      h('strong', null, `${t.missingProviderTitle}：${id}`),
+      h('span', { style: S.hint }, t.missingProviderHint),
+      h(
+        'div',
+        { style: { display: 'flex', gap: '6px' } },
+        h(
+          'button',
+          {
+            type: 'button',
+            className: styles.testButton,
+            style: S.testButton,
+            onClick: () => setDismissedMissing((current: Record<string, boolean>) => ({ ...current, [id]: true })),
+          },
+          t.close,
+        ),
+        h(
+          'button',
+          {
+            type: 'button',
+            className: styles.testButton,
+            style: S.testButton,
+            onClick: () => deleteMissingProvider(id),
+          },
+          t.missingDelete,
+        ),
+      ),
+    ),
+  )
+
   // ALWAYS an array: a single element is not iterable, and spreading one threw
   // "Spread syntax requires ...iterable[Symbol.iterator]" on an empty list.
   const body: unknown[] = shown.length === 0
@@ -5145,6 +5204,7 @@ function renderPage(ctx: any): unknown {
         }
         return cardSection
       })
+  body.unshift(...missingCards)
 
   const isZh = t.protocol === '类型'
   const effectiveConfigured = Object.fromEntries(
