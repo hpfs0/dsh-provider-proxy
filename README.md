@@ -2,6 +2,11 @@
 
 给 **DeepSeek Harness**（`0.2.0-rc.1` 及以上）用的插件：在 **设置** 里为**每个 provider 单独配置**「这个 provider 要不要走代理」，填写代理类型 + IP/端口。只有被你打开开关的 provider 走代理，其余 provider 和 DSH 的其它流量保持原来的直连路径。
 
+**v1.4.0 (High Availability & Failover)** 带来生产级高可用容灾与重试：
+- **主备代理多节点故障自动切换 (N26 Active-Standby Failover)**：卡片及默认代理支持指定最多 3 个备用预设节点。主节点在连接建立阶段宕机时自动按序切换至健康备用节点（零请求重复、安全 fail-closed）；界面展示接管态，主节点恢复并冷却后自动切回（Failback）。
+- **请求级智能指数退避重试 (N29 Smart Request Retry)**：提供基于 Full Jitter 的退避重试策略（0-3 次，默认 0 关闭）。仅在连接建立阶段异常或 HTTP 502/503/504 且上游未产出数据时安全重发，严格规避 4xx/凭据失效、流式截断及 `ECONNRESET` 非幂等重发。
+- **备份升级至 Schema v4**：无缝持久化主备多节点与退避重试配置，全面兼容 v1/v2/v3 备份平滑导入。
+
 **v1.3.0 (Backup & Observability)** 把「恢复＝整体替换」补齐：备份升级到 **Schema v3**，新增 `enableFallbackDirect` 安全开关；仪表盘成功率与平均延迟统一为**近 24 小时窗口**、纳入真实请求 / 自检 / 心跳探针；同时修复英文界面中文残留、页签键盘导航、批量测试范围、目录缺失 provider 只读卡、轮询自愈等可观测性与无障碍问题。
 
 v1.2.0 **（Routing Hardening）** 做路由加固：**域名规则归一化**（全角逗号 / 尾点 / 连续点 / `.*`）让页面提示与真实路由来自同一份解析，**降级直连只在连接建立阶段触发**（不再重发可能已送达上游的请求），并修复旁路模式下自检与卡片结论、设置写入误关未发请求的流、预设绑定与搜索分流不同步等问题。1.1.x 的配置与备份均无需迁移。
@@ -121,6 +126,28 @@ dsh plugin --profile web add dsh-provider-proxy
 - **累计转发请求量**：展示当前会话经由代理中转的累计请求次数（千分符格式化，如 `1,420`），数字右侧配有 **重置** 按钮，一键清零计数（调用 Host `/dsh-provider-proxy/reset-hits`）。
 - **全局紧急旁路开关 (Bypass All)**：仪表盘右上角提供全局旁路总控。开启后整机所有 Provider 流量瞬间全量直连上游，卡片头上统一显示警示条；**不会改写各个卡片的现有配置**，关闭后瞬间恢复原有每张卡片的代理规则，极大简化代理故障时的对比排查。
 
+### 主备代理多节点故障自动切换（1.4.0 / N26）
+
+为了在保证零出口 IP 泄露（Fail-closed）的前提下获得极致的可用性，1.4.0 支持在每张卡片或默认代理中配置**主备多节点自动切换**（`backupProfileIds`，最多 3 个备用预设）及总开关 `enableProxyFailover`：
+- **按序接管**：请求优先经由主节点发出；若主节点在连接建立阶段异常（`ECONNREFUSED`、`ETIMEDOUT` 等未接触上游的错误），按序尝试备用节点列表。
+- **状态感知**：备用节点接管成功后，卡片「最近调用」显示 `[故障切换: 备用节点 <profileId>]`，紧凑行显示 `节点A（主） / 节点B（备用接管中）`。
+- **自动恢复（Failback）**：主节点故障后进入 10 秒冷却；冷却期后请求尝试切回主节点，主节点探测恢复后自动撤销接管。
+- **多层兜底**：当所有备用节点均不可用时，遵循安全原则：若开启了 `enableFallbackDirect` 则降级直连，否则严格阻断抛出错误，决不静默破坏代理策略。
+
+### 请求级智能指数退避重试（1.4.0 / N29）
+
+在 **全局设置** 中新增请求级指数退避重试控制（`retryAttempts` 0~3 次，默认 0 关闭；`retryBackoffBaseMs` 默认 200 ms）：
+- **安全重试范围**：
+  - TCP/TLS/CONNECT/SOCKS5 握手阶段失败（`ECONNREFUSED`、`EHOSTUNREACH`、`ENETUNREACH`、`ConnectTimeoutError`）；
+  - HTTP 502 / 503 / 504 网关异常（且响应流尚未开始向调用方输出数据）。
+- **严格禁止重试**：
+  - 400（参数错误）、401/403（凭据失效）、407（代理认证失败）；
+  - 响应流已产生第一个 chunk；
+  - 任何已可能到达上游的场景（`ECONNRESET`、调用方超时、body 为不可重复读取的 `ReadableStream`）。
+- **Full Jitter 指数退避**：
+  $$\text{Delay} = \text{random}(0, \min(5000, \text{baseMs} \times 2^{\text{attempt}}))$$
+  通过引入全抖动打散重试流量，规避集群雪崩效应。
+
 ### 故障容灾自动降级（1.0.0 / 1.2.0 边界收窄）
 
 日常高频对话中，本地代理客户端（如 Clash/V2Ray）偶发崩溃、系统休眠唤醒或端口拒绝连接（`ECONNREFUSED`、`ETIMEDOUT`、`EHOSTUNREACH` 等网络级故障）可能直接导致问答流中断。
@@ -185,26 +212,21 @@ dsh plugin --profile web add dsh-provider-proxy
 它是**追加**而不是覆盖：你自己加的中转主机不会被丢掉；已经存在的同名规则（含 `*.` 写法差异）不会重复写入。
 模板里的每一项都保证能通过死规则检查；未知 provider 不显示这个按钮，避免猜错主机名把流量限死。
 
-### 配置备份与恢复（0.9.0 / 1.1.0 / 1.3.0）
+### 配置备份与恢复（0.9.0 / 1.1.0 / 1.3.0 / 1.4.0）
 
 **备份与恢复** 现在是设置页的一个独立页签：
 
 - **导出**会先问一次「是否包含代理密码？」——默认不含（取消即脱敏）。文件名为
   `dsh-proxy-backup-<日期>.json`，内容包含 `providers`、`proxyProfiles`、`defaultProxy`、
-  `localDirect`、`testUrl`，以及 1.1.0 的三个心跳字段
-  （`heartbeatEnabled` / `heartbeatInterval` / `heartbeatConsecutiveFails`）与两个分流字段
-  （`searchProxyStrategy` / `searchProxyProfileId`）；1.3.0 起备份版本为 `version: 3`，并携带
-  `enableFallbackDirect`（默认 `false`，不在备份里携带任何密码以外的凭据语义）。
+  `localDirect`、`testUrl`，1.1.0 的心跳与分流字段，1.3.0 的 `enableFallbackDirect`；
+  **1.4.0 起备份升级为 `version: 4`**，完整持久化主备容灾（`backupProfileIds`、`enableProxyFailover`）
+  与智能重试（`retryAttempts`、`retryBackoffBaseMs`）配置。
 - **导入**先解析并校验类型，不合法会直接报错且**不改动现有配置**；合法则弹确认框显示将覆盖多少个
-  provider / 预设，确认后**一次**写入覆盖全部十段。缺字段按 schema 默认补齐。
-- **向后兼容**：0.8.0（没有 `proxyProfiles`、没有 `version`）、1.0.0（`version: 1`，带
-  `proxyTls`）、1.1.0 / 1.2.0（`version: 2`）文件都能直接导入。旧文件缺少的 1.1.0 段按**当前默认值**
-  补齐——心跳保持关闭、搜索保持继承；1.3.0 的 `enableFallbackDirect` 缺失时按**安全默认值 `false`**
-  补齐。因为恢复是「整体替换」，让未提及的开关沿用还原前的状态会让结果取决于上一个状态，而不是文件。
-- **降级提示**：`version: 3` 的备份会被 1.2.x 及更早版本明确拒绝。**降级前请先导出一份 `version: 2`
-  兼容文件并妥善保存**，再用旧版本导入；不要依赖旧版直接读取新版文件。
-- **来自更新版本的文件会被拒绝**（`version` 大于本版本支持的上限）：那种文件的键可能已被改写，
-  与其半途覆盖，不如给出一条明确的错误。
+  provider / 预设，确认后**一次**写入覆盖全部字段。缺字段按 schema 默认补齐。
+- **向后兼容**：0.8.0（无 `version`）、1.0.0（`version: 1`）、1.1.0/1.2.0（`version: 2`）、
+  1.3.0（`version: 3`）文件均能直接导入。旧文件缺少的字段按安全默认值自动补齐（备用节点空、切换关闭、重试关闭）。
+- **降级提示**：`version: 4` 的备份会被 1.3.x 及更早版本明确拒绝。**降级前请先导出一份兼容旧版的文件并妥善保存**。
+- **来自更新版本的文件会被拒绝**（`version > 4`）：避免未知结构导致半途覆盖。
 - 脱敏导出把每个密码字段写成空字符串（而不是删掉），所以文件里能一眼看出「这里被脱敏了」；
   脱敏覆盖**每一个**端点形态——卡片、命名预设、默认代理，以及 1.1.0 新增的 SOCKS5 over TLS 端点，
   而 `proxyTls` / `proxyTlsRejectUnauthorized` 属于配置、会被保留。恢复脱敏备份后，代理密码需要重新填写。
@@ -271,8 +293,12 @@ Host catalog 是否列出某个 provider（`live`）不影响已保存路由的�
 | `heartbeatConsecutiveFails` | `2` | 连续失败多少次判定为「失联」并亮红预警 |
 | `searchProxyStrategy` | `inherit` | 搜索流量分流：`inherit` / `dedicated` / `direct` / `custom`（见上节） |
 | `searchProxyProfileId` | `''` | `dedicated` 绑定的预设名；留空表示用「Web 搜索」卡片自带的端点 |
+| `retryAttempts` | `0` | 请求级重试次数上限（0~3，默认 0 关闭；仅限连接建立异常或 502/503/504 未消费流时） |
+| `retryBackoffBaseMs` | `200` | Full Jitter 指数退避的基础基准毫秒数（默认 200 ms） |
 
-每个 `providers.<id>` 除原有的 `enabled` / `useDefault` 等字段外，0.9.0 起还接受 `profileId`（默认 `''`）。
+每个 `providers.<id>` 除原有的 `enabled` / `useDefault` 等字段外，0.9.0 起还接受 `profileId`（默认 `''`），1.4.0 起新增：
+- `backupProfileIds`（`string[]`，默认 `[]`）：备用代理预设列表，主节点故障时按序自动接管，最多 3 个；
+- `enableProxyFailover`（`boolean`，默认 `false`）：主备自动切换总开关。
 `profileId` 非空时该路由的传输字段整体取自 `proxyProfiles[profileId]`，并优先于 `useDefault`；
 目标域名规则与自检目标始终是卡片自己的。
 
