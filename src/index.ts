@@ -126,6 +126,10 @@ interface ProxyConfig {
   readonly searchProxyStrategy?: unknown
   /** The preset a `dedicated` search strategy routes through, or the wrapper. */
   readonly searchProxyProfileId?: unknown
+  /** Maximum retry attempts on connection error or 502/503/504 (0-3, default 0: off) (N29). */
+  readonly retryAttempts?: unknown
+  /** Base delay in ms for Full Jitter exponential backoff (default 200) (N29). */
+  readonly retryBackoffBaseMs?: unknown
 }
 
 function plainProviders(
@@ -203,6 +207,18 @@ function plainHeartbeatConsecutiveFails(config: ProxyConfig | undefined): number
 }
 function plainEnableFallbackDirect(config: ProxyConfig | undefined): boolean {
   return fiberBool(config?.enableFallbackDirect)
+}
+
+function plainRetryAttempts(config: ProxyConfig | undefined): number {
+  const val = fiberNumber(config?.retryAttempts)
+  if (val === undefined || Number.isNaN(val)) return 0
+  return Math.max(0, Math.min(3, Math.floor(val)))
+}
+
+function plainRetryBackoffBaseMs(config: ProxyConfig | undefined): number {
+  const val = fiberNumber(config?.retryBackoffBaseMs)
+  if (val === undefined || Number.isNaN(val) || val < 0) return 200
+  return Math.floor(val)
 }
 
 /**
@@ -372,6 +388,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
       code?: string
       fallback?: boolean
       failoverProfileId?: string
+      retries?: number
     }
   >()
   const bump = (provider: string, token: number | undefined): void => {
@@ -384,7 +401,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
   const settle = (provider: string, token: number | undefined) => (
     ok: boolean,
     detail: unknown,
-    meta?: { fallback?: boolean; failoverProfileId?: string },
+    meta?: { fallback?: boolean; failoverProfileId?: string; retries?: number },
   ): void => {
     if (routeStates.get(provider)?.token !== token) return
     const previous = lastUse.get(provider)
@@ -395,6 +412,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
         ok: true,
         code: `[故障切换: 备用节点 ${meta.failoverProfileId}]`,
         failoverProfileId: meta.failoverProfileId,
+        ...(meta.retries ? { retries: meta.retries } : {}),
       })
     } else if (meta?.fallback && ok) {
       lastUse.set(provider, {
@@ -403,6 +421,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
         ok: true,
         code: '[告警: 代理宕机，已降级直连]',
         fallback: true,
+        ...(meta.retries ? { retries: meta.retries } : {}),
       })
     } else {
       lastUse.set(provider, {
@@ -411,6 +430,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
         ok,
         code: ok ? String((detail as { status?: unknown } | undefined)?.status ?? '') : failureCodeOf(detail),
         ...(meta?.fallback ? { fallback: true } : {}),
+        ...(meta?.retries ? { retries: meta.retries } : {}),
       })
       if (ok) {
         const hb = heartbeatStates.get(provider)
@@ -1793,6 +1813,8 @@ export function apply(ctx: any, config?: ProxyConfig): void {
           },
           enableFallbackDirect: plainEnableFallbackDirect(config),
           bypassAll: plainBypassAll(config),
+          retryAttempts: plainRetryAttempts(config),
+          retryBackoffBaseMs: plainRetryBackoffBaseMs(config),
           onLeaseRelease: release,
         },
         () => original.call(this, request, signal),
@@ -1856,6 +1878,8 @@ export function apply(ctx: any, config?: ProxyConfig): void {
             decide: route.decide,
             enableFallbackDirect: plainEnableFallbackDirect(config),
             bypassAll: plainBypassAll(config),
+            retryAttempts: plainRetryAttempts(config),
+            retryBackoffBaseMs: plainRetryBackoffBaseMs(config),
             onLeaseRelease: release,
           },
           next as () => AsyncIterable<unknown>,
@@ -1953,6 +1977,7 @@ export {
   canReplayRequest,
   kNativeFetch,
   isNetworkFailoverError,
+  fullJitterBackoff,
 } from './fetch-router.js'
 export type { TrafficContext, TrafficType } from './fetch-router.js'
 export {

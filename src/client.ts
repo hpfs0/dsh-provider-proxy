@@ -1138,9 +1138,10 @@ const HEARTBEAT_GLOBAL_FIELDS = new Set(['heartbeatEnabled', 'heartbeatInterval'
  * probes that card's own endpoint, so its cached answer is still valid.
  */
 const SEARCH_GLOBAL_FIELDS = new Set(['searchProxyStrategy', 'searchProxyProfileId'])
+const RETRY_GLOBAL_FIELDS = new Set(['retryAttempts', 'retryBackoffBaseMs'])
 
 /** Global fields whose edit must NOT invalidate cached self-check answers. */
-const TEST_NEUTRAL_GLOBAL_FIELDS = new Set([...HEARTBEAT_GLOBAL_FIELDS, ...SEARCH_GLOBAL_FIELDS])
+const TEST_NEUTRAL_GLOBAL_FIELDS = new Set([...HEARTBEAT_GLOBAL_FIELDS, ...SEARCH_GLOBAL_FIELDS, ...RETRY_GLOBAL_FIELDS])
 
 /** The provider directory, cached module-side. See renderPage. */
 let directoryCache: ProviderRow[] | undefined
@@ -2540,7 +2541,7 @@ function renderPage(ctx: any): unknown {
   }
 
   /** One advanced global control: draft, persist, and invalidate cached checks only when the routing verdict can change. */
-  const bindGlobal = (field: 'testUrl' | 'localDirect' | 'enableFallbackDirect' | 'bypassAll' | 'heartbeatEnabled' | 'heartbeatInterval' | 'heartbeatConsecutiveFails' | 'searchProxyStrategy' | 'searchProxyProfileId') => (value: unknown) => {
+  const bindGlobal = (field: 'testUrl' | 'localDirect' | 'enableFallbackDirect' | 'bypassAll' | 'heartbeatEnabled' | 'heartbeatInterval' | 'heartbeatConsecutiveFails' | 'searchProxyStrategy' | 'searchProxyProfileId' | 'retryAttempts' | 'retryBackoffBaseMs') => (value: unknown) => {
     editGlobal(field, value)
     if (!TEST_NEUTRAL_GLOBAL_FIELDS.has(field)) invalidateTests(rows.map(row => row.id))
     save(`\u0000global\u0000${field}`, [field], field, value, () => {
@@ -4367,6 +4368,50 @@ function renderPage(ctx: any): unknown {
         `${t.searchPlanPrefix}${searchPlanText}`,
       ),
     ),
+    h(
+      'div',
+      { className: styles.searchSplitBox, style: S.searchSplitBox, key: 'retry-settings' },
+      h('span', { style: S.searchSplitTitle }, t.retryTitle),
+      h(
+        'div',
+        { style: { display: 'flex', gap: '16px', marginTop: '8px', flexWrap: 'wrap' } },
+        h(
+          'label',
+          { className: styles.field, style: { ...S.field, flex: '1 1 200px' } },
+          h('span', { className: styles.label, style: S.label }, t.retryAttempts),
+          h('input', {
+            className: styles.input,
+            style: S.input,
+            type: 'number',
+            min: 0,
+            max: 3,
+            value: globalRetryAttempts,
+            onChange: (event: any) =>
+              bindGlobal('retryAttempts')(Math.max(0, Math.min(3, parseInt(event.target.value, 10) || 0))),
+            'aria-label': t.retryAttempts,
+          }),
+          h('span', { className: styles.hint, style: S.hint }, t.retryAttemptsHint),
+        ),
+        h(
+          'label',
+          { className: styles.field, style: { ...S.field, flex: '1 1 200px' } },
+          h('span', { className: styles.label, style: S.label }, t.retryBackoffBaseMs),
+          h('input', {
+            className: styles.input,
+            style: S.input,
+            type: 'number',
+            min: 50,
+            max: 5000,
+            step: 50,
+            value: globalRetryBackoffBaseMs,
+            onChange: (event: any) =>
+              bindGlobal('retryBackoffBaseMs')(Math.max(0, parseInt(event.target.value, 10) || 200)),
+            'aria-label': t.retryBackoffBaseMs,
+          }),
+          h('span', { className: styles.hint, style: S.hint }, t.retryBackoffBaseMsHint),
+        ),
+      ),
+    ),
   ],
   })
 
@@ -6065,6 +6110,11 @@ const EN = {
   heartbeatAlertCountUnit: 'proxy node(s) unreachable',
   heartbeatUnreachableTag: 'Heartbeat Unreachable',
   heartbeatProbeFailing: 'Probe failing',
+  retryTitle: 'Request Retry (N29)',
+  retryAttempts: 'Retry Attempts',
+  retryAttemptsHint: 'Number of times to retry requests failing during connection establishment or 502/503/504 (0-3, default 0: off).',
+  retryBackoffBaseMs: 'Base Backoff (ms)',
+  retryBackoffBaseMsHint: 'Base delay for Full Jitter exponential backoff in milliseconds (default 200).',
   searchSplitTitle: 'Search traffic split',
   searchStrategy: 'Search routing strategy',
   searchStrategyInherit: 'Inherit: follow the Web Search card',
@@ -6303,6 +6353,11 @@ const ZH = {
   heartbeatAlertCountUnit: '个代理节点连通中断',
   heartbeatUnreachableTag: '心跳失联',
   heartbeatProbeFailing: '探测失败',
+  retryTitle: '请求级重试 (N29)',
+  retryAttempts: '重试次数',
+  retryAttemptsHint: '仅限连接建立阶段失败或 HTTP 502/503/504 时自动重试（0-3 次，默认 0：关闭）。',
+  retryBackoffBaseMs: '退避基础延迟 (ms)',
+  retryBackoffBaseMsHint: 'Full Jitter 指数退避的基础基准毫秒数（默认 200）。',
   searchSplitTitle: '搜索流量分流',
   searchStrategy: '搜索分流策略',
   searchStrategyInherit: '继承：沿用 Web 搜索卡片',

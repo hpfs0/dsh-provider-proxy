@@ -146,6 +146,16 @@ export function canReplayRequest(input: unknown, init: unknown): boolean {
   return false
 }
 
+/**
+ * Full Jitter exponential backoff (N29):
+ * Delay = random(0, min(maxDelayMs, baseMs * 2^attempt))
+ */
+export function fullJitterBackoff(attempt: number, baseMs: number, maxDelayMs = 5000): number {
+  if (baseMs <= 0) return 0
+  const cap = Math.min(maxDelayMs, baseMs * Math.pow(2, attempt))
+  return Math.floor(Math.random() * (cap + 1))
+}
+
 export interface StandbyDispatcher {
   profileId: string
   dispatcher: DispatcherLike
@@ -161,6 +171,12 @@ export interface RouterStore {
   markPrimaryRecovered?: () => void
   primaryFailedAt?: number
   onFailover?: (profileId: string) => void
+  /** Maximum retry attempts on connection error or 502/503/504 (0-3, default 0: off) (N29). */
+  retryAttempts?: number
+  /** Base delay in ms for Full Jitter exponential backoff (default 200) (N29). */
+  retryBackoffBaseMs?: number
+  /** Hook called whenever a retry attempt is initiated (N29). */
+  onRetry?: (attempt: number, reason: unknown) => void
   /** Called once per request that actually leaves through the proxy. */
   onHit?: () => void
   /**
@@ -179,7 +195,7 @@ export interface RouterStore {
    * unclassified so the caller can name the failure with whatever error
    * vocabulary it already has.
    */
-  onSettle?: (ok: boolean, detail: unknown, meta?: { fallback?: boolean; failoverProfileId?: string }) => void
+  onSettle?: (ok: boolean, detail: unknown, meta?: { fallback?: boolean; failoverProfileId?: string; retries?: number }) => void
   /**
    * Decide whether one request is proxied or sent directly, given its target
    * host (`undefined` when the input carries no parsable URL). Absent means
@@ -352,31 +368,69 @@ function installSharedRouter(): RouterState {
     let isFallback = false
     let failoverProfileId: string | undefined
 
+    const maxRetries = Math.max(0, Math.min(3, active.retryAttempts ?? 0))
+    const baseBackoffMs = active.retryBackoffBaseMs ?? 200
+    let totalRetries = 0
+
     const execute = async (): Promise<any> => {
       let lastError: unknown
       for (let i = 0; i < candidates.length; i++) {
         const candidate = candidates[i]
-        try {
-          const response = await undiciFetch(input as never, {
-            ...(init as Record<string, unknown> | undefined),
-            dispatcher: candidate.dispatcher as never,
-          } as never)
+        while (true) {
+          try {
+            const response = await undiciFetch(input as never, {
+              ...(init as Record<string, unknown> | undefined),
+              dispatcher: candidate.dispatcher as never,
+            } as never)
 
-          if (candidate.kind === 'primary') {
-            setPrimaryRecovered()
-          } else {
-            failoverProfileId = candidate.profileId
-            active.onFailover?.(candidate.profileId)
-          }
-          return response
-        } catch (error: unknown) {
-          lastError = error
-          // Only connection-establishment errors with replayable bodies are allowed to failover
-          if (!isNetworkFailoverError(error) || !canReplayRequest(input, init)) {
-            throw error
-          }
-          if (candidate.kind === 'primary') {
-            setPrimaryFailed()
+            // N29: HTTP 502/503/504 retryable if body is replayable and retries remain
+            if (
+              typeof response?.status === 'number' &&
+              (response.status === 502 || response.status === 503 || response.status === 504) &&
+              totalRetries < maxRetries &&
+              canReplayRequest(input, init)
+            ) {
+              totalRetries += 1
+              active.onRetry?.(totalRetries, response)
+              try {
+                await response.body?.cancel?.()
+              } catch {}
+              const delay = fullJitterBackoff(totalRetries - 1, baseBackoffMs)
+              if (delay > 0) {
+                await new Promise(r => setTimeout(r, delay))
+              }
+              continue
+            }
+
+            if (candidate.kind === 'primary') {
+              setPrimaryRecovered()
+            } else {
+              failoverProfileId = candidate.profileId
+              active.onFailover?.(candidate.profileId)
+            }
+            return response
+          } catch (error: unknown) {
+            lastError = error
+            // Only connection-establishment errors with replayable bodies are allowed to retry/failover
+            if (!isNetworkFailoverError(error) || !canReplayRequest(input, init)) {
+              throw error
+            }
+
+            // N29: retry connection errors on current candidate before failing over
+            if (totalRetries < maxRetries) {
+              totalRetries += 1
+              active.onRetry?.(totalRetries, error)
+              const delay = fullJitterBackoff(totalRetries - 1, baseBackoffMs)
+              if (delay > 0) {
+                await new Promise(r => setTimeout(r, delay))
+              }
+              continue
+            }
+
+            if (candidate.kind === 'primary') {
+              setPrimaryFailed()
+            }
+            break
           }
         }
       }
@@ -403,9 +457,9 @@ function installSharedRouter(): RouterState {
         .then(
           (response: any) => {
             const ok = typeof response?.status === 'number' ? response.status < 500 : true
-            settle(ok, response, { fallback: isFallback, failoverProfileId })
+            settle(ok, response, { fallback: isFallback, failoverProfileId, retries: totalRetries })
           },
-          (error: unknown) => settle(false, error, { fallback: isFallback, failoverProfileId }),
+          (error: unknown) => settle(false, error, { fallback: isFallback, failoverProfileId, retries: totalRetries }),
         )
         .catch(() => undefined)
     }
