@@ -73,6 +73,8 @@ type RouteValue = {
   onlyHosts: string
   bypassHosts: string
   testTarget: string
+  backupProfileIds: string[]
+  enableProxyFailover: boolean
 }
 
 /** One named preset, as the page holds it. */
@@ -84,6 +86,8 @@ type ProfileValue = {
   password: string
   proxyTls: boolean
   proxyTlsRejectUnauthorized: boolean
+  backupProfileIds: string[]
+  enableProxyFailover: boolean
 }
 
 /** The provider rows we know about, and which of them are actually live. */
@@ -594,6 +598,7 @@ type LastUse = {
   ok?: boolean
   code?: string
   fallback?: boolean
+  failoverProfileId?: string
 }
 
 type HeartbeatState = {
@@ -773,6 +778,9 @@ async function fetchCatalog(): Promise<Catalog> {
         ...(typeof entry.ok === 'boolean' ? { ok: entry.ok } : {}),
         ...(typeof entry.code === 'string' && entry.code.length > 0 ? { code: entry.code } : {}),
         ...(entry.fallback === true ? { fallback: true } : {}),
+        ...(typeof entry.failoverProfileId === 'string' && entry.failoverProfileId.length > 0
+          ? { failoverProfileId: entry.failoverProfileId }
+          : {}),
       }
     }
   }
@@ -884,12 +892,14 @@ function view(route: Partial<RouteValue> | undefined): RouteValue {
     onlyHosts: route?.onlyHosts ?? '',
     bypassHosts: route?.bypassHosts ?? '',
     testTarget: route?.testTarget ?? '',
+    backupProfileIds: Array.isArray(route?.backupProfileIds) ? [...route!.backupProfileIds] : [],
+    enableProxyFailover: route?.enableProxyFailover === true,
   }
 }
 
 /** Schema defaults for one preset, so a half-filled one still renders. */
 function profileView(profile: Partial<ProfileValue> | undefined): ProfileValue {
-  return {
+  const result: ProfileValue = {
     protocol: PROTOCOLS.includes(profile?.protocol as Protocol)
       ? (profile!.protocol as Protocol)
       : 'http',
@@ -899,7 +909,16 @@ function profileView(profile: Partial<ProfileValue> | undefined): ProfileValue {
     password: typeof profile?.password === 'string' ? profile.password : '',
     proxyTls: profile?.proxyTls === true,
     proxyTlsRejectUnauthorized: profile?.proxyTlsRejectUnauthorized !== false,
+    backupProfileIds: Array.isArray(profile?.backupProfileIds) ? [...profile!.backupProfileIds] : [],
+    enableProxyFailover: profile?.enableProxyFailover === true,
   }
+  if (!result.backupProfileIds.length) {
+    delete (result as any).backupProfileIds
+  }
+  if (!result.enableProxyFailover) {
+    delete (result as any).enableProxyFailover
+  }
+  return result
 }
 
 /** Drop the brackets WHATWG URL keeps on an IPv6 literal host. */
@@ -2000,6 +2019,10 @@ function renderPage(ctx: any): unknown {
     const use = lastUse[id]
     if (use === undefined) return undefined
     const tag = RESERVED_PROVIDER_IDS.has(id) ? t.trafficSearchTag : t.trafficReasoningTag
+    if (typeof use.failoverProfileId === 'string' && use.failoverProfileId.length > 0) {
+      const alertMsg = typeof t.failoverAlert === 'function' ? t.failoverAlert(use.failoverProfileId) : `[故障切换: 备用节点 ${use.failoverProfileId}]`
+      return `${tag} ${alertMsg}（${relativeTime(use.at ?? use.startedAt ?? Date.now(), t)}）`
+    }
     if (use.fallback === true || use.code === '[告警: 代理宕机，已降级直连]') {
       return `${tag} ${t.fallbackAlert}（${relativeTime(use.at ?? use.startedAt ?? Date.now(), t)}）`
     }
@@ -3186,7 +3209,7 @@ function renderPage(ctx: any): unknown {
         style: {
           margin: '8px 0 2px',
           padding: '10px 12px',
-          borderRadius: '8px',
+          borderRadius: '10px',
           border: '1px solid var(--dsw-alias-border-l1)',
           background: 'var(--dsw-alias-bg-layer-1)',
         },
@@ -3253,6 +3276,102 @@ function renderPage(ctx: any): unknown {
                   t.proxyTlsInsecureWarning,
                 )
               : null,
+          )
+        : null,
+    )
+
+  const failoverControls = (
+    prefix: string,
+    enableProxyFailover: boolean,
+    backupProfileIds: string[],
+    availableProfiles: string[],
+    onToggleFailover: (enabled: boolean) => void,
+    onChangeBackups: (ids: string[]) => void,
+  ): unknown =>
+    h(
+      'div',
+      {
+        className: styles.failoverContainer,
+        style: {
+          margin: '8px 0 2px',
+          padding: '10px 12px',
+          borderRadius: '10px',
+          border: '1px solid var(--dsw-alias-border-l1)',
+          background: 'var(--dsw-alias-bg-layer-1)',
+        },
+        key: `${prefix}:failover`,
+      },
+      h(
+        'label',
+        { className: styles.toggle, style: S.toggle },
+        h('input', {
+          type: 'checkbox',
+          role: 'switch',
+          'aria-checked': enableProxyFailover,
+          'aria-label': t.enableProxyFailover,
+          checked: enableProxyFailover,
+          onChange: (event: any) => onToggleFailover(event.target.checked === true),
+        }),
+        h('span', { style: { fontWeight: 500 } }, t.enableProxyFailover),
+      ),
+      h(
+        'p',
+        { className: styles.hint, style: { ...S.hint, margin: '2px 0 0' } },
+        t.enableProxyFailoverHint,
+      ),
+      enableProxyFailover
+        ? h(
+            'div',
+            {
+              style: {
+                marginTop: '8px',
+                paddingLeft: '10px',
+                borderLeft: '2px solid var(--dsw-alias-border-l1)',
+              },
+            },
+            h(
+              'div',
+              { style: { fontSize: '12px', fontWeight: 500, marginBottom: '6px' } },
+              t.backupProfilesLabel,
+            ),
+            [0, 1, 2].map(index => {
+              const currentId = backupProfileIds[index] ?? ''
+              return h(
+                'div',
+                {
+                  key: `${prefix}:standby-slot-${index}`,
+                  style: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' },
+                },
+                h(
+                  'span',
+                  { style: { fontSize: '11px', color: 'var(--dsw-alias-label-secondary)', minWidth: '70px' } },
+                  typeof t.backupProfileSlot === 'function' ? t.backupProfileSlot(index + 1) : `备用节点 ${index + 1}`,
+                ),
+                h(
+                  'select',
+                  {
+                    className: styles.input,
+                    style: { ...S.input, flex: 1, padding: '4px 8px', fontSize: '12px' },
+                    value: currentId,
+                    onChange: (event: any) => {
+                      const nextVal = event.target.value
+                      const copy = [...backupProfileIds]
+                      if (nextVal) {
+                        copy[index] = nextVal
+                      } else {
+                        copy.splice(index, 1)
+                      }
+                      const filtered = copy.filter((id, idx, arr) => id && arr.indexOf(id) === idx).slice(0, 3)
+                      onChangeBackups(filtered)
+                    },
+                  },
+                  h('option', { value: '' }, t.profileNoneOption || '(无)'),
+                  ...availableProfiles.map(p =>
+                    h('option', { key: p, value: p }, p),
+                  ),
+                ),
+              )
+            }),
           )
         : null,
     )
@@ -3368,6 +3487,16 @@ function renderPage(ctx: any): unknown {
           defaultView.proxyTlsRejectUnauthorized,
           enabled => bindDefault('proxyTls')(enabled),
           insecure => bindDefault('proxyTlsRejectUnauthorized')(!insecure),
+        )
+      : null,
+    profileEntries.length > 0
+      ? failoverControls(
+          'default',
+          defaultView.enableProxyFailover,
+          defaultView.backupProfileIds,
+          profileEntries.map(e => e.name),
+          enabled => bindDefault('enableProxyFailover')(enabled),
+          ids => bindDefault('backupProfileIds')(ids),
         )
       : null,
     // Bulk opt-in, in ONE write: a per-card walk would rebuild the table N times.
@@ -3686,6 +3815,16 @@ function renderPage(ctx: any): unknown {
               entry.value.proxyTlsRejectUnauthorized,
               enabled => bindProfile(entry.name, 'proxyTls')(enabled),
               insecure => bindProfile(entry.name, 'proxyTlsRejectUnauthorized')(!insecure),
+            )
+          : null,
+        profileEntries.length > 1
+          ? failoverControls(
+              `profile:${entry.name}`,
+              entry.value.enableProxyFailover,
+              entry.value.backupProfileIds,
+              profileEntries.map(e => e.name).filter(n => n !== entry.name),
+              enabled => bindProfile(entry.name, 'enableProxyFailover')(enabled),
+              ids => bindProfile(entry.name, 'backupProfileIds')(ids),
             )
           : null,
       )
@@ -4654,6 +4793,24 @@ function renderPage(ctx: any): unknown {
                     `${t.hitCountPrefix}${hits[row.id] ?? 0}${t.hitCountSuffix}`,
                   )
                 : null,
+              lastUse[row.id]?.failoverProfileId
+                ? h(
+                    'span',
+                    {
+                      className: styles.searchBadge,
+                      style: {
+                        ...S.searchBadge,
+                        color: 'var(--dsw-alias-state-warning-primary, #d29922)',
+                        borderColor: 'var(--dsw-alias-state-warning-border, rgba(210, 153, 34, 0.4))',
+                        backgroundColor: 'var(--dsw-alias-state-warning-subtle, rgba(210, 153, 34, 0.12))',
+                      },
+                      key: `${row.id}:failover-badge`,
+                    },
+                    typeof t.standbyTakingOverBadge === 'function'
+                      ? t.standbyTakingOverBadge(lastUse[row.id]!.failoverProfileId)
+                      : `${lastUse[row.id]!.failoverProfileId}（备用接管中）`,
+                  )
+                : null,
               heartbeatBadge(row.id, route.enabled),
               globalHeartbeatEnabled && route.enabled && heartbeat[row.id]?.status === 'unreachable'
                 ? h(
@@ -4673,7 +4830,7 @@ function renderPage(ctx: any): unknown {
                     {
                       style: {
                         ...S.hits,
-                        ...(lastUse[row.id]?.fallback === true ? S.fallbackWarning : lastUse[row.id]?.ok === false ? S.inheritWarning : {}),
+                        ...(lastUse[row.id]?.failoverProfileId !== undefined ? S.fallbackWarning : lastUse[row.id]?.fallback === true ? S.fallbackWarning : lastUse[row.id]?.ok === false ? S.inheritWarning : {}),
                       },
                     },
                     lastText,
@@ -4811,6 +4968,16 @@ function renderPage(ctx: any): unknown {
                       route.proxyTlsRejectUnauthorized,
                       enabled => bind(row.id, 'proxyTls')(enabled),
                       insecure => bind(row.id, 'proxyTlsRejectUnauthorized')(!insecure),
+                    )
+                  : null,
+                profileEntries.length > 0
+                  ? failoverControls(
+                      row.id,
+                      route.enableProxyFailover,
+                      route.backupProfileIds,
+                      profileEntries.map(e => e.name),
+                      enabled => bind(row.id, 'enableProxyFailover')(enabled),
+                      ids => bind(row.id, 'backupProfileIds')(ids),
                     )
                   : null,
               ]),
@@ -5017,7 +5184,9 @@ function renderPage(ctx: any): unknown {
          * The endpoint line for the compact row, in the same words the card
          * uses: which source it came from, then the resolved address.
          */
-        const endpointText =
+        const failoverProfileId = lastUse[row.id]?.failoverProfileId
+        const activeTakeover = typeof failoverProfileId === 'string' && failoverProfileId.length > 0
+        let endpointText =
           endpointState.missingProfile !== undefined
             ? `${t.profileBindingPrefix}${endpointState.missingProfile}${t.profileMissingOption}`
             : boundProfile.length > 0
@@ -5027,6 +5196,12 @@ function renderPage(ctx: any): unknown {
                 // Lower-case, matching the resolved-endpoint wording above so the
                 // same address never appears in two spellings on one page.
                 : `${route.protocol === 'socks5' && route.proxyTls ? 'socks5s' : route.protocol}://${route.host || '—'}:${route.port || '—'}`
+        if (activeTakeover) {
+          const primaryName = boundProfile.length > 0 ? boundProfile : (useDefault ? (isZh ? '默认' : 'Default') : (row.name || row.id))
+          endpointText = typeof t.failoverStandbyTakingOver === 'function'
+            ? t.failoverStandbyTakingOver(primaryName, failoverProfileId)
+            : `${primaryName}（主） / ${failoverProfileId}（备用接管中）`
+        }
         const compactRowElement = h(
           'section',
           {
@@ -5082,7 +5257,7 @@ function renderPage(ctx: any): unknown {
                   {
                     style: {
                       ...S.compactEndpoint,
-                      ...(lastUse[row.id]?.fallback === true ? S.fallbackWarning : lastUse[row.id]?.ok === false ? S.inheritWarning : {}),
+                      ...(lastUse[row.id]?.failoverProfileId !== undefined ? S.fallbackWarning : lastUse[row.id]?.fallback === true ? S.fallbackWarning : lastUse[row.id]?.ok === false ? S.inheritWarning : {}),
                     },
                   },
                   lastText,
@@ -5862,6 +6037,13 @@ const EN = {
   enableFallbackDirectOffHint: 'Off (default): fail-closed. Errors immediately on proxy failure to prevent IP leaks.',
   fallbackSecurityWarning: '[Notice] When enabled, requests will automatically fallback to direct connection if the proxy is unreachable, which may expose your real IP address to the target service.',
   fallbackAlert: '[Warning: Proxy down, degraded to direct]',
+  enableProxyFailover: 'Active-Standby Failover',
+  enableProxyFailoverHint: 'Automatically failover to healthy standby preset nodes when connection to the primary proxy fails.',
+  backupProfilesLabel: 'Standby Proxy Nodes (Failover in order, up to 3):',
+  backupProfileSlot: (n: number) => `Standby Node ${n}`,
+  failoverAlert: (id: string) => `[Failover: Standby node ${id}]`,
+  failoverStandbyTakingOver: (primary: string, standby: string) => `${primary} (Primary) / ${standby} (Standby taking over)`,
+  standbyTakingOverBadge: (id: string) => `${id} (Standby taking over)`,
   dashboardAriaLabel: 'Runtime Dashboard',
   metricCoverageTitle: 'Proxy Coverage',
   metricSuccessRateTitle: 'Success Rate',
@@ -5983,6 +6165,7 @@ const EN = {
   profileMissing: 'The bound preset "',
   profileMissingSuffix: '" no longer exists, so this provider is not proxied.',
   profileMissingOption: ' (missing)',
+  profileNoneOption: ' (None)',
   profileUnusable: 'The bound preset "',
   profileUnusableSuffix: '" is not usable, so this provider is not proxied: ',
   quickImport: 'Quick import…',
@@ -6092,6 +6275,13 @@ const ZH = {
   enableFallbackDirectOffHint: '关闭（默认）：严格阻断 (Fail-closed)，代理异常时直接报错，避免暴露真实出口 IP。',
   fallbackSecurityWarning: '[注意] 开启后，当代理不可达时将自动回退至本机直连网络，可能会向目标服务暴露你的真实出口 IP。',
   fallbackAlert: '[告警: 代理宕机，已降级直连]',
+  enableProxyFailover: '主备代理多节点故障自动切换 (Failover)',
+  enableProxyFailoverHint: '开启后，当主代理建连失败时自动按顺序切换至备用预设节点重试。',
+  backupProfilesLabel: '备用代理预设节点（按顺序故障切换，最多 3 个）：',
+  backupProfileSlot: (n: number) => `备用节点 ${n}`,
+  failoverAlert: (id: string) => `[故障切换: 备用节点 ${id}]`,
+  failoverStandbyTakingOver: (primary: string, standby: string) => `${primary}（主） / ${standby}（备用接管中）`,
+  standbyTakingOverBadge: (id: string) => `${id}（备用接管中）`,
   dashboardAriaLabel: '运行监控仪表盘',
   metricCoverageTitle: '代理覆盖率',
   metricSuccessRateTitle: '连通成功率',
@@ -6212,6 +6402,7 @@ const ZH = {
   profileMissing: '绑定的预设「',
   profileMissingSuffix: '」已不存在，该 provider 不会走代理。',
   profileMissingOption: '（已缺失）',
+  profileNoneOption: '（无）',
   profileUnusable: '绑定的预设「',
   profileUnusableSuffix: '」不可用，该 provider 不会走代理：',
   quickImport: '常用客户端…',
@@ -6250,7 +6441,7 @@ const ZH = {
  * the page follows the application language instead of second-guessing it.
  * Chinese is the fallback because that is the operator's language.
  */
-function stringsFor(ctx: any): Record<string, string> {
+function stringsFor(ctx: any): Record<string, any> {
   const language = localeOf(ctx)
   const bundled = language === 'en' ? EN : ZH
   const translated = ((): Record<string, string> | undefined => {

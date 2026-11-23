@@ -137,6 +137,14 @@ export function withEndpoint(
     password: endpoint.password ?? '',
     proxyTls: endpoint.proxyTls ?? false,
     proxyTlsRejectUnauthorized: endpoint.proxyTlsRejectUnauthorized !== false,
+    backupProfileIds:
+      Array.isArray(route.backupProfileIds) && route.backupProfileIds.length > 0
+        ? route.backupProfileIds
+        : (endpoint.backupProfileIds ?? []),
+    enableProxyFailover:
+      route.enableProxyFailover !== undefined
+        ? route.enableProxyFailover
+        : (endpoint.enableProxyFailover ?? false),
   }
 }
 

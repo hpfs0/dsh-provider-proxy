@@ -27,6 +27,12 @@ import { defaultProxyProblem } from './proxy-address.js'
 import { resolveEndpoint, withEndpoint, type ProfileMap } from './presets.js'
 import type { DispatcherLike } from './fetch-router.js'
 
+export interface StandbyRouteEntry {
+  profileId: string
+  proxyOrigin: string
+  dispatcher: DispatcherLike
+}
+
 export interface RouteEntry {
   provider: string
   /** Normalized proxy origin, for diagnostics only. Never logged with credentials. */
@@ -39,6 +45,12 @@ export interface RouteEntry {
    * Only the self-check reads it; a bad value fails a check, never a route.
    */
   testTarget: string
+  /** Standby proxy preset IDs for active-standby failover (N26). */
+  backupProfileIds: string[]
+  /** Whether active-standby failover is enabled (N26). */
+  enableProxyFailover: boolean
+  /** Standby dispatchers ready to take over on primary failure (N26). */
+  standbyDispatchers: StandbyRouteEntry[]
 }
 
 /** The routing inputs that make one route's `lastUse` meaningful. */
@@ -424,6 +436,31 @@ export function buildRouteEntry(
   } catch (error) {
     return { ok: false, problem: error instanceof Error ? error.message : String(error) }
   }
+
+  const standbyDispatchers: StandbyRouteEntry[] = []
+  if (route.enableProxyFailover && Array.isArray(route.backupProfileIds)) {
+    const currentBindingId = resolved.binding.kind === 'profile' ? resolved.binding.profileId : undefined
+    for (const profileId of route.backupProfileIds) {
+      if (!profileId || profileId === currentBindingId) continue
+      const preset = options.profiles?.[profileId]
+      if (!preset) continue
+      const normalizedPreset = normalizeDefaultProxy(preset)
+      if (defaultProxyProblem(normalizedPreset) !== undefined) continue
+      const standbyRoute = withEndpoint(route, normalizedPreset) as ProviderProxyRouteValue
+      const standbyUrl = proxyUrl(standbyRoute)
+      try {
+        const standbyDispatcher = createDispatcher(standbyRoute, standbyUrl, standbyRoute.password)
+        standbyDispatchers.push({
+          profileId,
+          proxyOrigin: displayOrigin(standbyRoute, standbyUrl),
+          dispatcher: standbyDispatcher,
+        })
+      } catch {
+        // Skip unusable standby dispatcher
+      }
+    }
+  }
+
   return {
     ok: true,
     entry: {
@@ -432,6 +469,9 @@ export function buildRouteEntry(
       dispatcher,
       decide: buildDecide(route, options.localDirect, options.bypassAll === true),
       testTarget: route.testTarget,
+      backupProfileIds: route.backupProfileIds,
+      enableProxyFailover: route.enableProxyFailover,
+      standbyDispatchers,
     },
   }
 }
@@ -488,7 +528,13 @@ export function createProxyTable(
 
 /** Close every dispatcher, ignoring individual failures. */
 export async function closeTable(entries: Map<string, RouteEntry>): Promise<void> {
-  const closing = [...entries.values()].map(entry => entry.dispatcher.close().catch(() => undefined))
+  const closing: Promise<unknown>[] = []
+  for (const entry of entries.values()) {
+    closing.push(entry.dispatcher.close().catch(() => undefined))
+    for (const standby of entry.standbyDispatchers ?? []) {
+      closing.push(standby.dispatcher.close().catch(() => undefined))
+    }
+  }
   await Promise.allSettled(closing)
   entries.clear()
 }

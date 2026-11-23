@@ -294,11 +294,18 @@ export function apply(ctx: any, config?: ProxyConfig): void {
    * request on keeps its dispatcher until that stream lets go.
    */
   const retireTable = (entries: Map<string, RouteEntry>): void => {
-    for (const entry of entries.values()) retireDispatcher(entry.dispatcher)
+    for (const entry of entries.values()) {
+      retireDispatcher(entry.dispatcher)
+      for (const standby of entry.standbyDispatchers ?? []) {
+        retireDispatcher(standby.dispatcher)
+      }
+    }
     entries.clear()
   }
 
   const heartbeatStates = new Map<string, HeartbeatState>()
+  /** Timestamp of primary failure per provider for active-standby failback cooldown (N26). */
+  const primaryFailures = new Map<string, number>()
   /** Whether a `web` service exists, i.e. whether the reserved route has anything to carry. */
   let webAvailable = false
 
@@ -356,7 +363,17 @@ export function apply(ctx: any, config?: ProxyConfig): void {
    * request's start time with another's outcome, and a card could name a failure
    * that belongs to a call which in fact succeeded.
    */
-  const lastUse = new Map<string, { startedAt: number; at?: number; ok?: boolean; code?: string; fallback?: boolean }>()
+  const lastUse = new Map<
+    string,
+    {
+      startedAt: number
+      at?: number
+      ok?: boolean
+      code?: string
+      fallback?: boolean
+      failoverProfileId?: string
+    }
+  >()
   const bump = (provider: string, token: number | undefined): void => {
     hits.set(provider, (hits.get(provider) ?? 0) + 1)
     if (routeStates.get(provider)?.token !== token) return
@@ -364,10 +381,22 @@ export function apply(ctx: any, config?: ProxyConfig): void {
     // settles, so an in-flight call cannot overwrite the last COMPLETED result.
     lastUse.set(provider, { ...lastUse.get(provider), startedAt: Date.now() })
   }
-  const settle = (provider: string, token: number | undefined) => (ok: boolean, detail: unknown, meta?: { fallback?: boolean }): void => {
+  const settle = (provider: string, token: number | undefined) => (
+    ok: boolean,
+    detail: unknown,
+    meta?: { fallback?: boolean; failoverProfileId?: string },
+  ): void => {
     if (routeStates.get(provider)?.token !== token) return
     const previous = lastUse.get(provider)
-    if (meta?.fallback && ok) {
+    if (meta?.failoverProfileId && ok) {
+      lastUse.set(provider, {
+        startedAt: previous?.startedAt ?? Date.now(),
+        at: Date.now(),
+        ok: true,
+        code: `[故障切换: 备用节点 ${meta.failoverProfileId}]`,
+        failoverProfileId: meta.failoverProfileId,
+      })
+    } else if (meta?.fallback && ok) {
       lastUse.set(provider, {
         startedAt: previous?.startedAt ?? Date.now(),
         at: Date.now(),
@@ -1299,6 +1328,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
       if (configured.has(provider)) continue
       routeStates.delete(provider)
       lastUse.delete(provider)
+      primaryFailures.delete(provider)
       forgetChecks(provider)
     }
 
@@ -1324,6 +1354,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
       const token = decision.token === 'new' ? nextRouteToken++ : routeStates.get(provider)!.token
       if (decision.clearLastUse) {
         lastUse.delete(provider)
+        primaryFailures.delete(provider)
         forgetChecks(provider)
       }
       routeStates.set(provider, { fingerprint, enabled: raw?.enabled === true, token })
@@ -1362,6 +1393,9 @@ export function apply(ctx: any, config?: ProxyConfig): void {
       // Retired like a table entry: a search stream that has not issued its
       // request yet keeps the previous preset's dispatcher alive.
       retireDispatcher(previousSearch.dispatcher)
+      for (const standby of previousSearch.standbyDispatchers ?? []) {
+        retireDispatcher(standby.dispatcher)
+      }
     }
 
     pruneCheckCache()
@@ -1709,9 +1743,24 @@ export function apply(ctx: any, config?: ProxyConfig): void {
         touchSearchCard()
         return original.call(this, request, signal)
       }
+      const releasePrimary = claimDispatcher(route.dispatcher)
+      const releaseStandbys = (route.standbyDispatchers ?? []).map(s => claimDispatcher(s.dispatcher))
+      const release = () => {
+        releasePrimary()
+        for (const r of releaseStandbys) r()
+      }
       return router.run(
         {
           dispatcher: route.dispatcher,
+          standbyDispatchers: route.standbyDispatchers,
+          enableProxyFailover: route.enableProxyFailover,
+          failbackCooldownMs: 10_000,
+          isPrimaryFailed: () => {
+            const failedAt = primaryFailures.get(WEB_SEARCH_KEY)
+            return failedAt !== undefined && Date.now() - failedAt < 10_000
+          },
+          markPrimaryFailed: () => primaryFailures.set(WEB_SEARCH_KEY, Date.now()),
+          markPrimaryRecovered: () => primaryFailures.delete(WEB_SEARCH_KEY),
           trafficType: 'search',
           onHit: () => {
             searchCounters.proxied += 1
@@ -1722,7 +1771,9 @@ export function apply(ctx: any, config?: ProxyConfig): void {
             searchLast = {
               lastAt: startedAt,
               ok,
-              code: ok
+              code: meta?.failoverProfileId && ok
+                ? `[故障切换: 备用节点 ${meta.failoverProfileId}]`
+                : ok
                 ? String((detail as { status?: unknown } | undefined)?.status ?? '')
                 : failureCodeOf(detail),
             }
@@ -1742,6 +1793,7 @@ export function apply(ctx: any, config?: ProxyConfig): void {
           },
           enableFallbackDirect: plainEnableFallbackDirect(config),
           bypassAll: plainBypassAll(config),
+          onLeaseRelease: release,
         },
         () => original.call(this, request, signal),
       )
@@ -1777,10 +1829,24 @@ export function apply(ctx: any, config?: ProxyConfig): void {
         // counter rides inside the scope, so an abandoned stream still counts.
         // The claim keeps this dispatcher alive across a settings rebuild until
         // the scope either starts its request or ends without one.
-        const release = claimDispatcher(route.dispatcher)
+        const releasePrimary = claimDispatcher(route.dispatcher)
+        const releaseStandbys = (route.standbyDispatchers ?? []).map(s => claimDispatcher(s.dispatcher))
+        const release = () => {
+          releasePrimary()
+          for (const r of releaseStandbys) r()
+        }
         return router.wrap(
           {
             dispatcher: route.dispatcher,
+            standbyDispatchers: route.standbyDispatchers,
+            enableProxyFailover: route.enableProxyFailover,
+            failbackCooldownMs: 10_000,
+            isPrimaryFailed: () => {
+              const failedAt = primaryFailures.get(provider)
+              return failedAt !== undefined && Date.now() - failedAt < 10_000
+            },
+            markPrimaryFailed: () => primaryFailures.set(provider, Date.now()),
+            markPrimaryRecovered: () => primaryFailures.delete(provider),
             // N24: model calls are the other half of the split, so the scope
             // says which one it carries. A rule that ever needs to treat search
             // differently can read it without a second router.
@@ -1826,6 +1892,9 @@ export function apply(ctx: any, config?: ProxyConfig): void {
         const dedicated = searchDedicated
         searchDedicated = undefined
         await dedicated.dispatcher.close().catch(() => undefined)
+        for (const standby of dedicated.standbyDispatchers ?? []) {
+          await standby.dispatcher.close().catch(() => undefined)
+        }
       }
       // A generation retired by an earlier rebuild may still be waiting on a
       // stream that will now never finish: dispose is the end of the line, so

@@ -146,8 +146,21 @@ export function canReplayRequest(input: unknown, init: unknown): boolean {
   return false
 }
 
+export interface StandbyDispatcher {
+  profileId: string
+  dispatcher: DispatcherLike
+}
+
 export interface RouterStore {
   dispatcher: DispatcherLike
+  standbyDispatchers?: readonly StandbyDispatcher[]
+  enableProxyFailover?: boolean
+  failbackCooldownMs?: number
+  isPrimaryFailed?: () => boolean
+  markPrimaryFailed?: () => void
+  markPrimaryRecovered?: () => void
+  primaryFailedAt?: number
+  onFailover?: (profileId: string) => void
   /** Called once per request that actually leaves through the proxy. */
   onHit?: () => void
   /**
@@ -166,7 +179,7 @@ export interface RouterStore {
    * unclassified so the caller can name the failure with whatever error
    * vocabulary it already has.
    */
-  onSettle?: (ok: boolean, detail: unknown, meta?: { fallback?: boolean }) => void
+  onSettle?: (ok: boolean, detail: unknown, meta?: { fallback?: boolean; failoverProfileId?: string }) => void
   /**
    * Decide whether one request is proxied or sent directly, given its target
    * host (`undefined` when the input carries no parsable URL). Absent means
@@ -288,28 +301,100 @@ function installSharedRouter(): RouterState {
       ((globalThis as Record<symbol, unknown>)[kNativeFetch] as typeof globalThis.fetch | undefined) ??
       originalFetch
 
-    const inFlight = undiciFetch(input as never, {
-      ...(init as Record<string, unknown> | undefined),
-      dispatcher: active.dispatcher as never,
-    } as never) as unknown as Promise<{ status: number }>
+    const failbackCooldownMs = active.failbackCooldownMs ?? 10_000
+    const checkPrimaryFailed = (): boolean => {
+      if (typeof active.isPrimaryFailed === 'function') {
+        return active.isPrimaryFailed()
+      }
+      if (typeof active.primaryFailedAt === 'number') {
+        return Date.now() - active.primaryFailedAt < failbackCooldownMs
+      }
+      return false
+    }
 
-    // The request is on the wire. Whatever kept its dispatcher open for "a request
-    // that has not started yet" has done its job: undici tracks this one itself,
-    // so a retirement may now close the dispatcher whenever this settles.
-    active.onLeaseRelease?.()
+    const setPrimaryFailed = () => {
+      active.markPrimaryFailed?.()
+      active.primaryFailedAt = Date.now()
+    }
+
+    const setPrimaryRecovered = () => {
+      active.markPrimaryRecovered?.()
+      active.primaryFailedAt = undefined
+    }
+
+    type Candidate =
+      | { kind: 'primary'; dispatcher: DispatcherLike }
+      | { kind: 'standby'; profileId: string; dispatcher: DispatcherLike }
+
+    const isPrimaryDown = checkPrimaryFailed()
+    const candidates: Candidate[] = []
+    const hasStandbys =
+      active.enableProxyFailover === true &&
+      Array.isArray(active.standbyDispatchers) &&
+      active.standbyDispatchers.length > 0
+
+    if (!hasStandbys) {
+      candidates.push({ kind: 'primary', dispatcher: active.dispatcher })
+    } else if (isPrimaryDown) {
+      // In cooldown: prioritize standby proxies first; try primary as last resort before direct fallback.
+      for (const s of active.standbyDispatchers!) {
+        candidates.push({ kind: 'standby', profileId: s.profileId, dispatcher: s.dispatcher })
+      }
+      candidates.push({ kind: 'primary', dispatcher: active.dispatcher })
+    } else {
+      // Not in cooldown: primary first, then standbys.
+      candidates.push({ kind: 'primary', dispatcher: active.dispatcher })
+      for (const s of active.standbyDispatchers!) {
+        candidates.push({ kind: 'standby', profileId: s.profileId, dispatcher: s.dispatcher })
+      }
+    }
 
     let isFallback = false
-    const promise = inFlight.catch(async (error: unknown) => {
+    let failoverProfileId: string | undefined
+
+    const execute = async (): Promise<any> => {
+      let lastError: unknown
+      for (let i = 0; i < candidates.length; i++) {
+        const candidate = candidates[i]
+        try {
+          const response = await undiciFetch(input as never, {
+            ...(init as Record<string, unknown> | undefined),
+            dispatcher: candidate.dispatcher as never,
+          } as never)
+
+          if (candidate.kind === 'primary') {
+            setPrimaryRecovered()
+          } else {
+            failoverProfileId = candidate.profileId
+            active.onFailover?.(candidate.profileId)
+          }
+          return response
+        } catch (error: unknown) {
+          lastError = error
+          // Only connection-establishment errors with replayable bodies are allowed to failover
+          if (!isNetworkFailoverError(error) || !canReplayRequest(input, init)) {
+            throw error
+          }
+          if (candidate.kind === 'primary') {
+            setPrimaryFailed()
+          }
+        }
+      }
+
       if (
         active.enableFallbackDirect &&
-        isNetworkFailoverError(error) &&
+        isNetworkFailoverError(lastError) &&
         canReplayRequest(input, init)
       ) {
         isFallback = true
         active.onFallback?.()
         return nativeFetch.call(globalThis, input, init)
       }
-      throw error
+      throw lastError
+    }
+
+    const promise = execute().finally(() => {
+      active.onLeaseRelease?.()
     })
 
     if (active.onSettle !== undefined) {
@@ -318,9 +403,9 @@ function installSharedRouter(): RouterState {
         .then(
           (response: any) => {
             const ok = typeof response?.status === 'number' ? response.status < 500 : true
-            settle(ok, response, { fallback: isFallback })
+            settle(ok, response, { fallback: isFallback, failoverProfileId })
           },
-          (error: unknown) => settle(false, error, { fallback: isFallback }),
+          (error: unknown) => settle(false, error, { fallback: isFallback, failoverProfileId }),
         )
         .catch(() => undefined)
     }
