@@ -3695,6 +3695,10 @@ function renderPage(ctx: any): unknown {
 
   const storedLocalDirect = snapshot.value?.localDirect !== false
   const storedEnableFallbackDirect = snapshot.value?.enableFallbackDirect === true
+  const storedRetryAttempts =
+    typeof snapshot.value?.retryAttempts === 'number' ? snapshot.value.retryAttempts : 0
+  const storedRetryBackoffBaseMs =
+    typeof snapshot.value?.retryBackoffBaseMs === 'number' ? snapshot.value.retryBackoffBaseMs : 200
   const storedBypassAll = snapshot.value?.bypassAll === true || state.bypassAll === true
   const storedHeartbeatEnabled = snapshot.value?.heartbeatEnabled === true
   const storedHeartbeatInterval = typeof snapshot.value?.heartbeatInterval === 'number' ? snapshot.value.heartbeatInterval : 300
@@ -3730,6 +3734,14 @@ function renderPage(ctx: any): unknown {
     typeof globalDraft.enableFallbackDirect === 'boolean'
       ? globalDraft.enableFallbackDirect
       : storedEnableFallbackDirect
+  const globalRetryAttempts =
+    typeof globalDraft.retryAttempts === 'number'
+      ? globalDraft.retryAttempts
+      : storedRetryAttempts
+  const globalRetryBackoffBaseMs =
+    typeof globalDraft.retryBackoffBaseMs === 'number'
+      ? globalDraft.retryBackoffBaseMs
+      : storedRetryBackoffBaseMs
   const globalTestUrlHint = testUrlHint(globalTestUrl, t)
 
   // ---- N24: the split preview, resolved with the SAME resolver the Host uses.
@@ -3810,6 +3822,9 @@ function renderPage(ctx: any): unknown {
         heartbeatConsecutiveFails: globalHeartbeatConsecutiveFails,
         searchProxyStrategy: globalSearchStrategy,
         searchProxyProfileId: globalSearchProfileId,
+        enableFallbackDirect: globalEnableFallbackDirect,
+        retryAttempts: globalRetryAttempts,
+        retryBackoffBaseMs: globalRetryBackoffBaseMs,
       },
       { includePasswords },
     )
@@ -5986,7 +6001,7 @@ const EN = {
   backupConfirmProviders: ', presets: ',
   backupConfirmProfiles: ' entry/entries.',
   backupConfirmSettings:
-    '\n\nGlobal settings (advanced endpoint rules, heartbeat monitoring and the search split strategy) are replaced too.',
+    '\n\nGlobal and HA settings (advanced endpoint rules, heartbeat monitoring, search split strategy, active-standby failover and request retries) are replaced too.',
   backupRestored: 'Restored from backup, providers: ',
   backupTitle: 'Backup and restore',
   backupLead: 'Save the whole proxy configuration to a JSON file, or load one back.',
@@ -6212,7 +6227,7 @@ const ZH = {
   backupConfirm: '确认用该备份覆盖当前配置？\n\nprovider：',
   backupConfirmProviders: '，预设：',
   backupConfirmProfiles: ' 个。',
-  backupConfirmSettings: '\n\n全局设置（高级端点规则、心跳监测与搜索分流策略）也会一并被覆盖。',
+  backupConfirmSettings: '\n\n全局与高可用设置（高级端点规则、心跳监测、搜索分流、主备切换与重试策略）也会一并被覆盖。',
   backupRestored: '已从备份恢复，provider：',
   backupTitle: '备份与恢复',
   backupLead: '把整份代理配置存成 JSON 文件，或从文件恢复。',

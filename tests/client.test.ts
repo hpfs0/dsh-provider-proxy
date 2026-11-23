@@ -6805,6 +6805,8 @@ test('a backup exported after an edit keeps every field the edit did not touch',
         onlyHosts: 'api.example.com',
         bypassHosts: '',
         testTarget: 'https://api.example.com/health',
+        backupProfileIds: [],
+        enableProxyFailover: false,
       },
       'the export must carry the stored fields plus the one that was edited',
     )
@@ -6858,6 +6860,8 @@ test('N17: an exported file round-trips into a single restore write', async () =
         'searchProxyStrategy',
         'searchProxyProfileId',
         'enableFallbackDirect',
+        'retryAttempts',
+        'retryBackoffBaseMs',
       ],
     )
     assert.equal(writes[0].ops[3].value, false, 'localDirect is restored, not defaulted')
@@ -8366,8 +8370,10 @@ test('N25: the export carries the heartbeat and split settings', async () => {
 
     const file = download.savedFile()
     assert.ok(file, 'a file is written')
-    assert.equal(file.version, 3, 'the export declares the 1.3.0 schema')
+    assert.equal(file.version, 4, 'the export declares the 1.4.0 schema')
     assert.equal(file.enableFallbackDirect, false)
+    assert.equal(file.retryAttempts, 0)
+    assert.equal(file.retryBackoffBaseMs, 200)
     assert.equal(file.heartbeatEnabled, true)
     assert.equal(file.heartbeatInterval, 900)
     assert.equal(file.heartbeatConsecutiveFails, 3)

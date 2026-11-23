@@ -16,6 +16,9 @@
  *   `searchProxyStrategy` / `searchProxyProfileId` top-level fields.
  * - 1.3.0 files are `version: 3` and add the `enableFallbackDirect` top-level
  *   safety switch. Older files are upgraded in memory to the current default.
+ * - 1.4.0 files are `version: 4` and add HA active-standby failover fields
+ *   (`backupProfileIds`, `enableProxyFailover` per-endpoint) and request
+ *   retry policies (`retryAttempts`, `retryBackoffBaseMs` globally).
  *
  * A missing section is filled with the CURRENT schema default, because a restore
  * REPLACES the whole configuration: leaving a hidden 1.1.0 setting at whatever
@@ -56,7 +59,7 @@ const PROTOCOLS: readonly Protocol[] = ['http', 'https', 'socks5']
  * what "current" means — the classic way a round-trip test passes while a real
  * export/import pair silently loses a field.
  */
-export const BACKUP_VERSION = 3
+export const BACKUP_VERSION = 4
 
 /** The newest version this build can WRITE; anything above it is refused. */
 const MAX_SUPPORTED_VERSION = BACKUP_VERSION
@@ -72,6 +75,13 @@ const MAX_SUPPORTED_VERSION = BACKUP_VERSION
  */
 function normalizeEndpoint(raw: Partial<DefaultProxyValue> | undefined): DefaultProxyValue {
   const value = raw ?? {}
+  const backupProfileIds = Array.isArray(value.backupProfileIds)
+    ? value.backupProfileIds
+        .filter((id): id is string => typeof id === 'string')
+        .map(id => id.trim())
+        .filter(id => id.length > 0)
+        .slice(0, 3)
+    : []
   return {
     protocol: PROTOCOLS.includes(value.protocol as Protocol) ? (value.protocol as Protocol) : 'http',
     host: typeof value.host === 'string' ? value.host.trim() : '',
@@ -80,6 +90,8 @@ function normalizeEndpoint(raw: Partial<DefaultProxyValue> | undefined): Default
     password: typeof value.password === 'string' ? value.password : '',
     proxyTls: value.proxyTls === true,
     proxyTlsRejectUnauthorized: value.proxyTlsRejectUnauthorized !== false,
+    backupProfileIds,
+    enableProxyFailover: value.enableProxyFailover === true,
   }
 }
 
@@ -101,6 +113,10 @@ export interface BackupDocument {
   searchProxyProfileId: string
   /** 1.3.0 — last-resort direct dialling on proxy failure (safe default: off). */
   enableFallbackDirect: boolean
+  /** 1.4.0 — request retry attempts (N29). */
+  retryAttempts: number
+  /** 1.4.0 — request retry backoff base in ms (N29). */
+  retryBackoffBaseMs: number
 }
 
 /** What the page holds, as far as export is concerned. */
@@ -118,6 +134,9 @@ export interface BackupSource {
   searchProxyProfileId?: unknown
   /** 1.3.0 field; omitted means "the schema default" (false). */
   enableFallbackDirect?: boolean
+  /** 1.4.0 fields; omitted means "the schema default". */
+  retryAttempts?: number
+  retryBackoffBaseMs?: number
 }
 
 /** Mirrors the schema default, so an empty export is still self-explanatory. */
@@ -159,6 +178,13 @@ function normalizeHeartbeat(raw: {
  */
 function fillRoute(raw: Partial<ProviderProxyRouteValue> | undefined): ProviderProxyRouteValue {
   const value = raw ?? {}
+  const backupProfileIds = Array.isArray(value.backupProfileIds)
+    ? value.backupProfileIds
+        .filter((id): id is string => typeof id === 'string')
+        .map(id => id.trim())
+        .filter(id => id.length > 0)
+        .slice(0, 3)
+    : []
   return {
     enabled: value.enabled === true,
     profileId: typeof value.profileId === 'string' ? value.profileId.trim() : '',
@@ -175,6 +201,8 @@ function fillRoute(raw: Partial<ProviderProxyRouteValue> | undefined): ProviderP
     onlyHosts: typeof value.onlyHosts === 'string' ? value.onlyHosts : '',
     bypassHosts: typeof value.bypassHosts === 'string' ? value.bypassHosts : '',
     testTarget: typeof value.testTarget === 'string' ? value.testTarget : '',
+    backupProfileIds,
+    enableProxyFailover: value.enableProxyFailover === true,
   }
 }
 
@@ -224,6 +252,17 @@ export function buildBackup(
     searchProxyStrategy: source.searchProxyStrategy,
     searchProxyProfileId: source.searchProxyProfileId,
   })
+  const retryAttemptsRaw = Number(source.retryAttempts)
+  const retryAttempts =
+    Number.isInteger(retryAttemptsRaw) && retryAttemptsRaw >= 0 && retryAttemptsRaw <= 3
+      ? retryAttemptsRaw
+      : 0
+  const retryBackoffRaw = Number(source.retryBackoffBaseMs)
+  const retryBackoffBaseMs =
+    Number.isFinite(retryBackoffRaw) && retryBackoffRaw >= 0
+      ? retryBackoffRaw
+      : 200
+
   return {
     version: BACKUP_VERSION,
     exportedAt: (options.now ?? new Date()).toISOString(),
@@ -239,6 +278,8 @@ export function buildBackup(
     searchProxyStrategy: split.searchProxyStrategy,
     searchProxyProfileId: split.searchProxyProfileId,
     enableFallbackDirect: source.enableFallbackDirect === true,
+    retryAttempts,
+    retryBackoffBaseMs,
   }
 }
 
@@ -353,6 +394,26 @@ export function parseBackup(text: string): BackupParseResult {
   if (root.enableFallbackDirect !== undefined && typeof root.enableFallbackDirect !== 'boolean') {
     return { ok: false, error: 'enableFallbackDirect 必须是布尔值' }
   }
+  // 1.4.0 retry sections.
+  if (root.retryAttempts !== undefined) {
+    if (
+      typeof root.retryAttempts !== 'number' ||
+      !Number.isInteger(root.retryAttempts) ||
+      root.retryAttempts < 0 ||
+      root.retryAttempts > 3
+    ) {
+      return { ok: false, error: 'retryAttempts 必须是 0 到 3 之间的整数' }
+    }
+  }
+  if (root.retryBackoffBaseMs !== undefined) {
+    if (
+      typeof root.retryBackoffBaseMs !== 'number' ||
+      !Number.isFinite(root.retryBackoffBaseMs) ||
+      root.retryBackoffBaseMs < 0
+    ) {
+      return { ok: false, error: 'retryBackoffBaseMs 必须是非负数字' }
+    }
+  }
 
   /** Field-type check shared by every endpoint-shaped object. */
   const endpoint = (value: Record<string, unknown>, label: string): string | undefined => {
@@ -378,6 +439,17 @@ export function parseBackup(text: string): BackupParseResult {
       typeof value.proxyTlsRejectUnauthorized !== 'boolean'
     ) {
       return `${label}.proxyTlsRejectUnauthorized 必须是布尔值`
+    }
+    if (value.enableProxyFailover !== undefined && typeof value.enableProxyFailover !== 'boolean') {
+      return `${label}.enableProxyFailover 必须是布尔值`
+    }
+    if (value.backupProfileIds !== undefined) {
+      if (!Array.isArray(value.backupProfileIds)) {
+        return `${label}.backupProfileIds 必须是数组`
+      }
+      if (value.backupProfileIds.some(id => typeof id !== 'string')) {
+        return `${label}.backupProfileIds 的每项必须是字符串`
+      }
     }
     return undefined
   }
@@ -441,6 +513,14 @@ export function parseBackup(text: string): BackupParseResult {
     searchProxyStrategy: split.searchProxyStrategy,
     searchProxyProfileId: split.searchProxyProfileId,
     enableFallbackDirect: root.enableFallbackDirect === true,
+    retryAttempts:
+      typeof root.retryAttempts === 'number' && Number.isInteger(root.retryAttempts) && root.retryAttempts >= 0 && root.retryAttempts <= 3
+        ? root.retryAttempts
+        : 0,
+    retryBackoffBaseMs:
+      typeof root.retryBackoffBaseMs === 'number' && Number.isFinite(root.retryBackoffBaseMs) && root.retryBackoffBaseMs >= 0
+        ? root.retryBackoffBaseMs
+        : 200,
   }
   return { ok: true, document }
 }
@@ -470,6 +550,8 @@ export function backupOps(document: BackupDocument): unknown[] {
     { op: 'set', path: ['searchProxyStrategy'], value: document.searchProxyStrategy },
     { op: 'set', path: ['searchProxyProfileId'], value: document.searchProxyProfileId },
     { op: 'set', path: ['enableFallbackDirect'], value: document.enableFallbackDirect },
+    { op: 'set', path: ['retryAttempts'], value: document.retryAttempts },
+    { op: 'set', path: ['retryBackoffBaseMs'], value: document.retryBackoffBaseMs },
   ]
 }
 

@@ -108,7 +108,17 @@ test('N14: a preset dictionary is parsed with the DefaultProxy shape', () => {
     proxyProfiles: { 'HK-Proxy': { protocol: 'socks5', host: '10.0.0.2', port: 1080 } },
   })
   assert.deepEqual(read(parsed.proxyProfiles), {
-    'HK-Proxy': { protocol: 'socks5', host: '10.0.0.2', port: 1080, username: '', password: '', proxyTls: false, proxyTlsRejectUnauthorized: true },
+    'HK-Proxy': {
+      protocol: 'socks5',
+      host: '10.0.0.2',
+      port: 1080,
+      username: '',
+      password: '',
+      proxyTls: false,
+      proxyTlsRejectUnauthorized: true,
+      backupProfileIds: [],
+      enableProxyFailover: false,
+    },
   })
 })
 
@@ -139,7 +149,17 @@ test('N14: a 0.8.0 configuration object still parses, with no preset loss', () =
   assert.equal(providers.sensenova.useDefault, true, 'the old binding is untouched')
   assert.deepEqual(
     read(parsed.defaultProxy),
-    { protocol: 'http', host: '127.0.0.1', port: 7890, username: '', password: '', proxyTls: false, proxyTlsRejectUnauthorized: true },
+    {
+      protocol: 'http',
+      host: '127.0.0.1',
+      port: 7890,
+      username: '',
+      password: '',
+      proxyTls: false,
+      proxyTlsRejectUnauthorized: true,
+      backupProfileIds: [],
+      enableProxyFailover: false,
+    },
     'the default endpoint is not migrated away',
   )
 })

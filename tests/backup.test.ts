@@ -34,6 +34,8 @@ const SOURCE = {
       // password must still be the only redacted value.
       proxyTls: true,
       proxyTlsRejectUnauthorized: false,
+      backupProfileIds: ['HK-Proxy'],
+      enableProxyFailover: true,
     },
     openai: { enabled: true, profileId: 'HK-Proxy', protocol: 'http', host: '', port: 0 },
     'old-style': { enabled: true, useDefault: true },
@@ -47,6 +49,8 @@ const SOURCE = {
       password: 's3cret',
       proxyTls: false,
       proxyTlsRejectUnauthorized: true,
+      backupProfileIds: ['TLS-Pool'],
+      enableProxyFailover: false,
     },
     'TLS-Pool': {
       protocol: 'socks5',
@@ -56,9 +60,18 @@ const SOURCE = {
       password: 'tls-secret',
       proxyTls: true,
       proxyTlsRejectUnauthorized: true,
+      backupProfileIds: [],
+      enableProxyFailover: false,
     },
   },
-  defaultProxy: { protocol: 'http', host: '127.0.0.1', port: 7890, password: 'defaultpass' },
+  defaultProxy: {
+    protocol: 'http',
+    host: '127.0.0.1',
+    port: 7890,
+    password: 'defaultpass',
+    backupProfileIds: ['HK-Proxy'],
+    enableProxyFailover: false,
+  },
   localDirect: false,
   testUrl: 'https://echo.example/ip',
   heartbeatEnabled: true,
@@ -67,21 +80,28 @@ const SOURCE = {
   searchProxyStrategy: 'dedicated',
   searchProxyProfileId: 'TLS-Pool',
   enableFallbackDirect: true,
+  retryAttempts: 2,
+  retryBackoffBaseMs: 300,
 }
 
 test('N17: an export carries every field the restore needs', () => {
   const document = buildBackup(SOURCE, { includePasswords: true, now: new Date('2026-10-27T08:00:00Z') })
   assert.equal(document.version, BACKUP_VERSION)
-  assert.equal(document.version, 3)
+  assert.equal(document.version, 4)
   assert.equal(document.exportedAt, '2026-10-27T08:00:00.000Z')
   assert.equal(document.localDirect, false)
   assert.equal(document.testUrl, 'https://echo.example/ip')
   assert.equal(document.enableFallbackDirect, true)
+  assert.equal(document.retryAttempts, 2)
+  assert.equal(document.retryBackoffBaseMs, 300)
   assert.deepEqual(Object.keys(document.providers).sort(), ['old-style', 'openai', 'sensenova'])
   assert.deepEqual(document.proxyProfiles['HK-Proxy'], SOURCE.proxyProfiles['HK-Proxy'])
   assert.deepEqual(document.proxyProfiles['TLS-Pool'], SOURCE.proxyProfiles['TLS-Pool'])
   assert.equal(document.providers.sensenova.password, 'hunter2')
+  assert.deepEqual(document.providers.sensenova.backupProfileIds, ['HK-Proxy'])
+  assert.equal(document.providers.sensenova.enableProxyFailover, true)
   assert.equal(document.defaultProxy.password, 'defaultpass')
+  assert.deepEqual(document.defaultProxy.backupProfileIds, ['HK-Proxy'])
   // 1.1.0 sections travel with the file, or a restore would silently keep the
   // previous machine's heartbeat and split strategy.
   assert.equal(document.heartbeatEnabled, true)
@@ -138,17 +158,23 @@ test('N17: an export round-trips through parseBackup unchanged', () => {
   assert.deepEqual(parsed.document, document)
 })
 
-test('P3-c: schema v3 carries enableFallbackDirect and defaults it to false', () => {
+test('P4-a: schema v4 carries HA active-standby and smart retry fields', () => {
   const document = buildBackup({ providers: {} }, { includePasswords: true })
-  assert.equal(BACKUP_VERSION, 3)
-  assert.equal(document.version, 3)
+  assert.equal(BACKUP_VERSION, 4)
+  assert.equal(document.version, 4)
   assert.equal(document.enableFallbackDirect, false)
+  assert.equal(document.retryAttempts, 0)
+  assert.equal(document.retryBackoffBaseMs, 200)
   assert.equal(JSON.stringify(document).includes('enableFallbackDirect'), true)
+  assert.equal(JSON.stringify(document).includes('retryAttempts'), true)
+  assert.equal(JSON.stringify(document).includes('retryBackoffBaseMs'), true)
 
   const parsed = parseBackup(JSON.stringify(document))
   assert.equal(parsed.ok, true)
   if (!parsed.ok) return
   assert.equal(parsed.document.enableFallbackDirect, false)
+  assert.equal(parsed.document.retryAttempts, 0)
+  assert.equal(parsed.document.retryBackoffBaseMs, 200)
   assert.deepEqual(parsed.document, document)
 })
 
@@ -217,10 +243,9 @@ test('N25: every pre-1.1.0 backup version still imports and gains the 1.1.0 defa
   }
 })
 
-test('P3-c: every legacy backup version gains the safe schema v3 default', () => {
-  // The field matters to restore semantics: a missing value must mean "last
-  // resort direct dialling is OFF", never "inherit whichever machine we came
-  // from". Every accepted shape below is a real historical export shape.
+test('P4-b: every legacy backup version gains the safe schema v4 defaults', () => {
+  // The fields matter to restore semantics: missing values must mean "safe
+  // defaults", never "inherit whichever machine we came from".
   const files = {
     '0.8.0': {
       providers: { a: { enabled: true, useDefault: true } },
@@ -240,21 +265,127 @@ test('P3-c: every legacy backup version gains the safe schema v3 default', () =>
       heartbeatEnabled: true,
       searchProxyStrategy: 'direct',
     },
+    '1.3.0': {
+      version: 3,
+      providers: { a: { enabled: true } },
+      proxyProfiles: {},
+      defaultProxy: {},
+      enableFallbackDirect: true,
+    },
   }
   for (const [label, file] of Object.entries(files)) {
     const parsed = parseBackup(JSON.stringify(file))
     assert.equal(parsed.ok, true, label)
     if (!parsed.ok) continue
     assert.equal(parsed.document.version, BACKUP_VERSION, label)
-    assert.equal(parsed.document.enableFallbackDirect, false, label)
+    assert.equal(
+      parsed.document.enableFallbackDirect,
+      label === '1.3.0' ? true : false,
+      label,
+    )
+    assert.equal(parsed.document.retryAttempts, 0, label)
+    assert.equal(parsed.document.retryBackoffBaseMs, 200, label)
+    assert.deepEqual(parsed.document.providers.a.backupProfileIds, [], label)
+    assert.equal(parsed.document.providers.a.enableProxyFailover, false, label)
   }
 
-  const v3 = JSON.parse(JSON.stringify(files['1.1.0']))
-  v3.version = 3
-  v3.enableFallbackDirect = true
-  const parsed = parseBackup(JSON.stringify(v3))
+  const v4 = JSON.parse(JSON.stringify(files['1.3.0']))
+  v4.version = 4
+  v4.retryAttempts = 3
+  v4.retryBackoffBaseMs = 500
+  v4.providers.a.backupProfileIds = ['HK']
+  v4.providers.a.enableProxyFailover = true
+  const parsed = parseBackup(JSON.stringify(v4))
   assert.equal(parsed.ok, true)
-  if (parsed.ok) assert.equal(parsed.document.enableFallbackDirect, true)
+  if (parsed.ok) {
+    assert.equal(parsed.document.retryAttempts, 3)
+    assert.equal(parsed.document.retryBackoffBaseMs, 500)
+    assert.deepEqual(parsed.document.providers.a.backupProfileIds, ['HK'])
+    assert.equal(parsed.document.providers.a.enableProxyFailover, true)
+  }
+})
+
+test('P4-c: hand-edited v4 backups with invalid HA fields are refused', () => {
+  const invalid = [
+    { version: 4, providers: {}, retryAttempts: 4 },
+    { version: 4, providers: {}, retryAttempts: -1 },
+    { version: 4, providers: {}, retryAttempts: 1.5 },
+    { version: 4, providers: {}, retryAttempts: '2' },
+    { version: 4, providers: {}, retryBackoffBaseMs: -1 },
+    { version: 4, providers: {}, retryBackoffBaseMs: '200' },
+    { version: 4, providers: { p: { enableProxyFailover: 'true' } } },
+    { version: 4, providers: { p: { backupProfileIds: 'HK' } } },
+    { version: 4, providers: { p: { backupProfileIds: [123] } } },
+  ]
+  for (const item of invalid) {
+    const res = parseBackup(JSON.stringify(item))
+    assert.equal(res.ok, false, JSON.stringify(item))
+  }
+})
+
+test('P4-d: a hand-crafted schema v4 file imports cleanly and round-trips', () => {
+  const handCrafted = {
+    version: 4,
+    exportedAt: '2026-11-23T00:00:00.000Z',
+    providers: {
+      anthropic: {
+        enabled: true,
+        protocol: 'socks5',
+        host: '192.168.1.10',
+        port: 1080,
+        username: 'usr',
+        password: 'pwd',
+        backupProfileIds: ['Standby-1', 'Standby-2'],
+        enableProxyFailover: true,
+      },
+    },
+    proxyProfiles: {
+      'Standby-1': {
+        protocol: 'http',
+        host: '10.0.0.2',
+        port: 8080,
+        backupProfileIds: [],
+        enableProxyFailover: false,
+      },
+      'Standby-2': {
+        protocol: 'http',
+        host: '10.0.0.3',
+        port: 8080,
+        backupProfileIds: [],
+        enableProxyFailover: false,
+      },
+    },
+    defaultProxy: {
+      protocol: 'http',
+      host: '127.0.0.1',
+      port: 7890,
+      backupProfileIds: [],
+      enableProxyFailover: false,
+    },
+    localDirect: true,
+    testUrl: 'https://echo.example/ip',
+    heartbeatEnabled: false,
+    heartbeatInterval: 300,
+    heartbeatConsecutiveFails: 2,
+    searchProxyStrategy: 'inherit',
+    searchProxyProfileId: '',
+    enableFallbackDirect: false,
+    retryAttempts: 2,
+    retryBackoffBaseMs: 150,
+  }
+  const parsed = parseBackup(JSON.stringify(handCrafted))
+  assert.equal(parsed.ok, true)
+  if (!parsed.ok) return
+  assert.equal(parsed.document.retryAttempts, 2)
+  assert.equal(parsed.document.retryBackoffBaseMs, 150)
+  assert.deepEqual(parsed.document.providers.anthropic.backupProfileIds, ['Standby-1', 'Standby-2'])
+  assert.equal(parsed.document.providers.anthropic.enableProxyFailover, true)
+
+  const reExported = buildBackup(parsed.document, { includePasswords: true })
+  assert.equal(reExported.retryAttempts, 2)
+  assert.equal(reExported.retryBackoffBaseMs, 150)
+  assert.deepEqual(reExported.providers.anthropic.backupProfileIds, ['Standby-1', 'Standby-2'])
+  assert.equal(reExported.providers.anthropic.enableProxyFailover, true)
 })
 
 test('N25: a file from a NEWER version is refused instead of half applied', () => {
@@ -302,10 +433,14 @@ test('N17: missing optional fields are filled with schema defaults', () => {
   assert.equal(route.onlyHosts, '')
   assert.equal(route.proxyTls, false)
   assert.equal(route.proxyTlsRejectUnauthorized, true)
+  assert.deepEqual(route.backupProfileIds, [])
+  assert.equal(route.enableProxyFailover, false)
   assert.equal(parsed.document.localDirect, true)
   assert.equal(parsed.document.testUrl, 'https://api.ipify.org?format=json')
   assert.equal(parsed.document.heartbeatEnabled, false)
   assert.equal(parsed.document.searchProxyStrategy, 'inherit')
+  assert.equal(parsed.document.retryAttempts, 0)
+  assert.equal(parsed.document.retryBackoffBaseMs, 200)
   assert.deepEqual(parsed.document.defaultProxy, {
     protocol: 'http',
     host: '',
@@ -314,6 +449,8 @@ test('N17: missing optional fields are filled with schema defaults', () => {
     password: '',
     proxyTls: false,
     proxyTlsRejectUnauthorized: true,
+    backupProfileIds: [],
+    enableProxyFailover: false,
   })
 })
 
@@ -393,6 +530,8 @@ test('N17: a restore writes every top-level section in one operation list', () =
       ['searchProxyStrategy'],
       ['searchProxyProfileId'],
       ['enableFallbackDirect'],
+      ['retryAttempts'],
+      ['retryBackoffBaseMs'],
     ],
   )
   // Dictionaries are written WHOLE: a per-key write could only add entries, so a
@@ -400,8 +539,8 @@ test('N17: a restore writes every top-level section in one operation list', () =
   assert.deepEqual(Object.keys(ops[1].value), ['HK-Proxy', 'TLS-Pool'])
   assert.deepEqual(
     ops.slice(5).map(op => op.value),
-    [true, 900, 3, 'dedicated', 'TLS-Pool', true],
-    'and the 1.1.0 values are the ones the file carried',
+    [true, 900, 3, 'dedicated', 'TLS-Pool', true, 2, 300],
+    'and the 1.1.0/1.3.0/1.4.0 values are the ones the file carried',
   )
 })
 
@@ -466,6 +605,8 @@ test('N17: the backup defaults agree with the settings schema', () => {
     password: '',
     proxyTls: false,
     proxyTlsRejectUnauthorized: true,
+    backupProfileIds: [],
+    enableProxyFailover: false,
   })
   // The Host normalizes (trims) what the schema fills in; the backup copy must
   // reach the same value, or a restored file would differ from a saved one.
@@ -477,6 +618,8 @@ test('N17: the backup defaults agree with the settings schema', () => {
     password: '',
     proxyTls: false,
     proxyTlsRejectUnauthorized: true,
+    backupProfileIds: [],
+    enableProxyFailover: false,
   })
 
   const document = buildBackup(
@@ -491,6 +634,8 @@ test('N17: the backup defaults agree with the settings schema', () => {
     password: '',
     proxyTls: false,
     proxyTlsRejectUnauthorized: true,
+    backupProfileIds: [],
+    enableProxyFailover: false,
   })
   assert.equal(document.defaultProxy.username, 'x', 'the same trim the schema applies')
 
@@ -507,9 +652,13 @@ test('N17: the backup defaults agree with the settings schema', () => {
   assert.equal(read(defaults.heartbeatConsecutiveFails), 2)
   assert.equal(read(defaults.searchProxyStrategy), 'inherit')
   assert.equal(read(defaults.searchProxyProfileId), '')
+  assert.equal(read(defaults.retryAttempts), 0)
+  assert.equal(read(defaults.retryBackoffBaseMs), 200)
 
   const { normalizeHeartbeatConfig } = schema
   const empty = buildBackup({ providers: {} })
+  assert.equal(empty.retryAttempts, 0)
+  assert.equal(empty.retryBackoffBaseMs, 200)
   assert.deepEqual(
     {
       heartbeatEnabled: empty.heartbeatEnabled,

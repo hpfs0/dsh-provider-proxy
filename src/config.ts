@@ -40,6 +40,7 @@ type SchemaLike = {
   number: (...args: any[]) => any
   dict: (...args: any[]) => any
   union: (...args: any[]) => any
+  array: (...args: any[]) => any
 }
 
 /**
@@ -111,6 +112,10 @@ export const DefaultProxy = z.object({
   proxyTls: z.boolean().default(false),
   /** Whether to verify TLS certificate for SOCKS5 proxy server. */
   proxyTlsRejectUnauthorized: z.boolean().default(true),
+  /** Standby proxy preset IDs, tried in order, up to 3 (N26). */
+  backupProfileIds: z.array(z.string()).default([]),
+  /** Whether active-standby failover across proxies is enabled (N26). */
+  enableProxyFailover: z.boolean().default(false),
 })
 
 /**
@@ -170,6 +175,10 @@ export const ProviderProxyRoute = z.object({
    * touches it, so a bad value costs a failed check, never a broken route.
    */
   testTarget: z.string().default(''),
+  /** Standby proxy preset IDs, tried in order, up to 3 (N26). */
+  backupProfileIds: z.array(z.string()).default([]),
+  /** Whether active-standby failover across proxies is enabled (N26). */
+  enableProxyFailover: z.boolean().default(false),
 })
 
 export const Config = z.object({
@@ -242,6 +251,14 @@ export const Config = z.object({
    * endpoint is configured without inventing a second transport editor.
    */
   searchProxyProfileId: vol(z.string().default('')),
+  /**
+   * Request retry attempts on connect failure (0 to 3, default 0: off) (N29).
+   */
+  retryAttempts: vol(z.number().min(0).max(3).default(0)),
+  /**
+   * Request retry backoff base in milliseconds (default 200ms) (N29).
+   */
+  retryBackoffBaseMs: vol(z.number().default(200)),
 })
 
 export interface ProviderProxyRouteValue {
@@ -258,6 +275,8 @@ export interface ProviderProxyRouteValue {
   onlyHosts: string
   bypassHosts: string
   testTarget: string
+  backupProfileIds: string[]
+  enableProxyFailover: boolean
 }
 
 /** The normalized shared endpoint; see {@link DefaultProxy}. */
@@ -269,6 +288,8 @@ export interface DefaultProxyValue {
   password: string
   proxyTls: boolean
   proxyTlsRejectUnauthorized: boolean
+  backupProfileIds: string[]
+  enableProxyFailover: boolean
 }
 
 export interface ConfigShape {
@@ -284,6 +305,8 @@ export interface ConfigShape {
   heartbeatConsecutiveFails: number
   searchProxyStrategy: SearchProxyStrategy
   searchProxyProfileId: string
+  retryAttempts: number
+  retryBackoffBaseMs: number
 }
 
 export interface HeartbeatConfig {
@@ -324,6 +347,13 @@ function plain<T>(parsed: unknown): T {
  */
 export function normalizeDefaultProxy(raw: Partial<DefaultProxyValue> | undefined): DefaultProxyValue {
   const value = plain<DefaultProxyValue>(DefaultProxy(raw ?? {}))
+  const backupProfileIds = Array.isArray(value.backupProfileIds)
+    ? value.backupProfileIds
+        .filter((id): id is string => typeof id === 'string')
+        .map(id => id.trim())
+        .filter(id => id.length > 0)
+        .slice(0, 3)
+    : []
   return {
     protocol: value.protocol,
     host: value.host.trim(),
@@ -332,6 +362,8 @@ export function normalizeDefaultProxy(raw: Partial<DefaultProxyValue> | undefine
     password: value.password,
     proxyTls: value.proxyTls === true,
     proxyTlsRejectUnauthorized: value.proxyTlsRejectUnauthorized !== false,
+    backupProfileIds,
+    enableProxyFailover: value.enableProxyFailover === true,
   }
 }
 
@@ -362,6 +394,14 @@ export function normalizeRoute(
   const profileId = value.profileId.trim()
   const proxyTls = value.proxyTls === true
   const proxyTlsRejectUnauthorized = value.proxyTlsRejectUnauthorized !== false
+  const backupProfileIds = Array.isArray(value.backupProfileIds)
+    ? value.backupProfileIds
+        .filter((id): id is string => typeof id === 'string')
+        .map(id => id.trim())
+        .filter(id => id.length > 0)
+        .slice(0, 3)
+    : []
+  const enableProxyFailover = value.enableProxyFailover === true
 
   // A disabled route is normally returned untouched: nothing has been asked of
   // it, so a half-typed endpoint must not be reported as a problem. The
@@ -378,6 +418,8 @@ export function normalizeRoute(
       testTarget,
       proxyTls,
       proxyTlsRejectUnauthorized,
+      backupProfileIds,
+      enableProxyFailover,
     }
   }
 
@@ -405,5 +447,7 @@ export function normalizeRoute(
     testTarget,
     proxyTls,
     proxyTlsRejectUnauthorized,
+    backupProfileIds,
+    enableProxyFailover,
   }
 }
