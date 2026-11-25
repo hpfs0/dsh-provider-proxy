@@ -485,7 +485,7 @@ test('the route fingerprint treats host-rule lists as ordered sets', () => {
   )
 })
 
-test('the route fingerprint includes effective transport and localDirect only', () => {
+test('the route fingerprint includes effective transport and localDirect', () => {
   const base = {
     enabled: true,
     useDefault: false,
@@ -504,6 +504,27 @@ test('the route fingerprint includes effective transport and localDirect only', 
   assert.equal(routeFingerprint({ ...base, testTarget: 'http://two.invalid/ip' }), fingerprint)
   assert.notEqual(routeFingerprint({ ...base, port: 8081 }), fingerprint)
   assert.notEqual(routeFingerprint({ ...base, localDirect: false }), fingerprint)
+})
+
+test('N26: the route fingerprint includes failover state and standby order', () => {
+  const base = {
+    enabled: true,
+    protocol: 'http',
+    host: 'proxy.test',
+    port: 8080,
+    localDirect: true,
+  }
+  const fingerprint = routeFingerprint(base)
+  assert.notEqual(routeFingerprint({ ...base, enableProxyFailover: true }), fingerprint)
+  assert.notEqual(
+    routeFingerprint({ ...base, backupProfileIds: ['standby-a'] }),
+    fingerprint,
+  )
+  assert.notEqual(
+    routeFingerprint({ ...base, backupProfileIds: ['standby-a', 'standby-b'] }),
+    routeFingerprint({ ...base, backupProfileIds: ['standby-b', 'standby-a'] }),
+    'standby order is meaningful',
+  )
 })
 
 test('route-state decisions preserve lastUse for enabled-only changes and clear it for real changes', () => {

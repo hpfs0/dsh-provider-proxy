@@ -67,6 +67,10 @@ export interface RouteFingerprintInput {
   onlyHosts?: string
   bypassHosts?: string
   localDirect?: boolean
+  /** Standby preset IDs, in failover order. */
+  backupProfileIds?: string[]
+  /** Whether active-standby failover is enabled for this route. */
+  enableProxyFailover?: boolean
 }
 
 /** Stable, non-secret representation of the rule set in one route. */
@@ -87,6 +91,13 @@ function normalizedRuleSet(raw: string | undefined): string[] {
  * list must not clear the card's health record.
  */
 export function routeFingerprint(input: RouteFingerprintInput): string {
+  const backups = Array.isArray(input.backupProfileIds)
+    ? input.backupProfileIds
+        .filter((id): id is string => typeof id === 'string')
+        .map(id => id.trim())
+        .filter(id => id.length > 0)
+        .slice(0, 3)
+    : []
   return JSON.stringify([
     input.protocol ?? 'http',
     String(input.host ?? '').trim(),
@@ -98,6 +109,9 @@ export function routeFingerprint(input: RouteFingerprintInput): string {
     normalizedRuleSet(input.onlyHosts),
     normalizedRuleSet(input.bypassHosts),
     input.localDirect !== false,
+    // Failover order is meaningful, so this list is NOT sorted like host rules.
+    backups,
+    input.enableProxyFailover === true,
   ])
 }
 

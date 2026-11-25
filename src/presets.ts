@@ -118,6 +118,45 @@ export function profileNameProblem(raw: string): string | undefined {
   return undefined
 }
 
+/** Trim, drop blanks and cap a standby list at the schema limit. */
+function normalizeBackupProfileIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .filter((id): id is string => typeof id === 'string')
+    .map(id => id.trim())
+    .filter(id => id.length > 0)
+    .slice(0, 3)
+}
+
+/** The failover settings a route will actually use after endpoint resolution. */
+export interface FailoverResolution {
+  enabled: boolean
+  backupProfileIds: string[]
+}
+
+/**
+ * Resolve failover for a route that may borrow an endpoint.
+ *
+ * A bound route inherits the endpoint's switch and standby list. A route-level
+ * `true` can force failover on; a route-level `false` cannot turn a preset's
+ * failover off, because the settings page has no per-card off switch for bound
+ * routes. A non-empty route-level standby list overrides the endpoint's list;
+ * an empty list inherits it.
+ */
+export function resolveFailover(
+  route: Partial<ProviderProxyRouteValue> | undefined,
+  endpoint: Partial<DefaultProxyValue> | undefined,
+): FailoverResolution {
+  const routeBackups = normalizeBackupProfileIds(route?.backupProfileIds)
+  return {
+    enabled: route?.enableProxyFailover === true || endpoint?.enableProxyFailover === true,
+    backupProfileIds:
+      routeBackups.length > 0
+        ? routeBackups
+        : normalizeBackupProfileIds(endpoint?.backupProfileIds),
+  }
+}
+
 /**
  * A route whose TRANSPORT fields have been replaced by one endpoint.
  *
@@ -128,6 +167,7 @@ export function withEndpoint(
   route: Partial<ProviderProxyRouteValue>,
   endpoint: Partial<DefaultProxyValue>,
 ): Partial<ProviderProxyRouteValue> {
+  const failover = resolveFailover(route, endpoint)
   return {
     ...route,
     protocol: endpoint.protocol ?? 'http',
@@ -137,14 +177,8 @@ export function withEndpoint(
     password: endpoint.password ?? '',
     proxyTls: endpoint.proxyTls ?? false,
     proxyTlsRejectUnauthorized: endpoint.proxyTlsRejectUnauthorized !== false,
-    backupProfileIds:
-      Array.isArray(route.backupProfileIds) && route.backupProfileIds.length > 0
-        ? route.backupProfileIds
-        : (endpoint.backupProfileIds ?? []),
-    enableProxyFailover:
-      route.enableProxyFailover !== undefined
-        ? route.enableProxyFailover
-        : (endpoint.enableProxyFailover ?? false),
+    backupProfileIds: failover.backupProfileIds,
+    enableProxyFailover: failover.enabled,
   }
 }
 

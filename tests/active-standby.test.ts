@@ -10,6 +10,8 @@ import {
   buildRouteEntry,
   closeTable,
   normalizeDefaultProxy,
+  normalizeRoute,
+  withEndpoint,
 } from '../lib/index.js'
 
 async function startOriginServer() {
@@ -523,6 +525,95 @@ test('N26: proxy-table - buildRouteEntry builds standbyDispatchers for valid pro
     await closeTable(map)
     assert.equal(map.size, 0)
   }
+})
+
+test('N26: withEndpoint inherits the endpoint failover switch and standby list', () => {
+  const route = normalizeRoute('openai', {
+    enabled: true,
+    useDefault: true,
+    host: 'placeholder',
+    port: 1,
+  })
+  const endpoint = normalizeDefaultProxy({
+    host: '127.0.0.1',
+    port: 7890,
+    enableProxyFailover: true,
+    backupProfileIds: ['standby-a'],
+  })
+
+  const inherited = withEndpoint(route, endpoint)
+  assert.equal(inherited.enableProxyFailover, true, 'the endpoint switch is inherited')
+  assert.deepEqual(inherited.backupProfileIds, ['standby-a'], 'the endpoint list is inherited')
+
+  const overridden = withEndpoint(
+    normalizeRoute('openai', {
+      enabled: true,
+      useDefault: true,
+      host: 'placeholder',
+      port: 1,
+      backupProfileIds: ['standby-b'],
+    }),
+    endpoint,
+  )
+  assert.equal(overridden.enableProxyFailover, true)
+  assert.deepEqual(overridden.backupProfileIds, ['standby-b'], 'a route-level list wins')
+
+  const off = withEndpoint(
+    route,
+    normalizeDefaultProxy({ host: '127.0.0.1', port: 7890, enableProxyFailover: false }),
+  )
+  assert.equal(off.enableProxyFailover, false)
+})
+
+test('N26: useDefault and profile-bound routes build inherited standby dispatchers', async () => {
+  const defaultProxy = normalizeDefaultProxy({
+    host: '127.0.0.1',
+    port: 7890,
+    enableProxyFailover: true,
+    backupProfileIds: ['standby-a'],
+  })
+  const profiles = {
+    main: normalizeDefaultProxy({
+      host: '127.0.0.1',
+      port: 7891,
+      enableProxyFailover: true,
+      backupProfileIds: ['standby-a'],
+    }),
+    'standby-a': normalizeDefaultProxy({ host: '127.0.0.1', port: 7892 }),
+  }
+
+  const defaultBuilt = buildRouteEntry(
+    'openai',
+    { enabled: true, useDefault: true },
+    { defaultProxy, profiles, requireEnabled: true, localDirect: true },
+  )
+  const profileBuilt = buildRouteEntry(
+    'anthropic',
+    { enabled: true, profileId: 'main' },
+    { defaultProxy, profiles, requireEnabled: true, localDirect: true },
+  )
+
+  assert.equal(defaultBuilt.ok, true)
+  assert.equal(profileBuilt.ok, true)
+  if (!defaultBuilt.ok || !profileBuilt.ok) return
+
+  assert.equal(defaultBuilt.entry.enableProxyFailover, true)
+  assert.deepEqual(
+    defaultBuilt.entry.standbyDispatchers.map(entry => entry.profileId),
+    ['standby-a'],
+  )
+  assert.equal(profileBuilt.entry.enableProxyFailover, true)
+  assert.deepEqual(
+    profileBuilt.entry.standbyDispatchers.map(entry => entry.profileId),
+    ['standby-a'],
+  )
+
+  await closeTable(
+    new Map([
+      ['openai', defaultBuilt.entry],
+      ['anthropic', profileBuilt.entry],
+    ]),
+  )
 })
 
 test('N26: e2e apply() - llm/stream switches to standby and updates lastUse with failover alert', async () => {
