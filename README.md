@@ -3,7 +3,7 @@
 给 **DeepSeek Harness**（`0.2.0-rc.1` 及以上）用的插件：在 **设置** 里为**每个 provider 单独配置**「这个 provider 要不要走代理」，填写代理类型 + IP/端口。只有被你打开开关的 provider 走代理，其余 provider 和 DSH 的其它流量保持原来的直连路径。
 
 **v1.4.0 (High Availability & Failover)** 带来生产级高可用容灾与重试：
-- **主备代理多节点故障自动切换 (N26 Active-Standby Failover)**：卡片及默认代理支持指定最多 3 个备用预设节点。主节点在连接建立阶段宕机时自动按序切换至健康备用节点（零请求重复、安全 fail-closed）；界面展示接管态，主节点恢复并冷却后自动切回（Failback）。
+- **主备代理多节点故障自动切换 (N26 Active-Standby Failover)**：默认代理、命名预设及自定义端点支持指定最多 3 个备用预设节点。绑定默认代理或预设的卡片会自动继承其 Failover 开关与备用链；主节点在连接建立阶段宕机时自动按序切换至备用节点（零请求重复、安全 fail-closed）。界面展示实际生效的备用链、缺失/不可用警告与上次接管节点，仪表盘同步汇总接管数量；主节点恢复并冷却后自动切回（Failback）。
 - **请求级智能指数退避重试 (N29 Smart Request Retry)**：提供基于 Full Jitter 的退避重试策略（0-3 次，默认 0 关闭）。仅在连接建立阶段异常或 HTTP 502/503/504 且上游未产出数据时安全重发，严格规避 4xx/凭据失效、流式截断及 `ECONNRESET` 非幂等重发。
 - **备份升级至 Schema v4**：无缝持久化主备多节点与退避重试配置，全面兼容 v1/v2/v3 备份平滑导入。
 
@@ -129,8 +129,10 @@ dsh plugin --profile web add dsh-provider-proxy
 ### 主备代理多节点故障自动切换（1.4.0 / N26）
 
 为了在保证零出口 IP 泄露（Fail-closed）的前提下获得极致的可用性，1.4.0 支持在每张卡片或默认代理中配置**主备多节点自动切换**（`backupProfileIds`，最多 3 个备用预设）及总开关 `enableProxyFailover`：
+- **配置继承**：绑定默认代理/命名预设的卡片会继承该端点上的 Failover 开关与备用链；预设上的开关现在真正作用于使用它的卡片。路由级 `enableProxyFailover: true` 可强制开启，路由级 `false` 不会关闭已继承的开关。
 - **按序接管**：请求优先经由主节点发出；若主节点在连接建立阶段异常（`ECONNREFUSED`、`ETIMEDOUT` 等未接触上游的错误），按序尝试备用节点列表。
-- **状态感知**：备用节点接管成功后，卡片「最近调用」显示 `[故障切换: 备用节点 <profileId>]`，紧凑行显示 `节点A（主） / 节点B（备用接管中）`。
+- **备用链可见**：卡片显示实际生效的备用链及其来源；缺失、端点不完整、重复或与主节点相同的备选会被标记并跳过；开启 Failover 但没有任何可用备用节点时会就地告警。
+- **状态感知**：备用节点接管成功后，卡片「最近调用」显示 `[故障切换: 上次请求经备用节点 <profileId>] · 重试 N 次`，紧凑行显示 `节点A（主） / 上次经 节点B`；仪表盘显示当前有多少 provider 的上次请求由备用节点承接。
 - **自动恢复（Failback）**：主节点故障后进入 10 秒冷却；冷却期后请求尝试切回主节点，主节点探测恢复后自动撤销接管。
 - **多层兜底**：当所有备用节点均不可用时，遵循安全原则：若开启了 `enableFallbackDirect` 则降级直连，否则严格阻断抛出错误，决不静默破坏代理策略。
 
@@ -147,6 +149,7 @@ dsh plugin --profile web add dsh-provider-proxy
 - **Full Jitter 指数退避**：
   $$\text{Delay} = \text{random}(0, \min(5000, \text{baseMs} \times 2^{\text{attempt}}))$$
   通过引入全抖动打散重试流量，规避集群雪崩效应。
+- **运行态回显**：发生重试时，卡片「最近调用」会追加 `· 重试 N 次`，无需翻日志确认。
 
 ### 故障容灾自动降级（1.0.0 / 1.2.0 边界收窄）
 
@@ -300,7 +303,7 @@ Host catalog 是否列出某个 provider（`live`）不影响已保存路由的�
 - `backupProfileIds`（`string[]`，默认 `[]`）：备用代理预设列表，主节点故障时按序自动接管，最多 3 个；
 - `enableProxyFailover`（`boolean`，默认 `false`）：主备自动切换总开关。
 `profileId` 非空时该路由的传输字段整体取自 `proxyProfiles[profileId]`，并优先于 `useDefault`；
-目标域名规则与自检目标始终是卡片自己的。
+Failover 开关与备用链也会从该端点继承，目标域名规则与自检目标始终是卡片自己的。
 
 `localDirect` / `testUrl` / `enableFallbackDirect` / `bypassAll` / 三项心跳设置 / 两项搜索分流设置都在
 **全局设置** 页签里：`testUrl` 留空时 Host 使用内置默认值，非法候选或超过 5 项只会提示、不会阻止保存；
