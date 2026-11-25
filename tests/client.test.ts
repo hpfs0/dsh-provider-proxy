@@ -4172,6 +4172,180 @@ test('a malformed last-use entry is dropped rather than rendered', async () => {
   }
 })
 
+// ---- N26: HA failover UI ----
+
+test('N26: a standby takeover is shown on the card, dashboard and retry count', async () => {
+  const { mod, restore } = loadBundle(async url => ({
+    ok: true,
+    status: 200,
+    json: async () =>
+      String(url).includes('/test')
+        ? {}
+        : {
+            providers: [{ id: 'sensenova', name: 'SenseNova', live: true }],
+            lastUse: {
+              sensenova: {
+                at: Date.now(),
+                ok: true,
+                failoverProfileId: 'standby-hk',
+                retries: 2,
+              },
+            },
+          },
+  }))
+  try {
+    const harness = mountPlugin(mod)
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const texts = textsOf(render())
+    assert.ok(
+      texts.includes('[推理] [故障切换: 上次请求经备用节点 standby-hk] (刚刚) · 重试 2 次'),
+      'the card names the standby that carried the last request and the retry count',
+    )
+    assert.ok(
+      texts.includes('standby-hk（上次请求经备用接管）'),
+      'the card carries the standby takeover badge',
+    )
+    assert.ok(
+      texts.includes('备用接管：1 个 provider 的上次请求由备用节点承接'),
+      'the dashboard surfaces the takeover above the tabs',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('N26: a preset-bound card shows its inherited standby chain', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: { enabled: true, profileId: 'HK', protocol: 'http', host: '', port: 0 },
+        },
+        proxyProfiles: {
+          HK: {
+            protocol: 'http',
+            host: '127.0.0.1',
+            port: 7891,
+            enableProxyFailover: true,
+            backupProfileIds: ['SG'],
+          },
+          SG: { protocol: 'http', host: '127.0.0.1', port: 7892 },
+        },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const texts = textsOf(cardFor(render(), 'sensenova'))
+    assert.ok(
+      texts.includes('备用链：SG（继承自预设 HK）'),
+      'the card shows the effective chain and where it came from',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('N26: a broken inherited standby chain is called out on the card', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: { enabled: true, profileId: 'HK', protocol: 'http', host: '', port: 0 },
+        },
+        proxyProfiles: {
+          HK: {
+            protocol: 'http',
+            host: '127.0.0.1',
+            port: 7891,
+            enableProxyFailover: true,
+            backupProfileIds: ['Missing', 'Broken'],
+          },
+          Broken: { protocol: 'http', host: '', port: 0 },
+        },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const texts = textsOf(cardFor(render(), 'sensenova'))
+    assert.ok(
+      texts.some(text => text.includes('备用链：无可用备用节点')),
+      'a chain with no usable standby is a visible warning, not a silent skip',
+    )
+    assert.ok(
+      texts.some(text => text.includes('Missing (预设不存在)')),
+      'a deleted standby preset is named',
+    )
+    assert.ok(
+      texts.some(text => text.includes('Broken (未填写代理地址)')),
+      'an incomplete standby preset names the endpoint problem',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('N26: compact view shows the last standby takeover without crashing', async () => {
+  const { mod, restore } = loadBundle(async url => ({
+    ok: true,
+    status: 200,
+    json: async () =>
+      String(url).includes('/test')
+        ? {}
+        : {
+            providers: [{ id: 'sensenova', name: 'SenseNova', live: true }],
+            lastUse: {
+              sensenova: { at: Date.now(), ok: true, failoverProfileId: 'standby-hk' },
+            },
+          },
+  }))
+  try {
+    const harness = mountPlugin(mod)
+    const render = await renderCompact(mod, harness)
+    const [info] = linesOf(compactRowFor(render(), 'sensenova'))
+    const texts = textsOf(info)
+    assert.ok(
+      texts.some(text => text.includes('SenseNova（主） / 上次经 standby-hk')),
+      'the compact endpoint line names both the primary and the standby that took over',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('N26: the default failover panel warns when failover has no standby', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        defaultProxy: {
+          protocol: 'http',
+          host: '127.0.0.1',
+          port: 7890,
+          enableProxyFailover: true,
+          backupProfileIds: [],
+        },
+        proxyProfiles: {
+          SG: { protocol: 'http', host: '127.0.0.1', port: 7891 },
+        },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    const texts = textsOf(defaultBlockOf(render()))
+    assert.ok(texts.includes('主备代理多节点故障自动切换 (Failover)'))
+    assert.ok(texts.includes('备用节点 1'))
+    assert.ok(
+      texts.includes('已开启故障切换，但还没有选择备用节点。'),
+      'turning failover on with an empty chain is warned about in place',
+    )
+  } finally {
+    restore()
+  }
+})
+
 // ---- promote to default / bulk apply ----
 
 test('a card promotes its own endpoint to the shared default', async () => {

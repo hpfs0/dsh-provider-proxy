@@ -43,6 +43,7 @@ import {
   endpointSummary,
   profileNameProblem,
   profileNames,
+  resolveFailover,
   routeBindingOf,
   routesBoundTo,
 } from './presets.js'
@@ -599,6 +600,8 @@ type LastUse = {
   code?: string
   fallback?: boolean
   failoverProfileId?: string
+  /** Retry attempts consumed by the request that produced this outcome (N29). */
+  retries?: number
 }
 
 type HeartbeatState = {
@@ -780,6 +783,9 @@ async function fetchCatalog(): Promise<Catalog> {
         ...(entry.fallback === true ? { fallback: true } : {}),
         ...(typeof entry.failoverProfileId === 'string' && entry.failoverProfileId.length > 0
           ? { failoverProfileId: entry.failoverProfileId }
+          : {}),
+        ...(typeof entry.retries === 'number' && Number.isFinite(entry.retries) && entry.retries > 0
+          ? { retries: Math.floor(entry.retries) }
           : {}),
       }
     }
@@ -1787,6 +1793,20 @@ const S = {
     fontSize: '12px',
     lineHeight: '1.5',
   },
+  failoverAlertBanner: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    padding: '10px 14px',
+    borderRadius: '8px',
+    background: 'var(--dsw-alias-state-warning-subtle, rgba(210, 153, 34, 0.12))',
+    borderWidth: '1px',
+    borderStyle: 'solid',
+    borderColor: 'var(--dsw-alias-state-warning-border, rgba(210, 153, 34, 0.4))',
+    color: 'var(--dsw-alias-state-warning-primary, #d29922)',
+    fontSize: '12px',
+    lineHeight: '1.5',
+  },
   heartbeatWarningBadge: {
     display: 'inline-block',
     padding: '1px 6px',
@@ -1915,6 +1935,9 @@ function renderPage(ctx: any): unknown {
 
   const h = React.createElement
   const t = stringsFor(ctx)
+  // Defined before the card map: the compact failover branch reads it while
+  // building rows, which happens well before the dashboard metrics below.
+  const isZh = t.protocol === '类型'
   diagnostics = []
 
   // `useState` is only reached after the React check, so the early return above
@@ -2020,17 +2043,24 @@ function renderPage(ctx: any): unknown {
     const use = lastUse[id]
     if (use === undefined) return undefined
     const tag = RESERVED_PROVIDER_IDS.has(id) ? t.trafficSearchTag : t.trafficReasoningTag
+    const retrySuffix =
+      typeof use.retries === 'number' && use.retries > 0
+        ? typeof t.retryCountSuffix === 'function'
+          ? t.retryCountSuffix(use.retries)
+          : ` · retry ${use.retries}`
+        : ''
+    const endedAt = relativeTime(use.at ?? use.startedAt ?? Date.now(), t)
     if (typeof use.failoverProfileId === 'string' && use.failoverProfileId.length > 0) {
       const alertMsg = typeof t.failoverAlert === 'function' ? t.failoverAlert(use.failoverProfileId) : `[故障切换: 备用节点 ${use.failoverProfileId}]`
-      return `${tag} ${alertMsg}（${relativeTime(use.at ?? use.startedAt ?? Date.now(), t)}）`
+      return `${tag} ${alertMsg} (${endedAt})${retrySuffix}`
     }
     if (use.fallback === true || use.code === '[告警: 代理宕机，已降级直连]') {
-      return `${tag} ${t.fallbackAlert}（${relativeTime(use.at ?? use.startedAt ?? Date.now(), t)}）`
+      return `${tag} ${t.fallbackAlert} (${endedAt})${retrySuffix}`
     }
     if (use.ok === true) {
-      return `${tag} ${t.recentOk}${relativeTime(use.at ?? use.startedAt ?? Date.now(), t)}`
+      return `${tag} ${t.recentOk}${endedAt}${retrySuffix}`
     }
-    if (use.ok === false) return `${tag} ${t.recentFail}${use.code ?? 'ERROR'}`
+    if (use.ok === false) return `${tag} ${t.recentFail}${use.code ?? 'ERROR'}${retrySuffix}`
     return `${tag} ${t.recentStarted}${relativeTime(use.startedAt ?? use.at ?? Date.now(), t)}`
   }
   /**
@@ -2960,6 +2990,89 @@ function renderPage(ctx: any): unknown {
     if (storedProfiles[name] === undefined && profileDraft[name] === undefined) return undefined
     return profileView({ ...storedProfiles[name], ...profileDraft[name] })
   }
+  const failoverProfileProblem = (id: string): string | undefined => {
+    const profile = profileValueOf(id)
+    if (profile === undefined) return t.failoverMissing
+    return defaultProxyProblem(profile)
+  }
+  /**
+   * The standby chain this card will ACTUALLY use, after preset/default
+   * inheritance and the same skip rules the Host applies.
+   */
+  const effectiveFailoverOf = (route: RouteValue) => {
+    const endpointState = cardEndpoint(route)
+    const resolved = resolveFailover(route, endpointState.endpoint)
+    const binding = endpointState.binding
+    const primaryProfileId = binding.kind === 'profile' ? binding.profileId : undefined
+    const seen = new Set<string>()
+    const valid: string[] = []
+    const skipped: { id: string; reason: string }[] = []
+    for (const id of resolved.backupProfileIds) {
+      if (primaryProfileId !== undefined && id === primaryProfileId) {
+        skipped.push({ id, reason: t.failoverPrimarySame })
+        continue
+      }
+      if (seen.has(id)) {
+        skipped.push({ id, reason: t.failoverDuplicate })
+        continue
+      }
+      seen.add(id)
+      const why = failoverProfileProblem(id)
+      if (why !== undefined) {
+        skipped.push({ id, reason: why })
+        continue
+      }
+      valid.push(id)
+    }
+    const ownBackups = route.backupProfileIds.filter(id => id.trim().length > 0)
+    const usesOwnConfig = route.enableProxyFailover === true || ownBackups.length > 0
+    const source = usesOwnConfig
+      ? t.failoverSourceOwn
+      : binding.kind === 'profile'
+        ? `${t.failoverSourceProfile}${binding.profileId}`
+        : binding.kind === 'default'
+          ? t.failoverSourceDefault
+          : t.failoverSourceOwn
+    return {
+      resolved,
+      valid,
+      skipped,
+      source,
+      inherited: !usesOwnConfig && (resolved.enabled || resolved.backupProfileIds.length > 0),
+    }
+  }
+  const failoverNote = (route: RouteValue): unknown => {
+    const state = effectiveFailoverOf(route)
+    if (!state.resolved.enabled) {
+      if (state.resolved.backupProfileIds.length === 0) return null
+      return h(
+        'p',
+        {
+          key: 'failover-summary',
+          style: { ...S.inheritNote, margin: '0' },
+        },
+        typeof t.failoverConfiguredOff === 'function'
+          ? t.failoverConfiguredOff(state.resolved.backupProfileIds.join(' → '))
+          : `已配置备用节点，但故障切换未开启：${state.resolved.backupProfileIds.join(' → ')}`,
+      )
+    }
+    const chain = state.valid.length > 0 ? state.valid.join(' → ') : t.failoverNoUsable
+    const skipped = state.skipped.map(item => `${item.id} (${item.reason})`).join('、')
+    const text =
+      typeof t.failoverChainText === 'function'
+        ? t.failoverChainText(chain, state.source, state.inherited, skipped)
+        : `备用链：${chain}${state.inherited ? ` (继承自 ${state.source})` : ''}${skipped ? `；已跳过：${skipped}` : ''}`
+    const needsAttention = state.valid.length === 0 || state.skipped.length > 0
+    return h(
+      'p',
+      {
+        key: 'failover-summary',
+        style: needsAttention ? { ...S.inheritWarning, margin: '0' } : { ...S.inheritNote, margin: '0' },
+        role: needsAttention ? 'alert' : undefined,
+      },
+      text,
+    )
+  }
 
   /**
    * Persist the WHOLE preset dictionary in one write.
@@ -3288,8 +3401,24 @@ function renderPage(ctx: any): unknown {
     availableProfiles: string[],
     onToggleFailover: (enabled: boolean) => void,
     onChangeBackups: (ids: string[]) => void,
-  ): unknown =>
-    h(
+    profileProblem: (id: string) => string | undefined,
+    primaryProfileId?: string,
+  ): unknown => {
+    // `profileView` deliberately omits an empty list, so this may arrive as
+    // undefined even though the writer normalizes it to an array.
+    const ids = Array.isArray(backupProfileIds) ? backupProfileIds : []
+    const selectedIds = ids.filter(id => id.length > 0)
+    const selectedIssues = selectedIds
+      .map(id => {
+        if (primaryProfileId !== undefined && id === primaryProfileId) {
+          return `${id}: ${t.failoverPrimarySame}`
+        }
+        if (!availableProfiles.includes(id)) return `${id}: ${t.failoverMissing}`
+        const why = profileProblem(id)
+        return why === undefined ? undefined : `${id}: ${why}`
+      })
+      .filter((issue): issue is string => issue !== undefined)
+    return h(
       'div',
       {
         className: styles.failoverContainer,
@@ -3336,7 +3465,9 @@ function renderPage(ctx: any): unknown {
               t.backupProfilesLabel,
             ),
             [0, 1, 2].map(index => {
-              const currentId = backupProfileIds[index] ?? ''
+              const currentId = ids[index] ?? ''
+              const isPrimary = primaryProfileId !== undefined && currentId === primaryProfileId
+              const missing = currentId.length > 0 && !isPrimary && !availableProfiles.includes(currentId)
               return h(
                 'div',
                 {
@@ -3353,10 +3484,14 @@ function renderPage(ctx: any): unknown {
                   {
                     className: styles.input,
                     style: { ...S.input, flex: 1, padding: '4px 8px', fontSize: '12px' },
+                    'aria-label':
+                      typeof t.backupProfileSlot === 'function'
+                        ? t.backupProfileSlot(index + 1)
+                        : `备用节点 ${index + 1}`,
                     value: currentId,
                     onChange: (event: any) => {
                       const nextVal = event.target.value
-                      const copy = [...backupProfileIds]
+                      const copy = [...ids]
                       if (nextVal) {
                         copy[index] = nextVal
                       } else {
@@ -3370,12 +3505,48 @@ function renderPage(ctx: any): unknown {
                   ...availableProfiles.map(p =>
                     h('option', { key: p, value: p }, p),
                   ),
+                  isPrimary
+                    ? h(
+                        'option',
+                        { key: `primary:${currentId}`, value: currentId },
+                        `${currentId} (${t.failoverPrimarySame})`,
+                      )
+                    : missing
+                      ? h(
+                          'option',
+                          { key: `missing:${currentId}`, value: currentId },
+                          `${currentId}${t.failoverMissingOptionSuffix}`,
+                        )
+                      : null,
                 ),
               )
             }),
+            selectedIssues.length > 0
+              ? h(
+                  'p',
+                  {
+                    key: `${prefix}:failover-issues`,
+                    style: { ...S.inheritWarning, margin: '4px 0 0' },
+                    role: 'alert',
+                  },
+                  `${t.failoverSelectedIssuesPrefix}${selectedIssues.join('；')}`,
+                )
+              : null,
+            enableProxyFailover && selectedIds.length === 0
+              ? h(
+                  'p',
+                  {
+                    key: `${prefix}:failover-empty`,
+                    style: { ...S.inheritWarning, margin: '4px 0 0' },
+                    role: 'alert',
+                  },
+                  t.failoverNoStandbyWarning,
+                )
+              : null,
           )
         : null,
     )
+  }
 
   const defaultBlock = h(
     'div',
@@ -3498,6 +3669,7 @@ function renderPage(ctx: any): unknown {
           profileEntries.map(e => e.name),
           enabled => bindDefault('enableProxyFailover')(enabled),
           ids => bindDefault('backupProfileIds')(ids),
+          failoverProfileProblem,
         )
       : null,
     // Bulk opt-in, in ONE write: a per-card walk would rebuild the table N times.
@@ -3826,6 +3998,8 @@ function renderPage(ctx: any): unknown {
               profileEntries.map(e => e.name).filter(n => n !== entry.name),
               enabled => bindProfile(entry.name, 'enableProxyFailover')(enabled),
               ids => bindProfile(entry.name, 'backupProfileIds')(ids),
+              failoverProfileProblem,
+              entry.name,
             )
           : null,
       )
@@ -4997,6 +5171,9 @@ function renderPage(ctx: any): unknown {
                   `${t.inheritingDefault}${defaultOrigin}`,
                 )
               : null,
+          boundProfile.length > 0 || useDefault || profileEntries.length === 0
+            ? failoverNote(route)
+            : null,
           ...(useDefault || boundProfile.length > 0
             ? []
             : [
@@ -5023,6 +5200,7 @@ function renderPage(ctx: any): unknown {
                       profileEntries.map(e => e.name),
                       enabled => bind(row.id, 'enableProxyFailover')(enabled),
                       ids => bind(row.id, 'backupProfileIds')(ids),
+                      failoverProfileProblem,
                     )
                   : null,
               ]),
@@ -5231,6 +5409,7 @@ function renderPage(ctx: any): unknown {
          */
         const failoverProfileId = lastUse[row.id]?.failoverProfileId
         const activeTakeover = typeof failoverProfileId === 'string' && failoverProfileId.length > 0
+        const compactFailover = effectiveFailoverOf(route)
         let endpointText =
           endpointState.missingProfile !== undefined
             ? `${t.profileBindingPrefix}${endpointState.missingProfile}${t.profileMissingOption}`
@@ -5293,6 +5472,18 @@ function renderPage(ctx: any): unknown {
               },
               endpointText,
             ),
+            compactFailover.resolved.enabled &&
+            (compactFailover.valid.length === 0 || compactFailover.skipped.length > 0)
+              ? h(
+                  'span',
+                  {
+                    className: styles.heartbeatWarningBadge,
+                    style: S.heartbeatWarningBadge,
+                    key: `compact:${row.id}:failover-warning`,
+                  },
+                  t.failoverNeedsAttention,
+                )
+              : null,
             heartbeatBadge(row.id, route.enabled),
             heartbeatProbeHint(row.id, route.enabled),
             lastText === undefined
@@ -5444,7 +5635,6 @@ function renderPage(ctx: any): unknown {
       })
   body.unshift(...missingCards)
 
-  const isZh = t.protocol === '类型'
   const effectiveConfigured = Object.fromEntries(
     rows.map(row => [row.id, view({ ...configured[row.id], ...draft[row.id] })]),
   )
@@ -5466,6 +5656,15 @@ function renderPage(ctx: any): unknown {
     ? countUnreachableProviders(rows, effectiveConfigured, heartbeat)
     : { count: 0, unreachableIds: [] as string[] }
   const hasUnreachable = unreachable.count > 0
+  const failoverRows = globalBypassAll
+    ? []
+    : rows.filter(
+        row =>
+          effectiveConfigured[row.id]?.enabled === true &&
+          effectiveProblems[row.id] === undefined &&
+          typeof lastUse[row.id]?.failoverProfileId === 'string' &&
+          lastUse[row.id]!.failoverProfileId!.length > 0,
+      )
   const metrics = calculateObservabilityMetrics({ isZh, lastUse, tests, heartbeat })
   const successRate = metrics
   const avgLatency = metrics
@@ -5589,6 +5788,47 @@ function renderPage(ctx: any): unknown {
             h('strong', null, `${t.heartbeatAlertPrefix}：${unreachable.count} ${t.heartbeatAlertCountUnit}`),
             ' ',
             `(${unreachable.unreachableIds.map(id => rows.find(r => r.id === id)?.name || id).join(', ')})`,
+          ),
+        )
+      : null,
+    failoverRows.length > 0
+      ? h(
+          'div',
+          {
+            className: styles.failoverAlertBanner,
+            role: 'alert',
+            style: S.failoverAlertBanner,
+            key: 'failover-alert',
+          },
+          h(
+            'svg',
+            {
+              width: 16,
+              height: 16,
+              viewBox: '0 0 24 24',
+              fill: 'none',
+              stroke: 'currentColor',
+              strokeWidth: 2,
+              strokeLinecap: 'round',
+              strokeLinejoin: 'round',
+              style: { flexShrink: 0 },
+              'aria-hidden': 'true',
+            },
+            h('path', { d: 'M17 1l4 4-4 4' }),
+            h('path', { d: 'M3 11V9a4 4 0 0 1 4-4h14' }),
+            h('path', { d: 'M7 23l-4-4 4-4' }),
+            h('path', { d: 'M21 13v2a4 4 0 0 1-4 4H3' }),
+          ),
+          h(
+            'div',
+            null,
+            h(
+              'strong',
+              null,
+              `${t.failoverAlertPrefix}：${failoverRows.length} ${t.failoverAlertCountUnit}`,
+            ),
+            ' ',
+            `(${failoverRows.map(row => row.name || row.id).join(', ')})`,
           ),
         )
       : null,
@@ -6083,12 +6323,30 @@ const EN = {
   fallbackSecurityWarning: '[Notice] When enabled, requests will automatically fallback to direct connection if the proxy is unreachable, which may expose your real IP address to the target service.',
   fallbackAlert: '[Warning: Proxy down, degraded to direct]',
   enableProxyFailover: 'Active-Standby Failover',
-  enableProxyFailoverHint: 'Automatically failover to healthy standby preset nodes when connection to the primary proxy fails.',
+  enableProxyFailoverHint: 'Automatically try standby preset nodes in order when the primary proxy cannot be reached.',
   backupProfilesLabel: 'Standby Proxy Nodes (Failover in order, up to 3):',
   backupProfileSlot: (n: number) => `Standby Node ${n}`,
-  failoverAlert: (id: string) => `[Failover: Standby node ${id}]`,
-  failoverStandbyTakingOver: (primary: string, standby: string) => `${primary} (Primary) / ${standby} (Standby taking over)`,
-  standbyTakingOverBadge: (id: string) => `${id} (Standby taking over)`,
+  failoverAlert: (id: string) => `[Failover: last request served by standby ${id}]`,
+  failoverStandbyTakingOver: (primary: string, standby: string) => `${primary} (Primary) / last served by ${standby}`,
+  standbyTakingOverBadge: (id: string) => `${id} (last request served by standby)`,
+  failoverMissing: 'preset missing',
+  failoverMissingOptionSuffix: ' (missing preset)',
+  failoverDuplicate: 'duplicate',
+  failoverPrimarySame: 'same as primary',
+  failoverSourceOwn: 'this card',
+  failoverSourceDefault: 'default proxy',
+  failoverSourceProfile: 'preset ',
+  failoverNoUsable: 'no usable standby node',
+  failoverNeedsAttention: 'Standby chain issue',
+  failoverNoStandbyWarning: 'Failover is on, but no standby node is selected.',
+  failoverSelectedIssuesPrefix: 'Standby issues: ',
+  failoverChainText: (chain: string, source: string, inherited: boolean, skipped: string) =>
+    `Standby chain: ${chain}${inherited ? ` (inherited from ${source})` : ''}${skipped ? `; skipped: ${skipped}` : ''}`,
+  failoverConfiguredOff: (chain: string) =>
+    `Standby nodes are configured, but failover is off: ${chain}`,
+  failoverAlertPrefix: 'Failover takeover',
+  failoverAlertCountUnit: 'provider(s) last used a standby proxy',
+  retryCountSuffix: (n: number) => ` · retried ${n}`,
   dashboardAriaLabel: 'Runtime Dashboard',
   metricCoverageTitle: 'Proxy Coverage',
   metricSuccessRateTitle: 'Success Rate',
@@ -6326,12 +6584,30 @@ const ZH = {
   fallbackSecurityWarning: '[注意] 开启后，当代理不可达时将自动回退至本机直连网络，可能会向目标服务暴露你的真实出口 IP。',
   fallbackAlert: '[告警: 代理宕机，已降级直连]',
   enableProxyFailover: '主备代理多节点故障自动切换 (Failover)',
-  enableProxyFailoverHint: '开启后，当主代理建连失败时自动按顺序切换至备用预设节点重试。',
+  enableProxyFailoverHint: '开启后，当主代理建连失败时自动按顺序尝试备用预设节点。',
   backupProfilesLabel: '备用代理预设节点（按顺序故障切换，最多 3 个）：',
   backupProfileSlot: (n: number) => `备用节点 ${n}`,
-  failoverAlert: (id: string) => `[故障切换: 备用节点 ${id}]`,
-  failoverStandbyTakingOver: (primary: string, standby: string) => `${primary}（主） / ${standby}（备用接管中）`,
-  standbyTakingOverBadge: (id: string) => `${id}（备用接管中）`,
+  failoverAlert: (id: string) => `[故障切换: 上次请求经备用节点 ${id}]`,
+  failoverStandbyTakingOver: (primary: string, standby: string) => `${primary}（主） / 上次经 ${standby}`,
+  standbyTakingOverBadge: (id: string) => `${id}（上次请求经备用接管）`,
+  failoverMissing: '预设不存在',
+  failoverMissingOptionSuffix: '（预设已缺失）',
+  failoverDuplicate: '重复',
+  failoverPrimarySame: '与主节点相同',
+  failoverSourceOwn: '本卡',
+  failoverSourceDefault: '默认代理',
+  failoverSourceProfile: '预设 ',
+  failoverNoUsable: '无可用备用节点',
+  failoverNeedsAttention: '备用链异常',
+  failoverNoStandbyWarning: '已开启故障切换，但还没有选择备用节点。',
+  failoverSelectedIssuesPrefix: '备用链问题：',
+  failoverChainText: (chain: string, source: string, inherited: boolean, skipped: string) =>
+    `备用链：${chain}${inherited ? `（继承自${source}）` : ''}${skipped ? `；已跳过：${skipped}` : ''}`,
+  failoverConfiguredOff: (chain: string) =>
+    `已配置备用节点，但故障切换未开启：${chain}`,
+  failoverAlertPrefix: '备用接管',
+  failoverAlertCountUnit: '个 provider 的上次请求由备用节点承接',
+  retryCountSuffix: (n: number) => ` · 重试 ${n} 次`,
   dashboardAriaLabel: '运行监控仪表盘',
   metricCoverageTitle: '代理覆盖率',
   metricSuccessRateTitle: '连通成功率',
