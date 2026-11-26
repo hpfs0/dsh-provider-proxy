@@ -1769,56 +1769,67 @@ export function apply(ctx: any, config?: ProxyConfig): void {
         releasePrimary()
         for (const r of releaseStandbys) r()
       }
-      return router.run(
-        {
-          dispatcher: route.dispatcher,
-          standbyDispatchers: route.standbyDispatchers,
-          enableProxyFailover: route.enableProxyFailover,
-          failbackCooldownMs: 10_000,
-          isPrimaryFailed: () => {
-            const failedAt = primaryFailures.get(WEB_SEARCH_KEY)
-            return failedAt !== undefined && Date.now() - failedAt < 10_000
+      // A `run` scope has no stream iterator that could release its claim when
+      // the search never calls fetch, or when the fetch is decided direct /
+      // bypassed. Release when the search settles; the router's own release on
+      // a proxied request and the stream-end release are idempotent.
+      let searchResult: unknown
+      try {
+        searchResult = router.run(
+          {
+            dispatcher: route.dispatcher,
+            standbyDispatchers: route.standbyDispatchers,
+            enableProxyFailover: route.enableProxyFailover,
+            failbackCooldownMs: 10_000,
+            isPrimaryFailed: () => {
+              const failedAt = primaryFailures.get(WEB_SEARCH_KEY)
+              return failedAt !== undefined && Date.now() - failedAt < 10_000
+            },
+            markPrimaryFailed: () => primaryFailures.set(WEB_SEARCH_KEY, Date.now()),
+            markPrimaryRecovered: () => primaryFailures.delete(WEB_SEARCH_KEY),
+            trafficType: 'search',
+            onHit: () => {
+              searchCounters.proxied += 1
+              bump(WEB_SEARCH_KEY, token)
+            },
+            onSettle: (ok, detail, meta) => {
+              if (!ok) searchCounters.failed += 1
+              searchLast = {
+                lastAt: startedAt,
+                ok,
+                code: meta?.failoverProfileId && ok
+                  ? `[故障切换: 备用节点 ${meta.failoverProfileId}]`
+                  : ok
+                  ? String((detail as { status?: unknown } | undefined)?.status ?? '')
+                  : failureCodeOf(detail),
+              }
+              settle(WEB_SEARCH_KEY, token)(ok, detail, meta)
+            },
+            // The route's own target-host rules still decide (localDirect, a
+            // bypassHosts match, an onlyHosts miss). A direct verdict is recorded,
+            // because a search that did not use the proxy is exactly what the
+            // dashboard's `[搜索]` classification must show.
+            decide: (host: string | undefined) => {
+              const verdict = route.decide(host)
+              if (verdict === 'direct') {
+                searchCounters.direct += 1
+                touchSearchCard()
+              }
+              return verdict
+            },
+            enableFallbackDirect: plainEnableFallbackDirect(config),
+            bypassAll: plainBypassAll(config),
+            retryAttempts: plainRetryAttempts(config),
+            retryBackoffBaseMs: plainRetryBackoffBaseMs(config),
+            onLeaseRelease: release,
           },
-          markPrimaryFailed: () => primaryFailures.set(WEB_SEARCH_KEY, Date.now()),
-          markPrimaryRecovered: () => primaryFailures.delete(WEB_SEARCH_KEY),
-          trafficType: 'search',
-          onHit: () => {
-            searchCounters.proxied += 1
-            bump(WEB_SEARCH_KEY, token)
-          },
-          onSettle: (ok, detail, meta) => {
-            if (!ok) searchCounters.failed += 1
-            searchLast = {
-              lastAt: startedAt,
-              ok,
-              code: meta?.failoverProfileId && ok
-                ? `[故障切换: 备用节点 ${meta.failoverProfileId}]`
-                : ok
-                ? String((detail as { status?: unknown } | undefined)?.status ?? '')
-                : failureCodeOf(detail),
-            }
-            settle(WEB_SEARCH_KEY, token)(ok, detail, meta)
-          },
-          // The route's own target-host rules still decide (localDirect, a
-          // bypassHosts match, an onlyHosts miss). A direct verdict is recorded,
-          // because a search that did not use the proxy is exactly what the
-          // dashboard's `[搜索]` classification must show.
-          decide: (host: string | undefined) => {
-            const verdict = route.decide(host)
-            if (verdict === 'direct') {
-              searchCounters.direct += 1
-              touchSearchCard()
-            }
-            return verdict
-          },
-          enableFallbackDirect: plainEnableFallbackDirect(config),
-          bypassAll: plainBypassAll(config),
-          retryAttempts: plainRetryAttempts(config),
-          retryBackoffBaseMs: plainRetryBackoffBaseMs(config),
-          onLeaseRelease: release,
-        },
-        () => original.call(this, request, signal),
-      )
+          () => original.call(this, request, signal),
+        )
+      } catch (error) {
+        release()
+        throw error
+      }
+      return Promise.resolve(searchResult).finally(release)
     }
     web.search = patched
     // Restore on dispose: `ctx.web` is a Cordis traceable proxy, so READING
