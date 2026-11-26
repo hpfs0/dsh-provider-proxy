@@ -7,6 +7,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
+import { ProxyAgent } from 'undici'
 
 const { apply } = await import('../lib/index.js')
 
@@ -49,6 +50,13 @@ class FakeWeb {
   }
 }
 
+/** A search that answers without ever issuing a fetch (cache, local result). */
+class NoFetchWeb {
+  async search() {
+    return { sources: [], truncated: false }
+  }
+}
+
 /**
  * The ONE behaviour of Cordis's traceable service proxy that broke the restore:
  * `ctx.web` is a proxy, and reading a function-valued property through it returns
@@ -66,13 +74,17 @@ function asServiceProxy(instance) {
 }
 
 /** Mount the Host half with the fake web service, collecting effect disposers. */
-function mount(config) {
+function mount(config, WebClass = FakeWeb) {
   const disposers = []
+  const listeners = []
   // The plugin must see the service through the proxy, exactly as it does when
   // the real `ctx.web` is injected.
-  const web = asServiceProxy(new FakeWeb())
+  const web = asServiceProxy(new WebClass())
   const ctx = {
-    on: () => () => {},
+    on: (event, fn) => {
+      listeners.push({ event, fn })
+      return () => {}
+    },
     effect: fn => {
       const dispose = fn()
       if (typeof dispose === 'function') disposers.push(dispose)
@@ -87,7 +99,7 @@ function mount(config) {
   }
   apply(ctx, config)
   const installed = () => Object.getOwnPropertyDescriptor(web, 'search')?.value
-  return { web, disposers, installed }
+  return { web, disposers, listeners, installed }
 }
 
 const webSearchRoute = port => ({
@@ -107,6 +119,38 @@ test('web_search follows the reserved web-search route', async () => {
     assert.equal(proxy.seen.length, 1, 'the search request crossed the proxy')
     assert.equal(proxy.seen[0].url, 'http://search.invalid/api/search', 'the proxy saw the real target')
   } finally {
+    await proxy.close()
+  }
+})
+
+test('a search that never fetches releases its dispatcher claim on rebuild', async () => {
+  const proxy = await startRecordingProxy()
+  const originalClose = ProxyAgent.prototype.close
+  let closes = 0
+  ;(ProxyAgent.prototype as any).close = function (this: unknown, ...args: unknown[]) {
+    closes += 1
+    return (originalClose as any).apply(this, args)
+  }
+  let mounted: any
+  try {
+    mounted = mount(webSearchRoute(proxy.port), NoFetchWeb)
+    await settle()
+    await mounted.web.search({ query: 'x' })
+
+    const before = closes
+    const rebuild = mounted.listeners.find(listener => listener.event === 'loader/volatile-update')
+    assert.ok(rebuild, 'the rebuild hook is registered')
+    await Promise.resolve(rebuild.fn())
+    await settle()
+    await settle()
+
+    assert.ok(
+      closes > before,
+      'the retired dispatcher must close: the run scope released its claim even though no fetch happened',
+    )
+  } finally {
+    for (const dispose of mounted?.disposers ?? []) dispose()
+    ;(ProxyAgent.prototype as any).close = originalClose
     await proxy.close()
   }
 })
