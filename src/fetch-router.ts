@@ -147,6 +147,28 @@ export function canReplayRequest(input: unknown, init: unknown): boolean {
 }
 
 /**
+ * Whether a request may be retried after a 5xx response.
+ *
+ * A connection-establishment failure never reached the upstream, so it is safe
+ * to retry any method (subject to the body being replayable). A 502/503/504 is
+ * different: the proxy may have already forwarded the request, so only an
+ * HTTP-idempotent method may be sent a second time. POST/PATCH are excluded —
+ * retrying them risks duplicate generations or side effects.
+ */
+const IDEMPOTENT_METHODS = new Set(['GET', 'HEAD', 'OPTIONS', 'TRACE', 'PUT', 'DELETE'])
+
+export function isIdempotentRequest(input: unknown, init: unknown): boolean {
+  const fromInit = (init as { method?: unknown } | undefined)?.method
+  const fromInput = (input as { method?: unknown } | null | undefined)?.method
+  const method = typeof fromInit === 'string'
+    ? fromInit
+    : typeof fromInput === 'string'
+      ? fromInput
+      : 'GET'
+  return IDEMPOTENT_METHODS.has(method.toUpperCase())
+}
+
+/**
  * Full Jitter exponential backoff (N29):
  * Delay = random(0, min(maxDelayMs, baseMs * 2^attempt))
  */
@@ -388,6 +410,7 @@ function installSharedRouter(): RouterState {
               typeof response?.status === 'number' &&
               (response.status === 502 || response.status === 503 || response.status === 504) &&
               totalRetries < maxRetries &&
+              isIdempotentRequest(input, init) &&
               canReplayRequest(input, init)
             ) {
               totalRetries += 1
