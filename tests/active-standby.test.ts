@@ -7,6 +7,9 @@ import { ProxyAgent } from 'undici'
 import {
   acquireFetchRouter,
   apply,
+  backupIdsAfterDelete,
+  backupIdsAfterRename,
+  backupReferencesTo,
   buildRouteEntry,
   closeTable,
   normalizeDefaultProxy,
@@ -703,4 +706,36 @@ test('N26: e2e apply() - llm/stream switches to standby and updates lastUse with
     await standbyProxy.close()
     await origin.close()
   }
+})
+
+test('P1: backup references are found across routes, presets and the default endpoint', () => {
+  const routes = {
+    a: { profileId: 'A', backupProfileIds: ['B'] },
+    b: { profileId: 'B', backupProfileIds: ['C'] },
+    c: { backupProfileIds: ['B'] },
+  }
+  const profiles = {
+    A: { backupProfileIds: ['B'] },
+    B: { backupProfileIds: ['B'] },
+    C: {},
+  }
+  const defaultProxy = { backupProfileIds: ['B'] }
+  assert.deepEqual(backupReferencesTo(routes, profiles, defaultProxy, 'B'), {
+    routes: ['a', 'c'],
+    profiles: ['A'],
+    usesDefault: true,
+  })
+})
+
+test('P1: renaming a preset rewrites and dedupes standby lists', () => {
+  assert.deepEqual(backupIdsAfterRename(['B', 'B', 'A'], 'B', 'C'), ['C', 'A'])
+  assert.deepEqual(backupIdsAfterRename(['A', 'B'], 'B', 'A'), ['A'])
+  assert.equal(backupIdsAfterRename(['A'], 'B', 'C'), undefined)
+  assert.equal(backupIdsAfterRename(undefined, 'B', 'C'), undefined)
+})
+
+test('P1: deleting a preset removes it from standby lists', () => {
+  assert.deepEqual(backupIdsAfterDelete(['B', 'A'], 'B'), ['A'])
+  assert.equal(backupIdsAfterDelete(['A'], 'B'), undefined)
+  assert.equal(backupIdsAfterDelete(undefined, 'B'), undefined)
 })

@@ -38,6 +38,9 @@ import { defaultProxyProblem, proxyHostProblem } from './proxy-address.js'
 import {
   DEFAULT_PROFILE_LABEL,
   DEFAULT_PROFILE_BINDING,
+  backupIdsAfterDelete,
+  backupIdsAfterRename,
+  backupReferencesTo,
   bindingFields,
   endpointAddress,
   endpointSummary,
@@ -3148,24 +3151,52 @@ function renderPage(ctx: any): unknown {
     const next = overlayDrafts(storedProfiles, profileDraft)
     delete next[from]
     next[to] = source
-    const bound = routesBoundTo({ ...configured, ...draft }, from)
+    const routeState = { ...configured, ...draft }
+    const defaultState = { ...storedDefault, ...defaultDraft }
+    const refs = backupReferencesTo(routeState, next, defaultState, from)
+    // Presets travel as one dictionary write, so carry every standby reference
+    // inside it across the rename too. The renamed preset's own list may name
+    // itself, and other presets may use it as a failover node.
+    for (const [name, value] of Object.entries(next)) {
+      const backupProfileIds = backupIdsAfterRename(value.backupProfileIds, from, to)
+      if (backupProfileIds !== undefined) next[name] = { ...value, backupProfileIds }
+    }
+    const bound = routesBoundTo(routeState, from)
+    const routeBackups = new Map<string, string[]>()
+    for (const id of refs.routes) {
+      const backupProfileIds = backupIdsAfterRename(routeState[id]?.backupProfileIds, from, to)
+      if (backupProfileIds !== undefined) routeBackups.set(id, backupProfileIds)
+    }
+    const defaultBackups = backupIdsAfterRename(defaultState.backupProfileIds, from, to)
     // The search split binding is NOT a provider route: it lives in the top-level
     // `searchProxyProfileId`, so moving only the dictionary and the route bindings
     // left it naming a preset that no longer existed, and the next search was
     // refused as "preset missing" — a rename that broke search.
     const searchBound = globalSearchProfileId === from
     setProfileDraft((current: any) => {
-      const nextDraft = { ...current }
-      delete nextDraft[from]
+      const nextDraft: any = {}
+      for (const [name, value] of Object.entries(current)) {
+        if (name === from) continue
+        const backupProfileIds = backupIdsAfterRename((value as any)?.backupProfileIds, from, to)
+        nextDraft[name] = backupProfileIds === undefined
+          ? value
+          : { ...(value as any), backupProfileIds }
+      }
       nextDraft[to] = source
       return nextDraft
     })
-    if (bound.length > 0) {
+    if (bound.length > 0 || routeBackups.size > 0) {
       setDraft((current: any) => {
         const nextDraft = { ...current }
         for (const id of bound) nextDraft[id] = { ...nextDraft[id], profileId: to }
+        for (const [id, backupProfileIds] of routeBackups) {
+          nextDraft[id] = { ...nextDraft[id], backupProfileIds }
+        }
         return nextDraft
       })
+    }
+    if (defaultBackups !== undefined) {
+      setDefaultDraft((current: any) => ({ ...current, backupProfileIds: defaultBackups }))
     }
     if (searchBound) editGlobal('searchProxyProfileId', to)
     invalidateTests(bound)
@@ -3174,6 +3205,14 @@ function renderPage(ctx: any): unknown {
       [
         { op: 'set', path: ['proxyProfiles'], value: next },
         ...bound.map(id => ({ op: 'set', path: ['providers', id, 'profileId'], value: to })),
+        ...[...routeBackups].map(([id, backupProfileIds]) => ({
+          op: 'set',
+          path: ['providers', id, 'backupProfileIds'],
+          value: backupProfileIds,
+        })),
+        ...(defaultBackups === undefined
+          ? []
+          : [{ op: 'set', path: ['defaultProxy', 'backupProfileIds'], value: defaultBackups }]),
         ...(searchBound ? [{ op: 'set', path: ['searchProxyProfileId'], value: to }] : []),
       ],
       `${t.profileNameLabel} ${from} → ${to}`,
@@ -3183,15 +3222,29 @@ function renderPage(ctx: any): unknown {
 
   /** Delete one preset. Routes bound to it keep their id, and say it is gone. */
   const deleteProfile = (name: string): void => {
-    const bound = routesBoundTo({ ...configured, ...draft }, name)
+    const routeState = { ...configured, ...draft }
+    const defaultState = { ...storedDefault, ...defaultDraft }
+    const next = overlayDrafts(storedProfiles, profileDraft)
+    const bound = routesBoundTo(routeState, name)
+    const refs = backupReferencesTo(routeState, next, defaultState, name)
     // The search split may bind this preset too. It is deliberately NOT cleared:
     // a `dedicated` search strategy refuses to run without a usable preset rather
     // than silently going direct, and clearing it would make that refusal
     // disappear while the user still believes search is proxied. The prompt is
     // therefore the only place that can tell them, so it must.
     const searchBound = globalSearchProfileId === name
+    // A route already named as a primary binding is listed once; its standby
+    // list is still cleaned below.
+    const failoverDependents = [
+      ...refs.routes.filter(id => !bound.includes(id)),
+      ...refs.profiles,
+      ...(refs.usesDefault ? [t.profileDeleteDefaultLabel] : []),
+    ]
     const dependents = [
       ...(bound.length === 0 ? [] : [`${t.profileDeleteInUse}${bound.join('、')}`]),
+      ...(failoverDependents.length === 0
+        ? []
+        : [`${t.profileDeleteFailoverInUse}${failoverDependents.join('、')}`]),
       ...(searchBound ? [t.profileDeleteSearchInUse] : []),
     ]
     if (
@@ -3203,15 +3256,61 @@ function renderPage(ctx: any): unknown {
     ) {
       return
     }
-    const next = overlayDrafts(storedProfiles, profileDraft)
     delete next[name]
+    // Presets travel as one dictionary write: remove the deleted name from every
+    // other preset's standby list in the same write.
+    for (const [presetName, value] of Object.entries(next)) {
+      const backupProfileIds = backupIdsAfterDelete(value.backupProfileIds, name)
+      if (backupProfileIds !== undefined) next[presetName] = { ...value, backupProfileIds }
+    }
     setProfileDraft((current: any) => {
-      const nextDraft = { ...current }
-      delete nextDraft[name]
+      const nextDraft: any = {}
+      for (const [presetName, value] of Object.entries(current)) {
+        if (presetName === name) continue
+        const backupProfileIds = backupIdsAfterDelete((value as any)?.backupProfileIds, name)
+        nextDraft[presetName] = backupProfileIds === undefined
+          ? value
+          : { ...(value as any), backupProfileIds }
+      }
       return nextDraft
     })
+    const routeBackups = new Map<string, string[]>()
+    for (const id of refs.routes) {
+      const backupProfileIds = backupIdsAfterDelete(routeState[id]?.backupProfileIds, name)
+      if (backupProfileIds !== undefined) routeBackups.set(id, backupProfileIds)
+    }
+    const defaultBackups = backupIdsAfterDelete(defaultState.backupProfileIds, name)
+    if (routeBackups.size > 0) {
+      setDraft((current: any) => {
+        const nextDraft = { ...current }
+        for (const [id, backupProfileIds] of routeBackups) {
+          nextDraft[id] = { ...nextDraft[id], backupProfileIds }
+        }
+        return nextDraft
+      })
+    }
+    if (defaultBackups !== undefined) {
+      setDefaultDraft((current: any) => ({ ...current, backupProfileIds: defaultBackups }))
+    }
     invalidateTests(bound)
-    writeProfiles(`\u0000profile\u0000delete`, next, `${t.profileNameLabel} ${name}`, () => undefined)
+    const full: Record<string, ProfileValue> = {}
+    for (const [presetName, value] of Object.entries(next)) full[presetName] = profileView(value)
+    saveMany(
+      '\u0000profile\u0000delete',
+      [
+        { op: 'set', path: ['proxyProfiles'], value: full },
+        ...[...routeBackups].map(([id, backupProfileIds]) => ({
+          op: 'set',
+          path: ['providers', id, 'backupProfileIds'],
+          value: backupProfileIds,
+        })),
+        ...(defaultBackups === undefined
+          ? []
+          : [{ op: 'set', path: ['defaultProxy', 'backupProfileIds'], value: defaultBackups }]),
+      ],
+      `${t.profileNameLabel} ${name}`,
+      () => undefined,
+    )
   }
 
   /** One preset control: draft first, then a debounced write to its own key. */
@@ -6465,6 +6564,9 @@ const EN = {
     'These providers are bound to this preset and will stop being proxied until they are rebound:\n',
   profileDeleteSearchInUse:
     'Web-search traffic is also split through this preset (searchProxyProfileId); search will be refused until another preset is bound.',
+  profileDeleteFailoverInUse:
+    'These routes or presets use it as a standby node; the reference will be removed:\n',
+  profileDeleteDefaultLabel: 'default proxy',
   profileUsedBy: 'Used by: ',
   profileBinding: 'Endpoint',
   profileBindingOwn: 'Custom (this card)',
@@ -6725,6 +6827,8 @@ const ZH = {
   profileDeleteInUse: '以下 provider 绑定在该预设上，删除后将不再走代理，直到重新绑定：\n',
   profileDeleteSearchInUse:
     '搜索分流也绑定在该预设上（searchProxyProfileId），删除后搜索请求会被拒绝，直到重新绑定预设。',
+  profileDeleteFailoverInUse: '以下路由或预设将该预设作为备用节点，删除后会移除该引用：\n',
+  profileDeleteDefaultLabel: '默认代理',
   profileUsedBy: '被以下 provider 使用：',
   profileBinding: '端点来源',
   profileBindingOwn: '独立自定义配置',

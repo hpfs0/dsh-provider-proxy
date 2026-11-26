@@ -2027,6 +2027,9 @@ export {
 } from './host-rules.js'
 export {
   DEFAULT_PROFILE_LABEL,
+  backupIdsAfterDelete,
+  backupIdsAfterRename,
+  backupReferencesTo,
   bindingFields,
   endpointSummary,
   effectiveRoute,

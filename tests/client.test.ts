@@ -6277,6 +6277,148 @@ test('N14: renaming a preset moves the key and rebinds every route using it', as
   }
 })
 
+test('P1: renaming a preset carries failover references in routes, presets and the default block', async () => {
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: { enabled: true, useDefault: true, backupProfileIds: ['HK-Proxy'] },
+        },
+        proxyProfiles: {
+          'HK-Proxy': { protocol: 'http', host: '127.0.0.1', port: 7891 },
+          TKY: {
+            protocol: 'http',
+            host: '127.0.0.1',
+            port: 7892,
+            backupProfileIds: ['HK-Proxy'],
+          },
+        },
+        defaultProxy: {
+          protocol: 'http',
+          host: '127.0.0.1',
+          port: 7890,
+          backupProfileIds: ['HK-Proxy'],
+          enableProxyFailover: true,
+        },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+
+    findButtons(profileManagerOf(render()))
+      .find(button => textsOf(button).includes('重命名'))
+      .props.onClick()
+    findInputsByPlaceholder(profileManagerOf(render()), '该代理预设的新名称：')[0]
+      .props.onChange({ target: { value: 'HK-Fast' } })
+    findButtons(profileManagerOf(render()))
+      .find(button => textsOf(button).includes('保存名称'))
+      .props.onClick()
+    await writeSettle()
+
+    const ops = harness.writes[0].ops
+    const profilesOp = ops.find(op => op.path[0] === 'proxyProfiles')
+    assert.ok(profilesOp, 'the preset dictionary is written')
+    assert.equal(profilesOp.value['HK-Proxy'], undefined, 'the old key is gone')
+    assert.ok(profilesOp.value['HK-Fast'], 'the renamed key exists')
+    assert.deepEqual(
+      profilesOp.value.TKY.backupProfileIds,
+      ['HK-Fast'],
+      'a preset standby reference follows the rename',
+    )
+    assert.deepEqual(
+      ops.find(op => op.path[0] === 'providers'),
+      { op: 'set', path: ['providers', 'sensenova', 'backupProfileIds'], value: ['HK-Fast'] },
+      'a route standby reference follows the rename',
+    )
+    assert.deepEqual(
+      ops.find(op => op.path[0] === 'defaultProxy'),
+      { op: 'set', path: ['defaultProxy', 'backupProfileIds'], value: ['HK-Fast'] },
+      'the default endpoint standby reference follows the rename',
+    )
+    assert.ok(
+      textsOf(cardFor(render(), 'sensenova')).some(text => text.includes('备用链：HK-Fast')),
+      'the card shows the renamed standby instead of a missing one',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('P1: deleting a preset removes standby references and warns about the dependents', async () => {
+  let confirmText
+  const { mod, restore } = loadBundle()
+  try {
+    const harness = mountPlugin(mod, {
+      value: {
+        providers: {
+          sensenova: { enabled: true, useDefault: true, backupProfileIds: ['HK-Proxy'] },
+        },
+        proxyProfiles: {
+          'HK-Proxy': { protocol: 'http', host: '127.0.0.1', port: 7891 },
+          TKY: {
+            protocol: 'http',
+            host: '127.0.0.1',
+            port: 7892,
+            backupProfileIds: ['HK-Proxy'],
+          },
+        },
+        defaultProxy: {
+          protocol: 'http',
+          host: '127.0.0.1',
+          port: 7890,
+          backupProfileIds: ['HK-Proxy'],
+          enableProxyFailover: true,
+        },
+      },
+    })
+    const [, render] = renderPage(mod, harness)
+    await settle()
+    globalThis.window = {
+      ...globalThis.window,
+      confirm: text => {
+        confirmText = text
+        return true
+      },
+    }
+
+    findButtons(profileManagerOf(render()))
+      .find(button => textsOf(button).includes('删除'))
+      .props.onClick()
+    await writeSettle()
+
+    assert.ok(
+      String(confirmText).includes('备用节点'),
+      'the prompt names the standby dependents',
+    )
+    assert.ok(String(confirmText).includes('sensenova'), 'the prompt names the route')
+    assert.ok(String(confirmText).includes('TKY'), 'the prompt names the preset')
+    assert.ok(String(confirmText).includes('默认代理'), 'the prompt names the default block')
+
+    const ops = harness.writes[0].ops
+    const profilesOp = ops.find(op => op.path[0] === 'proxyProfiles')
+    assert.ok(profilesOp, 'the preset dictionary is written')
+    assert.deepEqual(Object.keys(profilesOp.value), ['TKY'])
+    assert.equal(
+      profilesOp.value.TKY.backupProfileIds,
+      undefined,
+      'the deleted name is removed from the remaining preset',
+    )
+    assert.deepEqual(
+      ops.find(op => op.path[0] === 'providers'),
+      { op: 'set', path: ['providers', 'sensenova', 'backupProfileIds'], value: [] },
+      'the deleted name is removed from the route',
+    )
+    assert.deepEqual(
+      ops.find(op => op.path[0] === 'defaultProxy'),
+      { op: 'set', path: ['defaultProxy', 'backupProfileIds'], value: [] },
+      'the deleted name is removed from the default block',
+    )
+  } finally {
+    restore()
+  }
+})
+
 test('P2-6: renaming the search-split preset carries the binding with it', async () => {
   const { mod, restore } = loadBundle()
   try {

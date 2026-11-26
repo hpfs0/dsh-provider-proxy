@@ -219,6 +219,70 @@ export function routesBoundTo(
   return out.sort()
 }
 
+/**
+ * Every route, preset and the shared default that name one preset as a standby.
+ *
+ * Renaming or deleting a preset must carry these references with it, exactly as
+ * it carries the `profileId` bindings: leaving them behind turns a working
+ * failover chain into a "preset missing" skip the user never asked for.
+ */
+export interface BackupReferences {
+  /** Provider routes whose `backupProfileIds` contain the preset. */
+  routes: string[]
+  /** Other presets whose `backupProfileIds` contain it. */
+  profiles: string[]
+  /** Whether the shared default endpoint names it as a standby. */
+  usesDefault: boolean
+}
+
+function listBacks(list: unknown, profileId: string): boolean {
+  return Array.isArray(list) && list.some(id => id === profileId)
+}
+
+export function backupReferencesTo(
+  routes: Readonly<Record<string, Partial<ProviderProxyRouteValue> | undefined>> | undefined,
+  profiles: ProfileMap | undefined,
+  defaultProxy: Partial<DefaultProxyValue> | undefined,
+  profileId: string,
+): BackupReferences {
+  const routesOut: string[] = []
+  for (const [id, route] of Object.entries(routes ?? {})) {
+    if (listBacks(route?.backupProfileIds, profileId)) routesOut.push(id)
+  }
+  const profilesOut: string[] = []
+  for (const [name, preset] of Object.entries(profiles ?? {})) {
+    // The preset itself is renamed/deleted wholesale; its own list is handled
+    // by the caller, never reported as a dependency.
+    if (name !== profileId && listBacks(preset?.backupProfileIds, profileId)) profilesOut.push(name)
+  }
+  return {
+    routes: routesOut.sort(),
+    profiles: profilesOut.sort(),
+    usesDefault: listBacks(defaultProxy?.backupProfileIds, profileId),
+  }
+}
+
+/** The list after renaming `from` to `to`, or undefined when it does not mention `from`. */
+export function backupIdsAfterRename(value: unknown, from: string, to: string): string[] | undefined {
+  if (!Array.isArray(value) || !value.some(id => id === from)) return undefined
+  const out: string[] = []
+  for (const raw of value) {
+    if (typeof raw !== 'string') continue
+    const id = raw.trim()
+    if (id.length === 0) continue
+    const next = id === from ? to : id
+    if (!out.includes(next)) out.push(next)
+    if (out.length === 3) break
+  }
+  return out
+}
+
+/** The list after removing `name`, or undefined when it does not mention `name`. */
+export function backupIdsAfterDelete(value: unknown, name: string): string[] | undefined {
+  if (!Array.isArray(value) || !value.some(id => id === name)) return undefined
+  return value.filter((id): id is string => typeof id === 'string' && id.length > 0 && id !== name)
+}
+
 /** A short, credential-free endpoint summary, e.g. `http://127.0.0.1:7890`. */
 export function endpointSummary(endpoint: Partial<DefaultProxyValue> | undefined): string {
   const protocol = endpoint?.protocol ?? 'http'
