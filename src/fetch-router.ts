@@ -177,6 +177,50 @@ export function isIdempotentRequest(input: unknown, init: unknown): boolean {
   return IDEMPOTENT_METHODS.has(method.toUpperCase())
 }
 
+/** Read the caller's abort signal from an init object or a Request input. */
+function requestSignal(input: unknown, init: unknown): AbortSignal | undefined {
+  const fromInit = (init as { signal?: unknown } | undefined)?.signal
+  const fromInput = (input as { signal?: unknown } | null | undefined)?.signal
+  const value = fromInit ?? fromInput
+  return value !== null &&
+    typeof value === 'object' &&
+    typeof (value as AbortSignal).aborted === 'boolean' &&
+    typeof (value as AbortSignal).addEventListener === 'function'
+    ? (value as AbortSignal)
+    : undefined
+}
+
+function abortError(signal: AbortSignal | undefined): unknown {
+  return signal?.reason ?? new DOMException('The operation was aborted.', 'AbortError')
+}
+
+/**
+ * Sleep for a retry, stopping immediately when the caller aborts.
+ *
+ * A bare `setTimeout` keeps the request alive past the caller's deadline: the
+ * signal only becomes visible on the NEXT fetch attempt, so a 200ms timeout
+ * with a 5s backoff would reject seconds late.
+ */
+async function sleepWithSignal(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  if (signal?.aborted) throw abortError(signal)
+  if (ms <= 0) return
+  await new Promise<void>((resolve, reject) => {
+    let settled = false
+    const finish = (settle: () => void): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
+      settle()
+    }
+    const timer = setTimeout(() => finish(resolve), ms)
+    const onAbort = (): void => finish(() => reject(abortError(signal)))
+    signal?.addEventListener('abort', onAbort, { once: true })
+    // Aborted between the initial check and the listener registration.
+    if (signal?.aborted) onAbort()
+  })
+}
+
 /**
  * Full Jitter exponential backoff (N29):
  * Delay = random(0, min(maxDelayMs, baseMs * 2^attempt))
@@ -401,6 +445,7 @@ function installSharedRouter(): RouterState {
 
     const maxRetries = Math.max(0, Math.min(3, active.retryAttempts ?? 0))
     const baseBackoffMs = active.retryBackoffBaseMs ?? 200
+    const signal = requestSignal(input, init)
     let totalRetries = 0
 
     const execute = async (): Promise<any> => {
@@ -422,15 +467,14 @@ function installSharedRouter(): RouterState {
               isIdempotentRequest(input, init) &&
               canReplayRequest(input, init)
             ) {
+              if (signal?.aborted) throw abortError(signal)
               totalRetries += 1
               active.onRetry?.(totalRetries, response)
               try {
                 await response.body?.cancel?.()
               } catch {}
               const delay = fullJitterBackoff(totalRetries - 1, baseBackoffMs)
-              if (delay > 0) {
-                await new Promise(r => setTimeout(r, delay))
-              }
+              if (delay > 0) await sleepWithSignal(delay, signal)
               continue
             }
 
@@ -450,12 +494,11 @@ function installSharedRouter(): RouterState {
 
             // N29: retry connection errors on current candidate before failing over
             if (totalRetries < maxRetries) {
+              if (signal?.aborted) throw abortError(signal)
               totalRetries += 1
               active.onRetry?.(totalRetries, error)
               const delay = fullJitterBackoff(totalRetries - 1, baseBackoffMs)
-              if (delay > 0) {
-                await new Promise(r => setTimeout(r, delay))
-              }
+              if (delay > 0) await sleepWithSignal(delay, signal)
               continue
             }
 
