@@ -466,8 +466,16 @@ function installSharedRouter(): RouterState {
     return promise as never
   }
 
+  // A host may expose `fetch` as an accessor property (get/set), as the DSH
+  // desktop runtime does. Spreading such a descriptor copies the accessors,
+  // and adding `value` to them is illegal in V8 ("Cannot both specify
+  // accessors and a value or writable attribute"), so build a plain data
+  // descriptor from the fields that can be carried over. `release()` restores
+  // the descriptor captured above, accessor hosts included.
   Object.defineProperty(globalThis, 'fetch', {
-    ...(descriptor ?? { configurable: true, enumerable: true, writable: true }),
+    configurable: descriptor?.configurable ?? true,
+    enumerable: descriptor?.enumerable ?? true,
+    writable: true,
     value: routedFetch,
   })
 

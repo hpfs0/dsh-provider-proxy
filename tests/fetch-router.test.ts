@@ -181,6 +181,49 @@ test('two holders share one shim and restore it only once both release', () => {
   assert.equal(globalThis.fetch, before)
 })
 
+/**
+ * Issue #1: a host may expose `fetch` as an accessor property (get/set)
+ * instead of a data property, as the DSH desktop runtime does. Spreading such
+ * a descriptor and adding `value` is illegal in V8, so installation used to
+ * throw before the plugin could activate.
+ */
+test('installs and restores the shim when fetch is an accessor property', () => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'fetch')
+  const nativeFetch = globalThis.fetch
+  const getter = () => nativeFetch
+
+  try {
+    Object.defineProperty(globalThis, 'fetch', {
+      configurable: true,
+      enumerable: true,
+      get: getter,
+      set() {
+        throw new Error('the shim must replace the property, not assign through the setter')
+      },
+    })
+
+    const router = acquireFetchRouter()
+    try {
+      const installed = Object.getOwnPropertyDescriptor(globalThis, 'fetch')
+      assert.equal(typeof installed?.value, 'function', 'the shim is installed as a data property')
+      assert.equal(installed?.get, undefined, 'no accessor is copied into the shim')
+      assert.equal(installed?.writable, true, 'the shim stays writable')
+      assert.notEqual(globalThis.fetch, nativeFetch, 'fetch now points at the shim')
+    } finally {
+      router.release()
+    }
+
+    const restored = Object.getOwnPropertyDescriptor(globalThis, 'fetch')
+    assert.equal(restored?.get, getter, 'release restores the accessor')
+    assert.equal(globalThis.fetch, nativeFetch, 'the underlying fetch is unchanged')
+  } finally {
+    // Leave the process-wide global exactly as it was, even if an assertion
+    // above failed with the shim still installed.
+    if (original === undefined) delete (globalThis as { fetch?: unknown }).fetch
+    else Object.defineProperty(globalThis, 'fetch', original)
+  }
+})
+
 test('onHit fires once per request that crosses the proxy', async () => {
   const proxy = await startRecordingProxy()
   const router = acquireFetchRouter()
