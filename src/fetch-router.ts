@@ -487,8 +487,13 @@ function installSharedRouter(): RouterState {
             return response
           } catch (error: unknown) {
             lastError = error
-            // Only connection-establishment errors with replayable bodies are allowed to retry/failover
-            if (!isNetworkFailoverError(error) || !canReplayRequest(input, init)) {
+            if (!isNetworkFailoverError(error)) throw error
+            if (!canReplayRequest(input, init)) {
+              // The request body cannot be sent twice, so this request cannot
+              // fail over — but the primary is demonstrably down. Record it so
+              // the NEXT request (including a new streaming upload) starts with
+              // the standbys instead of hitting the dead node again.
+              if (candidate.kind === 'primary') setPrimaryFailed()
               throw error
             }
 
