@@ -8,6 +8,7 @@ import {
   acquireFetchRouter,
   apply,
   fullJitterBackoff,
+  isIdempotentRequest,
 } from '../lib/index.js'
 
 async function startOriginServer() {
@@ -112,6 +113,58 @@ test('N29: fullJitterBackoff - correctly respects bounds and caps', () => {
   for (let i = 0; i < 50; i++) {
     const delay = fullJitterBackoff(10, 100, 5000)
     assert.ok(delay >= 0 && delay <= 5000, `delay ${delay} should not exceed cap 5000`)
+  }
+})
+
+test('N29: only idempotent methods are eligible for 5xx retry', () => {
+  assert.equal(isIdempotentRequest('http://x.invalid', undefined), true, 'no method means GET')
+  assert.equal(isIdempotentRequest('http://x.invalid', { method: 'GET' }), true)
+  assert.equal(isIdempotentRequest('http://x.invalid', { method: 'POST' }), false)
+  assert.equal(isIdempotentRequest('http://x.invalid', { method: 'PATCH' }), false)
+  assert.equal(isIdempotentRequest('http://x.invalid', { method: 'PUT' }), true)
+  assert.equal(isIdempotentRequest('http://x.invalid', { method: 'DELETE' }), true)
+  assert.equal(
+    isIdempotentRequest(new Request('http://x.invalid', { method: 'POST' }), undefined),
+    false,
+    'a Request carries its own method',
+  )
+})
+
+test('N29: router level - a POST with a replayable body is NOT retried on 502', async () => {
+  const proxy = await startPermanentStatusProxy(502)
+  const router = acquireFetchRouter()
+  const agent = new ProxyAgent({ uri: `http://127.0.0.1:${proxy.port}` })
+  let retried = 0
+
+  try {
+    const stream = router.wrap(
+      {
+        dispatcher: agent,
+        retryAttempts: 2,
+        retryBackoffBaseMs: 1,
+        onRetry: () => {
+          retried += 1
+        },
+      },
+      () =>
+        (async function* () {
+          const res = await globalThis.fetch('http://post.invalid/v1/messages', {
+            method: 'POST',
+            body: JSON.stringify({ message: 'must not be replayed after a gateway 502' }),
+          })
+          yield res.status
+        })(),
+    )
+
+    const chunks = []
+    for await (const chunk of stream) chunks.push(chunk)
+
+    assert.equal(proxy.getHits(), 1, 'the POST must be sent exactly once')
+    assert.equal(retried, 0, 'no retry callback for a non-idempotent 5xx')
+    assert.deepEqual(chunks, [502], 'the final 502 is returned to the caller')
+  } finally {
+    await proxy.close()
+    router.release()
   }
 })
 

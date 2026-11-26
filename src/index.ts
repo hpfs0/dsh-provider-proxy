@@ -1977,6 +1977,7 @@ export {
   canReplayRequest,
   kNativeFetch,
   isNetworkFailoverError,
+  isIdempotentRequest,
   fullJitterBackoff,
 } from './fetch-router.js'
 export type { TrafficContext, TrafficType } from './fetch-router.js'

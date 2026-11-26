@@ -4,7 +4,7 @@
 
 **v1.4.0 (High Availability & Failover)** 带来生产级高可用容灾与重试：
 - **主备代理多节点故障自动切换 (N26 Active-Standby Failover)**：默认代理、命名预设及自定义端点支持指定最多 3 个备用预设节点。绑定默认代理或预设的卡片会自动继承其 Failover 开关与备用链；主节点在连接建立阶段宕机时自动按序切换至备用节点（零请求重复、安全 fail-closed）。界面展示实际生效的备用链、缺失/不可用警告与上次接管节点，仪表盘同步汇总接管数量；主节点恢复并冷却后自动切回（Failback）。
-- **请求级智能指数退避重试 (N29 Smart Request Retry)**：提供基于 Full Jitter 的退避重试策略（0-3 次，默认 0 关闭）。仅在连接建立阶段异常或 HTTP 502/503/504 且上游未产出数据时安全重发，严格规避 4xx/凭据失效、流式截断及 `ECONNRESET` 非幂等重发。
+- **请求级智能指数退避重试 (N29 Smart Request Retry)**：提供基于 Full Jitter 的退避重试策略（0-3 次，默认 0 关闭）。仅在连接建立阶段异常，或幂等请求收到 HTTP 502/503/504 且上游未产出数据时安全重发，严格规避 4xx/凭据失效、流式截断、`ECONNRESET` 以及非幂等请求重发。
 - **备份升级至 Schema v4**：无缝持久化主备多节点与退避重试配置，全面兼容 v1/v2/v3 备份平滑导入。
 
 **v1.3.0 (Backup & Observability)** 把「恢复＝整体替换」补齐：备份升级到 **Schema v3**，新增 `enableFallbackDirect` 安全开关；仪表盘成功率与平均延迟统一为**近 24 小时窗口**、纳入真实请求 / 自检 / 心跳探针；同时修复英文界面中文残留、页签键盘导航、批量测试范围、目录缺失 provider 只读卡、轮询自愈等可观测性与无障碍问题。
@@ -141,10 +141,11 @@ dsh plugin --profile web add dsh-provider-proxy
 在 **全局设置** 中新增请求级指数退避重试控制（`retryAttempts` 0~3 次，默认 0 关闭；`retryBackoffBaseMs` 默认 200 ms）：
 - **安全重试范围**：
   - TCP/TLS/CONNECT/SOCKS5 握手阶段失败（`ECONNREFUSED`、`EHOSTUNREACH`、`ENETUNREACH`、`ConnectTimeoutError`）；
-  - HTTP 502 / 503 / 504 网关异常（且响应流尚未开始向调用方输出数据）。
+  - HTTP 502 / 503 / 504 网关异常、请求方法幂等（`GET` / `HEAD` / `OPTIONS` / `TRACE` / `PUT` / `DELETE`），且响应流尚未开始向调用方输出数据。
 - **严格禁止重试**：
   - 400（参数错误）、401/403（凭据失效）、407（代理认证失败）；
   - 响应流已产生第一个 chunk；
+  - `POST` / `PATCH` 等非幂等请求的 502/503/504（无法证明上游未处理）；
   - 任何已可能到达上游的场景（`ECONNRESET`、调用方超时、body 为不可重复读取的 `ReadableStream`）。
 - **Full Jitter 指数退避**：
   $$\text{Delay} = \text{random}(0, \min(5000, \text{baseMs} \times 2^{\text{attempt}}))$$
@@ -296,7 +297,7 @@ Host catalog 是否列出某个 provider（`live`）不影响已保存路由的�
 | `heartbeatConsecutiveFails` | `2` | 连续失败多少次判定为「失联」并亮红预警 |
 | `searchProxyStrategy` | `inherit` | 搜索流量分流：`inherit` / `dedicated` / `direct` / `custom`（见上节） |
 | `searchProxyProfileId` | `''` | `dedicated` 绑定的预设名；留空表示用「Web 搜索」卡片自带的端点 |
-| `retryAttempts` | `0` | 请求级重试次数上限（0~3，默认 0 关闭；仅限连接建立异常或 502/503/504 未消费流时） |
+| `retryAttempts` | `0` | 请求级重试次数上限（0~3，默认 0 关闭；仅限连接建立异常，或幂等请求的 502/503/504 未消费流时） |
 | `retryBackoffBaseMs` | `200` | Full Jitter 指数退避的基础基准毫秒数（默认 200 ms） |
 
 每个 `providers.<id>` 除原有的 `enabled` / `useDefault` 等字段外，0.9.0 起还接受 `profileId`（默认 `''`），1.4.0 起新增：
