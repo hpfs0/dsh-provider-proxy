@@ -560,6 +560,52 @@ test('N29: P1-4 - non-replayable body (ReadableStream) is NOT retried on 502', a
   }
 })
 
+test('N29: a non-replayable connect failure still marks the primary down', async () => {
+  const deadPort = await getUnusedPort()
+  const router = acquireFetchRouter()
+  const agent = new ProxyAgent({ uri: `http://127.0.0.1:${deadPort}` })
+  let marked = 0
+
+  try {
+    const stream = router.wrap(
+      {
+        dispatcher: agent,
+        markPrimaryFailed: () => {
+          marked += 1
+        },
+      },
+      () =>
+        (async function* () {
+          const bodyStream = new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode('streaming request body'))
+              controller.close()
+            },
+          })
+          await globalThis.fetch('http://dead.invalid/v1/messages', {
+            method: 'POST',
+            body: bodyStream,
+            // @ts-expect-error duplex required for ReadableStream body in undici
+            duplex: 'half',
+          })
+          yield 1
+        })(),
+    )
+
+    await assert.rejects(async () => {
+      for await (const _chunk of stream) {}
+    })
+    assert.equal(
+      marked,
+      1,
+      'the primary failure must be recorded even though this body cannot be replayed',
+    )
+  } finally {
+    await agent.close()
+    router.release()
+  }
+})
+
 test('N29: e2e apply() - llm/stream retries transient 502 and records retry count', async () => {
   const origin = await startOriginServer()
   const proxy = await startFlakyProxy({ failStatus: 502, failCount: 1 })
