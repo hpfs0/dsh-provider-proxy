@@ -48,6 +48,7 @@ import {
   type SearchProxyStrategy,
 } from './search-split.js'
 import { proxyHostProblem } from './proxy-address.js'
+import { uniqueBackupProfileIds } from './backup-profile-ids.js'
 
 /** Mirrors `PROTOCOLS` in config.ts; kept here so the browser never loads it. */
 const PROTOCOLS: readonly Protocol[] = ['http', 'https', 'socks5']
@@ -75,13 +76,7 @@ const MAX_SUPPORTED_VERSION = BACKUP_VERSION
  */
 function normalizeEndpoint(raw: Partial<DefaultProxyValue> | undefined): DefaultProxyValue {
   const value = raw ?? {}
-  const backupProfileIds = Array.isArray(value.backupProfileIds)
-    ? value.backupProfileIds
-        .filter((id): id is string => typeof id === 'string')
-        .map(id => id.trim())
-        .filter(id => id.length > 0)
-        .slice(0, 3)
-    : []
+  const backupProfileIds = uniqueBackupProfileIds(value.backupProfileIds)
   return {
     protocol: PROTOCOLS.includes(value.protocol as Protocol) ? (value.protocol as Protocol) : 'http',
     host: typeof value.host === 'string' ? value.host.trim() : '',
@@ -178,13 +173,7 @@ function normalizeHeartbeat(raw: {
  */
 function fillRoute(raw: Partial<ProviderProxyRouteValue> | undefined): ProviderProxyRouteValue {
   const value = raw ?? {}
-  const backupProfileIds = Array.isArray(value.backupProfileIds)
-    ? value.backupProfileIds
-        .filter((id): id is string => typeof id === 'string')
-        .map(id => id.trim())
-        .filter(id => id.length > 0)
-        .slice(0, 3)
-    : []
+  const backupProfileIds = uniqueBackupProfileIds(value.backupProfileIds)
   return {
     enabled: value.enabled === true,
     profileId: typeof value.profileId === 'string' ? value.profileId.trim() : '',

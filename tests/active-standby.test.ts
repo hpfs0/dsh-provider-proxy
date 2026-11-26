@@ -739,3 +739,41 @@ test('P1: deleting a preset removes it from standby lists', () => {
   assert.equal(backupIdsAfterDelete(['A'], 'B'), undefined)
   assert.equal(backupIdsAfterDelete(undefined, 'B'), undefined)
 })
+
+test('P2: duplicate standby IDs normalize to one dispatcher', async () => {
+  const route = normalizeRoute('dup', {
+    enabled: true,
+    protocol: 'http',
+    host: '127.0.0.1',
+    port: 7891,
+    backupProfileIds: ['B', 'B', 'A', 'A'],
+  })
+  assert.deepEqual(route.backupProfileIds, ['B', 'A'])
+  assert.deepEqual(
+    normalizeDefaultProxy({ backupProfileIds: ['B', 'B', 'A'] }).backupProfileIds,
+    ['B', 'A'],
+  )
+
+  const profiles = {
+    A: { protocol: 'http', host: '127.0.0.1', port: 7891 },
+    B: { protocol: 'http', host: '127.0.0.1', port: 7892 },
+  }
+  const built = buildRouteEntry(
+    'dup',
+    {
+      enabled: true,
+      profileId: 'A',
+      enableProxyFailover: true,
+      backupProfileIds: ['B', 'B'],
+    },
+    { defaultProxy: normalizeDefaultProxy({}), profiles, requireEnabled: true, localDirect: true },
+  )
+  assert.ok(built.ok, built.ok ? '' : built.problem)
+  if (!built.ok) return
+  assert.deepEqual(
+    built.entry.standbyDispatchers.map(entry => entry.profileId),
+    ['B'],
+    'a duplicate ID creates one dispatcher, not two',
+  )
+  await closeTable(new Map([['dup', built.entry]]))
+})

@@ -20,6 +20,7 @@
 import { createRequire } from 'node:module'
 
 import { proxyHostProblem } from './proxy-address.js'
+import { uniqueBackupProfileIds } from './backup-profile-ids.js'
 import { normalizeHostRulesText } from './host-rules.js'
 import {
   SEARCH_PROXY_STRATEGIES,
@@ -347,13 +348,7 @@ function plain<T>(parsed: unknown): T {
  */
 export function normalizeDefaultProxy(raw: Partial<DefaultProxyValue> | undefined): DefaultProxyValue {
   const value = plain<DefaultProxyValue>(DefaultProxy(raw ?? {}))
-  const backupProfileIds = Array.isArray(value.backupProfileIds)
-    ? value.backupProfileIds
-        .filter((id): id is string => typeof id === 'string')
-        .map(id => id.trim())
-        .filter(id => id.length > 0)
-        .slice(0, 3)
-    : []
+  const backupProfileIds = uniqueBackupProfileIds(value.backupProfileIds)
   return {
     protocol: value.protocol,
     host: value.host.trim(),
@@ -394,13 +389,7 @@ export function normalizeRoute(
   const profileId = value.profileId.trim()
   const proxyTls = value.proxyTls === true
   const proxyTlsRejectUnauthorized = value.proxyTlsRejectUnauthorized !== false
-  const backupProfileIds = Array.isArray(value.backupProfileIds)
-    ? value.backupProfileIds
-        .filter((id): id is string => typeof id === 'string')
-        .map(id => id.trim())
-        .filter(id => id.length > 0)
-        .slice(0, 3)
-    : []
+  const backupProfileIds = uniqueBackupProfileIds(value.backupProfileIds)
   const enableProxyFailover = value.enableProxyFailover === true
 
   // A disabled route is normally returned untouched: nothing has been asked of

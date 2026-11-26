@@ -454,8 +454,12 @@ export function buildRouteEntry(
   const standbyDispatchers: StandbyRouteEntry[] = []
   if (route.enableProxyFailover && Array.isArray(route.backupProfileIds)) {
     const currentBindingId = resolved.binding.kind === 'profile' ? resolved.binding.profileId : undefined
+    // `normalizeRoute` already dedupes; this second guard keeps a directly
+    // constructed RouteBuildInput from creating two dispatchers for one preset.
+    const seenStandbys = new Set<string>()
     for (const profileId of route.backupProfileIds) {
-      if (!profileId || profileId === currentBindingId) continue
+      if (!profileId || profileId === currentBindingId || seenStandbys.has(profileId)) continue
+      seenStandbys.add(profileId)
       const preset = options.profiles?.[profileId]
       if (!preset) continue
       const normalizedPreset = normalizeDefaultProxy(preset)
