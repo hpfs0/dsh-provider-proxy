@@ -13,6 +13,7 @@
  */
 
 import type { DefaultProxyValue, ProviderProxyRouteValue } from './config.js'
+import { uniqueBackupProfileIds } from './backup-profile-ids.js'
 
 /** Preset dictionary as it arrives from settings (every value may be partial). */
 export type ProfileMap = Readonly<Record<string, Partial<DefaultProxyValue> | undefined>>
@@ -118,14 +119,9 @@ export function profileNameProblem(raw: string): string | undefined {
   return undefined
 }
 
-/** Trim, drop blanks and cap a standby list at the schema limit. */
+/** Trim, drop blanks, dedupe and cap a standby list at the schema limit. */
 function normalizeBackupProfileIds(value: unknown): string[] {
-  if (!Array.isArray(value)) return []
-  return value
-    .filter((id): id is string => typeof id === 'string')
-    .map(id => id.trim())
-    .filter(id => id.length > 0)
-    .slice(0, 3)
+  return uniqueBackupProfileIds(value)
 }
 
 /** The failover settings a route will actually use after endpoint resolution. */
