@@ -163,6 +163,26 @@ test('P1-4: a streamed body is never replayed', () => {
     canReplayRequest(new Request('http://x.invalid', { method: 'POST', body: 'x' }), undefined),
     false,
   )
+  // An init object without a body does not override the Request's body.
+  assert.equal(
+    canReplayRequest(
+      new Request('http://x.invalid', { method: 'POST', body: 'x' }),
+      { signal: new AbortController().signal },
+    ),
+    false,
+  )
+  assert.equal(
+    canReplayRequest(new Request('http://x.invalid'), { signal: new AbortController().signal }),
+    true,
+  )
+  assert.equal(
+    canReplayRequest(
+      new Request('http://x.invalid', { method: 'POST', body: 'x' }),
+      { body: 'override' },
+    ),
+    true,
+    'an init body replaces the Request body and is replayable',
+  )
 })
 
 test('N18: when enableFallbackDirect is true, dead proxy triggers automatic fallback to native direct fetch', async () => {

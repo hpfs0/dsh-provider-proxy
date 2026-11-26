@@ -135,7 +135,16 @@ export function canReplayRequest(input: unknown, init: unknown): boolean {
     return true
   }
   const body = (init as { body?: unknown }).body
-  if (body === undefined || body === null) return true
+  if (body === undefined || body === null) {
+    // An init object without a body does not replace the Request's own body:
+    // `fetch(requestWithBody, { signal })` still sends the Request body, and
+    // that body is not replayable once the first attempt consumed it.
+    const request = input as { body?: unknown } | null | undefined
+    if (request !== null && typeof request === 'object' && 'body' in request) {
+      return request.body === null || request.body === undefined
+    }
+    return true
+  }
   if (typeof body === 'string') return true
   if (typeof URLSearchParams !== 'undefined' && body instanceof URLSearchParams) return true
   if (typeof Blob !== 'undefined' && body instanceof Blob) return true
