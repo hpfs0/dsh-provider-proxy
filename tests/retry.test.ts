@@ -28,7 +28,11 @@ async function startOriginServer() {
   }
 }
 
-async function startFlakyProxy(options: { failStatus?: number; failCount?: number }) {
+async function startFlakyProxy(options: {
+  failStatus?: number
+  failCount?: number
+  onHit?: () => void
+}) {
   let hits = 0
   const failStatus = options.failStatus ?? 502
   const failCount = options.failCount ?? 1
@@ -41,6 +45,8 @@ async function startFlakyProxy(options: { failStatus?: number; failCount?: numbe
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(JSON.stringify({ success: true, hits }))
     }
+    // Let the 502 reach the client and enter its backoff before aborting.
+    if (hits === 1 && options.onHit !== undefined) setTimeout(options.onHit, 200)
   })
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', () => resolve()))
   const { port } = server.address() as { port: number }
@@ -163,6 +169,60 @@ test('N29: router level - a POST with a replayable body is NOT retried on 502', 
     assert.equal(retried, 0, 'no retry callback for a non-idempotent 5xx')
     assert.deepEqual(chunks, [502], 'the final 502 is returned to the caller')
   } finally {
+    await proxy.close()
+    router.release()
+  }
+})
+
+test('N29: aborting during backoff rejects promptly and stops retries', async () => {
+  const controller = new AbortController()
+  const proxy = await startFlakyProxy({
+    failStatus: 502,
+    failCount: 10,
+    onHit: () => controller.abort(),
+  })
+  const router = acquireFetchRouter()
+  const agent = new ProxyAgent({ uri: `http://127.0.0.1:${proxy.port}` })
+  const originalRandom = Math.random
+  Math.random = () => 1
+  let retried = 0
+  const started = Date.now()
+
+  try {
+    const stream = router.wrap(
+      {
+        dispatcher: agent,
+        retryAttempts: 2,
+        retryBackoffBaseMs: 5000,
+        onRetry: () => {
+          retried += 1
+        },
+      },
+      () =>
+        (async function* () {
+          const res = await globalThis.fetch('http://abort.invalid/v1/messages', {
+            signal: controller.signal,
+          })
+          yield res.status
+        })(),
+    )
+
+    await assert.rejects(
+      async () => {
+        for await (const _chunk of stream) {
+          // the aborted request must not yield a chunk
+        }
+      },
+      (error: any) => error?.name === 'AbortError',
+      'the caller receives its abort error',
+    )
+
+    const elapsed = Date.now() - started
+    assert.equal(retried, 1, 'the 502 was seen and one retry was attempted')
+    assert.ok(elapsed < 2000, `aborted backoff must reject promptly (took ${elapsed}ms)`)
+    assert.equal(proxy.getHits(), 1, 'no second request after the abort')
+  } finally {
+    Math.random = originalRandom
     await proxy.close()
     router.release()
   }
