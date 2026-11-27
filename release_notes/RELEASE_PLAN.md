@@ -30,6 +30,7 @@
 | **v1.3.0** | Backup & Observability | P3-c、P3-e、P3-f、P3-g、P3-h、P3-i、P3-l、P3-m、P3-o、P3-p（余下） | minor：备份文档 `version` 2 → 3 | 2026-12-09 | **2026-12-11（五）** |
 | v1.3.1 | 观察期补丁 | 前三版现场反馈 | patch | 2026-12-16 | 2026-12-18（五，备用） |
 | **v1.4.0** | High Availability & Failover | N26、N29、Schema v4、Failover 继承与 UI 修复 | minor：备份 v4 + HA 行为变化 | 见发布说明 | 见发布说明 |
+| **v1.4.1** | Audit & Security Fixes | #1、审查 7 项、#2 peer 范围 | patch：5xx 重试仅限幂等 | 见发布说明 | 2026-11-27（待发布） |
 
 版本号理由：
 
@@ -118,6 +119,15 @@
 - **冻结门禁**：`npm run verify` 550 用例全绿；`npm audit --omit=dev --audit-level=high` 无漏洞；`npm pack --dry-run` 仍为 9 个文件。
 - **发布门禁**：推送分支让远端 CI 通过；完成桌面版与 `dsh web` 双环境手工冒烟。
 - **迁移提示**：v4 备份会被 1.3.x 及更早版本拒绝；降级前先导出旧版兼容备份。
+
+## 4.2 v1.4.1 — Audit & Security Fixes（补丁，准备中）
+
+基于 `v1.4.0` 与 #1 / #5 修复，范围、行为变化与验证结果见 [RELEASE_NOTES_141.md](RELEASE_NOTES_141.md)。
+
+- **范围**：#1 访问器 `fetch` 兼容；审查 7 项（备用链引用、5xx 幂等重试、搜索 claim 泄漏、Request body 可重放判断、备用 ID 去重、退避 abort、不可重放主节点记录）；#2 Cordis peer 范围。
+- **冻结门禁**：`npm run verify` 562 用例全绿；`npm audit --omit=dev --audit-level=high` 无漏洞；`npm pack --dry-run` 9 个文件。
+- **发布提示**：npm 1.4.0 未发布，1.4.1 是 1.3.0 之后第一个 npm 版本；从 `main` 发布。
+- **行为变化**：502/503/504 重试仅限幂等请求。
 
 ---
 
